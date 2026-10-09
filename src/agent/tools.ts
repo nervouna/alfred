@@ -29,8 +29,8 @@ function fail(text: string) {
   return { content: [{ type: "text" as const, text }], isError: true };
 }
 
-/** Tools bound to one WeChat user for the duration of a run. */
-export function createAlfredTools(ctx: BotContext, userId: string) {
+/** Tools bound to one WeChat user for the duration of a run; `signal` aborts when the run is stopped. */
+export function createAlfredTools(ctx: BotContext, userId: string, signal?: AbortSignal) {
   const sendFile = tool(
     "send_file",
     "Send a file from the workspace to the user in WeChat. WeChat opens Markdown, PDF, images, video and Office files; it cannot open HTML.",
@@ -120,7 +120,7 @@ export function createAlfredTools(ctx: BotContext, userId: string) {
   );
 
   // One generator per task, so the image cap applies per task.
-  const generateImages = createImageGenerator({ root: WORKSPACE_DIR });
+  const generateImages = createImageGenerator({ root: WORKSPACE_DIR, signal });
   const generateImage = tool(
     "generate_image",
     `Generate images from a text prompt with MiniMax image-01 and save them as JPEG in the workspace. Use it when the user asks for an image, or for illustrative visuals such as a report cover; never for charts or data, which you draw as inline SVG. Every call is billed, even when it fails or times out, so never retry a failed call on your own. At most ${MAX_IMAGES_PER_CALL} images per call and ${MAX_IMAGES_PER_TASK} per task. Read each image to check it before using it; send_file delivers .jpg files as WeChat image messages.`,

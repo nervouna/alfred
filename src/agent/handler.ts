@@ -131,7 +131,7 @@ export function agentOptions(params: {
     tools: BUILTIN_TOOLS,
     allowedTools: [...BUILTIN_TOOLS, ...ALFRED_TOOL_NAMES],
     permissionMode: "dontAsk",
-    mcpServers: { alfred: createAlfredTools(params.ctx, params.userId) },
+    mcpServers: { alfred: createAlfredTools(params.ctx, params.userId, params.abortController?.signal) },
     hooks: { PreToolUse: [workspaceGuard(WORKSPACE_DIR)] },
     maxTurns: MAX_TURNS,
     maxBudgetUsd: MAX_BUDGET_USD,

@@ -5,7 +5,7 @@ import path from "node:path";
 import { after, beforeEach, test } from "node:test";
 
 import { localDate } from "../files.ts";
-import { batchFiles, buildMmxArgs, createImageGenerator, slugify } from "./image.ts";
+import { batchFiles, buildMmxArgs, createImageGenerator, runMmx, slugify } from "./image.ts";
 import type { MmxResult, MmxRunner } from "./image.ts";
 
 const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "alfred-image-")));
@@ -28,13 +28,16 @@ function flag(args: string[], name: string): string | undefined {
   return i < 0 ? undefined : args[i + 1];
 }
 
-/** Stub that behaves like `mmx image generate`, recording every call. */
-function fakeMmx(result: Partial<MmxResult> = {}) {
+/** Stub that behaves like `mmx image generate`, recording every call; `gate` holds the writes back. */
+function fakeMmx(result: Partial<MmxResult> = {}, gate?: Promise<void>) {
   const calls: string[][] = [];
-  const run: MmxRunner = async (_bin, args) => {
+  const signals: (AbortSignal | undefined)[] = [];
+  const run: MmxRunner = async (_bin, args, opts) => {
     calls.push(args);
-    const outcome = { exitCode: 0, stdout: "", stderr: "", timedOut: false, ...result };
-    if (outcome.exitCode !== 0 || outcome.timedOut) return outcome;
+    signals.push(opts.signal);
+    await gate;
+    const outcome = { exitCode: 0, stdout: "", stderr: "", ...result };
+    if (outcome.exitCode !== 0 || outcome.killed) return outcome;
     const n = Number(flag(args, "--n"));
     const out = flag(args, "--out");
     const saved = out
@@ -43,7 +46,7 @@ function fakeMmx(result: Partial<MmxResult> = {}) {
     for (const f of saved) fs.writeFileSync(f, JPEG);
     return { ...outcome, stdout: JSON.stringify({ id: "t1", saved, success_count: n, failed_count: 0 }) };
   };
-  return { run, calls };
+  return { run, calls, signals };
 }
 
 test("slugify keeps letters and digits of any script and falls back to image", () => {
@@ -135,8 +138,90 @@ test("generate passes mmx errors through verbatim and warns against retrying a t
     assert.equal(err.message, `mmx failed (exit 4): ${quota}`);
     return true;
   });
-  const slow = createImageGenerator({ root, bin, run: fakeMmx({ exitCode: null, timedOut: true }).run });
+  const slow = createImageGenerator({ root, bin, run: fakeMmx({ exitCode: null, killed: "timeout" }).run });
   await assert.rejects(slow({ prompt: "x", aspectRatio: "1:1" }), /timed out.*do not retry/);
-  const silent = createImageGenerator({ root, bin, run: async () => ({ exitCode: 0, stdout: "{}", stderr: "", timedOut: false }) });
+  const silent = createImageGenerator({ root, bin, run: async () => ({ exitCode: 0, stdout: "{}", stderr: "", killed: undefined }) });
   await assert.rejects(silent({ prompt: "x", aspectRatio: "1:1" }), /without writing an image/);
+});
+
+test("generate reserves output paths while a call runs", async () => {
+  let release!: () => void;
+  const { run, calls } = fakeMmx({}, new Promise<void>((resolve) => {
+    release = () => resolve();
+  }));
+  const generate = createImageGenerator({ root, bin, run });
+  const day = path.join("images", localDate());
+  const first = generate({ prompt: "x", aspectRatio: "1:1", output: "reports/a.jpg" });
+  const firstDefault = generate({ prompt: "x", aspectRatio: "1:1" });
+  await assert.rejects(generate({ prompt: "y", aspectRatio: "1:1", output: "reports/a.jpg" }), /being generated/);
+  const secondDefault = generate({ prompt: "x", aspectRatio: "1:1" });
+  release();
+  assert.deepEqual((await first).files, ["reports/a.jpg"]);
+  assert.deepEqual((await firstDefault).files, [path.join(day, "x.jpg")]);
+  assert.deepEqual((await secondDefault).files, [path.join(day, "x-2.jpg")]);
+  assert.equal(calls.length, 3);
+  // Reservations end with the call; the file itself now blocks reuse.
+  await assert.rejects(generate({ prompt: "y", aspectRatio: "1:1", output: "reports/a.jpg" }), /already exists/);
+});
+
+test("generate passes the task signal to mmx and refuses to start once the task is stopped", async () => {
+  const controller = new AbortController();
+  const { run, calls, signals } = fakeMmx({ exitCode: null, killed: "aborted" });
+  const generate = createImageGenerator({ root, bin, run, signal: controller.signal });
+  await assert.rejects(generate({ prompt: "x", aspectRatio: "1:1" }), /stopped; mmx was terminated/);
+  assert.equal(signals[0], controller.signal);
+  controller.abort();
+  await assert.rejects(generate({ prompt: "x", aspectRatio: "1:1" }), /task was stopped/);
+  assert.equal(calls.length, 1);
+});
+
+/**
+ * Shell script standing in for the mmx wrapper: starts a grandchild, records its pid, waits.
+ * The grandchild does not hold the output pipes, so killing only the script would leave it running.
+ */
+function hangingBin(name: string): { file: string; pidFile: string } {
+  const file = path.join(tmp, name);
+  const pidFile = path.join(tmp, `${name}.pid`);
+  fs.writeFileSync(file, `#!/bin/sh\nsleep 30 >/dev/null 2>&1 &\necho $! > "${pidFile}"\nwait\n`, { mode: 0o755 });
+  return { file, pidFile };
+}
+
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function until(check: () => boolean, ms = 3000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!check()) {
+    if (Date.now() > deadline) throw new Error("condition not met in time");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
+test("runMmx kills the whole process tree on abort and on timeout", async () => {
+  const stopped = hangingBin("stopped");
+  const controller = new AbortController();
+  const pending = runMmx(stopped.file, [], { timeoutMs: 60_000, signal: controller.signal });
+  await until(() => fs.existsSync(stopped.pidFile) && fs.readFileSync(stopped.pidFile, "utf-8").trim() !== "");
+  const grandchild = Number(fs.readFileSync(stopped.pidFile, "utf-8"));
+  controller.abort();
+  assert.equal((await pending).killed, "aborted");
+  await until(() => !alive(grandchild));
+
+  const slow = hangingBin("slow");
+  const result = await runMmx(slow.file, [], { timeoutMs: 300 });
+  assert.equal(result.killed, "timeout");
+  await until(() => !alive(Number(fs.readFileSync(slow.pidFile, "utf-8"))));
+});
+
+test("runMmx returns exit codes and output, and rejects when the binary cannot start", async () => {
+  const failing = path.join(tmp, "failing");
+  fs.writeFileSync(failing, "#!/bin/sh\necho out\necho err >&2\nexit 4\n", { mode: 0o755 });
+  assert.deepEqual(await runMmx(failing, [], { timeoutMs: 10_000 }), { exitCode: 4, stdout: "out\n", stderr: "err\n", killed: undefined });
+  await assert.rejects(runMmx(path.join(tmp, "missing-bin"), [], { timeoutMs: 10_000 }), { code: "ENOENT" });
 });
