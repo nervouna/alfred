@@ -17,6 +17,23 @@ export const log = {
   error: (msg: string) => emit("error", msg),
 };
 
+/** Error message plus its cause chain; undici's "fetch failed" hides the real reason in `cause`. */
+export function describeError(err: unknown): string {
+  const parts: string[] = [];
+  let current: unknown = err;
+  for (let depth = 0; current && depth < 4; depth++) {
+    if (current instanceof Error) {
+      const code = (current as NodeJS.ErrnoException).code;
+      parts.push(code ? `${current.message} [${code}]` : current.message);
+      current = current.cause;
+    } else {
+      parts.push(String(current));
+      break;
+    }
+  }
+  return parts.join(" <- ");
+}
+
 const SECRET_FIELDS = /"(context_token|bot_token|typing_ticket|aes_key|aeskey|token)"\s*:\s*"[^"]*"/g;
 
 /** Mask credential-bearing JSON fields and truncate for logging. */

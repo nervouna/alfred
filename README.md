@@ -18,6 +18,7 @@ npm start       # run the echo bot
 npm run status  # local account and session state
 npm run push -- "hello"               # proactive message to the owner
 npm run push -- --no-context "hello"  # same, without a context token
+npm run push -- --file report.pdf "caption"  # proactive file
 ```
 
 Send `/help` to the bot in WeChat for the test commands:
@@ -34,6 +35,14 @@ Send `/help` to the bot in WeChat for the test commands:
 | `/sendback` | re-upload of the last received image/file/video |
 
 Only messages from the owner are handled; everything else is logged and dropped.
+
+### Verified behavior (2026-10-10)
+
+- Inbound text, voice (with server-side transcript), image, file and video all work; media decrypts correctly.
+- Bot-sent Markdown and PDF files open and render in WeChat. HTML files do not: WeChat refuses to open them.
+- In-message Markdown renders, except images.
+- Outbound voice messages are accepted by the server but never shown, so audio must go out as a file.
+- Still open: whether a proactive push works after 24h without user messages.
 
 ## State and files
 

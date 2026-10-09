@@ -11,7 +11,7 @@ import { downloadInboundMedia, imageExtension, parseMessage } from "./ilink/inbo
 import type { InboundMedia } from "./ilink/inbound.ts";
 import { sendMedia } from "./ilink/send.ts";
 import type { WeixinMessage } from "./ilink/types.ts";
-import { log, mask } from "./log.ts";
+import { describeError, log, mask } from "./log.ts";
 import { WORKSPACE_DIR } from "./store.ts";
 
 const MAX_DELAY_S = 24 * 60 * 60;
@@ -172,7 +172,7 @@ async function handleCommand(ctx: BotContext, from: string, cmd: string, arg: st
       // Not queued: other messages keep flowing while this waits.
       setTimeout(() => {
         reply(ctx, from, `delayed reply: asked at ${askedAt.toLocaleTimeString()}, waited ${seconds}s`).catch((err) =>
-          log.error(`delayed reply after ${seconds}s failed: ${String(err)}`),
+          log.error(`delayed reply after ${seconds}s failed: ${describeError(err)}`),
         );
       }, seconds * 1000);
       return reply(ctx, from, `ok, replying in ${seconds}s`);
@@ -238,8 +238,8 @@ export const echoHandler: MessageHandler = async (ctx: BotContext, msg: WeixinMe
       try {
         lines.push(await saveMedia(ctx, from, m));
       } catch (err) {
-        log.error(`saving ${m.kind} failed: ${String(err)}`);
-        lines.push(`${m.kind}: failed to save (${String(err)})`);
+        log.error(`saving ${m.kind} failed: ${describeError(err)}`);
+        lines.push(`${m.kind}: failed to save (${describeError(err)})`);
       }
     }
     if (text) lines.push(media.some((m) => m.kind === "voice") ? `transcript: ${text}` : `echo: ${text}`);
@@ -247,7 +247,7 @@ export const echoHandler: MessageHandler = async (ctx: BotContext, msg: WeixinMe
     if (lines.length === 0) lines.push(`received an unsupported message (item types ${msg.item_list?.map((i) => i.type).join(",")})`);
     await reply(ctx, from, lines.join("\n"));
   } catch (err) {
-    log.error(`echo handler error: ${err instanceof Error ? err.stack : String(err)}`);
-    await reply(ctx, from, `error: ${String(err)}`).catch(() => {});
+    log.error(`echo handler error: ${describeError(err)}`);
+    await reply(ctx, from, `error: ${describeError(err)}`).catch(() => {});
   }
 };

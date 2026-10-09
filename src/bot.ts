@@ -1,4 +1,4 @@
-import { log, mask } from "./log.ts";
+import { describeError, log, mask } from "./log.ts";
 import { DEFAULT_CDN_BASE_URL, IlinkApiError, IlinkClient, STALE_TOKEN_ERRCODE } from "./ilink/client.ts";
 import { sendText } from "./ilink/send.ts";
 import { MessageType, TypingStatus } from "./ilink/types.ts";
@@ -63,7 +63,7 @@ export class Typing {
       }
       log.warn(`getConfig returned no typing ticket: ret=${resp.ret} errmsg=${resp.errmsg ?? ""}`);
     } catch (err) {
-      log.warn(`getConfig failed: ${String(err)}`);
+      log.warn(`getConfig failed: ${describeError(err)}`);
     }
     return undefined;
   }
@@ -73,7 +73,7 @@ export class Typing {
     const ticket = await this.ticket(userId);
     if (!ticket) return async () => {};
     const send = (status: number) =>
-      this.client.sendTyping(userId, ticket, status).catch((err) => log.warn(`sendTyping failed: ${String(err)}`));
+      this.client.sendTyping(userId, ticket, status).catch((err) => log.warn(`sendTyping failed: ${describeError(err)}`));
     await send(TypingStatus.TYPING);
     const timer = setInterval(() => void send(TypingStatus.TYPING), TYPING_KEEPALIVE_MS);
     return async () => {
@@ -114,7 +114,7 @@ export async function runBot(handler: MessageHandler, signal: AbortSignal): Prom
     if (msg.context_token) tokens.set(from, msg.context_token);
     const next = (queues.get(from) ?? Promise.resolve())
       .then(() => handler(ctx, msg))
-      .catch((err) => log.error(`handler failed: ${err instanceof Error ? err.stack : String(err)}`));
+      .catch((err) => log.error(`handler failed: ${describeError(err)}`));
     queues.set(from, next);
   };
 
@@ -122,7 +122,7 @@ export async function runBot(handler: MessageHandler, signal: AbortSignal): Prom
     const resp = await client.notifyStart();
     if (resp.ret) log.warn(`notifyStart ret=${resp.ret} errmsg=${resp.errmsg ?? ""}`);
   } catch (err) {
-    log.warn(`notifyStart failed: ${String(err)}`);
+    log.warn(`notifyStart failed: ${describeError(err)}`);
   }
   log.info(`Alfred running: bot=${account.botId} owner=${mask(account.ownerUserId)} workspace=${WORKSPACE_DIR}`);
 
@@ -152,7 +152,7 @@ export async function runBot(handler: MessageHandler, signal: AbortSignal): Prom
       if (signal.aborted) break;
       failures++;
       const backoff = failures >= MAX_CONSECUTIVE_FAILURES ? BACKOFF_DELAY_MS : RETRY_DELAY_MS;
-      log.error(`getUpdates error (${failures}/${MAX_CONSECUTIVE_FAILURES}): ${String(err)}; retry in ${backoff / 1000}s`);
+      log.error(`getUpdates error (${failures}/${MAX_CONSECUTIVE_FAILURES}): ${describeError(err)}; retry in ${backoff / 1000}s`);
       if (failures >= MAX_CONSECUTIVE_FAILURES) failures = 0;
       await sleep(backoff, signal);
     }
@@ -163,6 +163,6 @@ export async function runBot(handler: MessageHandler, signal: AbortSignal): Prom
   try {
     await client.notifyStop();
   } catch (err) {
-    log.warn(`notifyStop failed: ${String(err)}`);
+    log.warn(`notifyStop failed: ${describeError(err)}`);
   }
 }

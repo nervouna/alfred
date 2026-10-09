@@ -5,7 +5,7 @@ import readline from "node:readline/promises";
 
 import qrcode from "qrcode-terminal";
 
-import { log, mask } from "../log.ts";
+import { describeError, log, mask } from "../log.ts";
 import { DEFAULT_BASE_URL, getText, postJson } from "./client.ts";
 import type { QrCodeResp, QrStatusResp } from "./types.ts";
 
@@ -39,7 +39,7 @@ async function pollStatus(baseUrl: string, qrcodeValue: string, verifyCode?: str
     return JSON.parse(await getText({ baseUrl, endpoint, timeoutMs: QR_POLL_TIMEOUT_MS, label: "qrStatus" }));
   } catch (err) {
     // Long-poll timeouts and gateway hiccups just mean "keep waiting".
-    log.debug(`qrStatus poll error, retrying: ${String(err)}`);
+    log.debug(`qrStatus poll error, retrying: ${describeError(err)}`);
     return { status: "wait" };
   }
 }

@@ -3,7 +3,7 @@
 
 import crypto from "node:crypto";
 
-import { log } from "../log.ts";
+import { describeError, log } from "../log.ts";
 import type { IlinkClient } from "./client.ts";
 import type { CDNMedia, UploadMediaType } from "./types.ts";
 
@@ -122,7 +122,7 @@ export async function uploadMedia(params: {
     } catch (err) {
       if ((err as { fatal?: boolean }).fatal) throw err;
       lastError = err;
-      log.warn(`CDN upload attempt ${attempt}/${UPLOAD_MAX_ATTEMPTS} failed: ${String(err)}`);
+      log.warn(`CDN upload attempt ${attempt}/${UPLOAD_MAX_ATTEMPTS} failed: ${describeError(err)}`);
     }
   }
   throw lastError instanceof Error ? lastError : new Error("CDN upload failed");
