@@ -291,6 +291,8 @@ export function createAgentHandler(): MessageHandler {
           `time=${humanAge(Date.now() - run.startedAt)} tools=[${toolSummary(run.toolCounts)}]`,
       );
     } catch (err) {
+      // Close before the first await, so a message arriving while the error reply goes out is queued for the next task.
+      run.input.close();
       log.error(`agent run failed: ${describeError(err)}`);
       const missed = run.input.followUps;
       const note = missed ? `\n期间追加的 ${missed} 条消息没有处理，需要的话请重发。` : "";
