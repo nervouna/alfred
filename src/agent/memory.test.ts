@@ -138,6 +138,31 @@ test("transcript parser keeps user messages and final replies, drops tool result
   assert.deepEqual(messages.map((m) => m.end), [endOf(1), endOf(11)]);
 });
 
+test("transcript parser keeps follow-ups folded into a running turn, not task notifications", () => {
+  const e = (o: object) => JSON.stringify({ sessionId: "s1", timestamp: "2026-10-10T01:02:03.000Z", ...o });
+  const queued = (commandMode: string, prompt: string) =>
+    e({ type: "attachment", attachment: { type: "queued_command", prompt, source_uuid: "u2", commandMode } });
+  const lines = [
+    e({ type: "user", message: { role: "user", content: [{ type: "text", text: "整理 notes/" }] } }),
+    e({ type: "assistant", message: { id: "a1", stop_reason: "tool_use", content: [{ type: "tool_use", id: "t1", name: "Read", input: {} }] } }),
+    e({ type: "user", toolUseResult: {}, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: INJECTION }] } }),
+    e({ type: "attachment", attachment: { type: "budget_usd", used: 0.01 } }),
+    queued("prompt", "另外我在上海工作"),
+    queued("task-notification", INJECTION),
+    e({ type: "queue-operation", operation: "remove", content: "另外我在上海工作" }),
+    e({ type: "assistant", message: { id: "a2", stop_reason: "end_turn", content: [{ type: "text", text: "整理好了；已记下你在上海。" }] } }),
+  ];
+  const { messages } = parseTranscript(Buffer.from(`${lines.join("\n")}\n`));
+  assert.deepEqual(
+    messages.map((m) => [m.role, m.text]),
+    [
+      ["user", "整理 notes/"],
+      ["user", "另外我在上海工作"],
+      ["assistant", "整理好了；已记下你在上海。"],
+    ],
+  );
+});
+
 test("transcript reader resumes from the stored offset idempotently", () => {
   const file = path.join(tmp, "resume.jsonl");
   fs.writeFileSync(file, `${taskLines("第一个任务", "第一个回答", "m1").join("\n")}\n`);

@@ -59,9 +59,10 @@ export function resumePrevious(state: AgentUserState, now: number): Partial<Agen
 }
 
 /**
- * Spend after a run whose result reported `reportedUsd`. The SDK reports a running
- * total for the session: a resumed session continues from the total its transcript
- * saved, and starts again from zero when the transcript saved none.
+ * Spend after a result that reported `reportedUsd`. The SDK reports a running
+ * total for the session: it grows across the turns of a streaming query, a resumed
+ * session continues from the total its transcript saved, and it starts again from
+ * zero when the transcript saved none.
  */
 export function accountRun(
   state: AgentUserState,

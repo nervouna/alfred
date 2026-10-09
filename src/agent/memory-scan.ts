@@ -63,6 +63,7 @@ interface TranscriptEntry {
   isVisibleInTranscriptOnly?: boolean;
   isApiErrorMessage?: boolean;
   toolUseResult?: unknown;
+  attachment?: { type?: string; commandMode?: string; prompt?: unknown };
   message?: {
     id?: string;
     role?: string;
@@ -75,15 +76,14 @@ function clip(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max)}…`;
 }
 
-/** The text of a message the user typed; undefined for tool results, meta and system entries. */
-function userText(e: TranscriptEntry): string | undefined {
-  if (e.toolUseResult !== undefined || e.isMeta || e.isCompactSummary || e.isVisibleInTranscriptOnly) return undefined;
-  const content = e.message?.content;
+/** Plain text of message content; undefined when it holds anything but text blocks (tool results, images). */
+function contentText(content: unknown): string | undefined {
   let text: string;
   if (typeof content === "string") text = content;
   else if (Array.isArray(content)) {
-    if (content.some((b) => b.type !== "text")) return undefined;
-    text = content.map((b) => b.text ?? "").join("\n");
+    const blocks = content as Array<{ type?: string; text?: string }>;
+    if (blocks.some((b) => b.type !== "text")) return undefined;
+    text = blocks.map((b) => b.text ?? "").join("\n");
   } else return undefined;
   text = text.trim();
   if (!text || text.startsWith("[Request interrupted")) return undefined;
@@ -91,7 +91,23 @@ function userText(e: TranscriptEntry): string | undefined {
 }
 
 /**
- * Keeps user messages and the text of assistant turns that ended the run
+ * The text of a message the user typed; undefined for tool results, meta and
+ * system entries. A follow-up sent while the agent was working is folded into
+ * the running turn and recorded as a `queued_command` attachment rather than a
+ * user entry; only its "prompt" mode is the user's (task notifications use
+ * other modes).
+ */
+function userText(e: TranscriptEntry): string | undefined {
+  if (e.type === "attachment") {
+    const a = e.attachment;
+    return a?.type === "queued_command" && a.commandMode === "prompt" ? contentText(a.prompt) : undefined;
+  }
+  if (e.toolUseResult !== undefined || e.isMeta || e.isCompactSummary || e.isVisibleInTranscriptOnly) return undefined;
+  return contentText(e.message?.content);
+}
+
+/**
+ * Keeps user messages (follow-ups folded into a running turn included) and the text of assistant turns that ended the run
  * (`stop_reason: end_turn`); drops tool calls, tool results, thinking,
  * sidechains, attachments and bookkeeping entries. Texts are clipped, so a
  * long message cannot crowd out the rest of a scan.
@@ -117,9 +133,10 @@ class TranscriptParser {
       return false;
     }
     if (e.isSidechain) return false;
-    if (e.type === "user") {
-      this.lastAssistantId = undefined;
+    if (e.type === "user" || e.type === "attachment") {
       const t = userText(e);
+      // Other attachments can sit between the entries of one assistant message.
+      if (e.type === "user" || t) this.lastAssistantId = undefined;
       if (!t) return false;
       this.add("user", t, e.timestamp, end);
       return true;
