@@ -210,13 +210,49 @@ test("scan extracts once per new entry, merges into memory and skips when nothin
   fs.appendFileSync(transcript, `${taskLines("第三个", "好。", "m3").join("\n")}\n`);
   const before = JSON.parse(fs.readFileSync(stateFile, "utf-8")).offsets[transcript];
   const failing = { workspace: ws, configDir, stateFile, extractFn: async () => Promise.reject(new Error("boom")) };
-  await assert.rejects(scanTranscripts(failing), /boom/);
-  assert.equal(JSON.parse(fs.readFileSync(stateFile, "utf-8")).offsets[transcript], before);
-  await assert.rejects(scanTranscripts(failing), /boom/);
-  assert.equal(JSON.parse(fs.readFileSync(stateFile, "utf-8")).offsets[transcript], before);
-  // The third failure in a row gives up on these entries.
+  const offset = () => JSON.parse(fs.readFileSync(stateFile, "utf-8")).offsets[transcript];
+  await assert.rejects(scanTranscripts(failing), /^Error: boom$/);
+  await assert.rejects(scanTranscripts(failing), /^Error: boom$/);
+  assert.equal(offset(), before);
+  // New entries make it a different batch, so the failure count starts over.
+  fs.appendFileSync(transcript, `${taskLines("第四个", "好。", "m4").join("\n")}\n`);
+  await assert.rejects(scanTranscripts(failing), /^Error: boom$/);
+  await assert.rejects(scanTranscripts(failing), /^Error: boom$/);
+  assert.equal(offset(), before);
+  // The third failure of the same batch skips it.
   await assert.rejects(scanTranscripts(failing), /failed 3 times in a row/);
-  assert.equal(JSON.parse(fs.readFileSync(stateFile, "utf-8")).offsets[transcript], fs.statSync(transcript).size);
+  assert.equal(offset(), fs.statSync(transcript).size);
+});
+
+test("transcript reader streams in bounded chunks, skips oversized lines and stops at the character budget", () => {
+  const file = path.join(tmp, "stream.jsonl");
+  const huge = JSON.stringify({ type: "user", toolUseResult: {}, message: { role: "user", content: [{ type: "tool_result", content: "x".repeat(5000) }] } });
+  const lines = [...taskLines("第一个任务", "第一个回答", "m1"), huge, ...taskLines("第二个任务", "第二个回答", "m2")];
+  fs.writeFileSync(file, `${lines.join("\n")}\n`);
+  const size = fs.statSync(file).size;
+  const whole = parseTranscript(fs.readFileSync(file));
+  const texts = ["第一个任务", "第一个回答\n（完）", "第二个任务", "第二个回答\n（完）"];
+  assert.deepEqual(whole.messages.map((m) => m.text), texts);
+
+  // Small chunks split lines and the oversized tool-result line is skipped unparsed.
+  const small = readTranscript(file, 0, { chunkBytes: 64, maxLineBytes: 2000 });
+  assert.deepEqual(small.messages, whole.messages);
+  assert.equal(small.next, size);
+
+  // An oversized line still being written is left for the next read.
+  fs.appendFileSync(file, huge.slice(0, 3000));
+  assert.equal(readTranscript(file, small.next, { chunkBytes: 64, maxLineBytes: 2000 }).next, size);
+  fs.writeFileSync(file, `${lines.join("\n")}\n`);
+
+  // The budget stops before the message that would exceed it; the next read resumes at that message.
+  const budget = "第一个任务".length + "第一个回答\n（完）".length;
+  const first = readTranscript(file, 0, { maxChars: budget, chunkBytes: 64 });
+  assert.deepEqual(first.messages.map((m) => m.text), texts.slice(0, 2));
+  const rest = readTranscript(file, first.next, { chunkBytes: 64 });
+  assert.deepEqual(rest.messages.map((m) => m.text), texts.slice(2));
+  assert.equal(rest.next, size);
+  // The first message is kept even when it alone is over the budget.
+  assert.equal(readTranscript(file, 0, { maxChars: 1 }).messages.length, 1);
 });
 
 test("applyCandidates rejects bad names and secrets, and never overwrites on create", () => {
@@ -307,4 +343,20 @@ test("memory lock: scans are exclusive, tasks share, stale locks are taken over"
   fs.writeFileSync(file, JSON.stringify({ pid: 2 ** 22 + 12345, holder: "scan", since: "2026-01-01" }));
   assert.ok(a.tryAcquire("scan"));
   a.release();
+});
+
+test("memory lock: a waiting task gives up when it is stopped", async () => {
+  const file = path.join(tmp, "abort.lock");
+  const scan = new MemoryLock(file);
+  const task = new MemoryLock(file);
+  assert.ok(scan.tryAcquire("scan"));
+  const abort = new AbortController();
+  const started = Date.now();
+  const waiting = task.acquire("task", 60_000, abort.signal, 10_000);
+  setTimeout(() => abort.abort(), 20);
+  assert.equal(await waiting, false);
+  assert.ok(Date.now() - started < 1_000, "returns as soon as the signal aborts, not after a poll interval");
+  scan.release();
+  assert.equal(await task.acquire("task", 1_000), true);
+  task.release();
 });

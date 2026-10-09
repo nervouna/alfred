@@ -243,7 +243,11 @@ export function createAgentHandler(): MessageHandler {
 
     let locked = false;
     try {
-      locked = await memoryLock.acquire("task", SCAN_TIMEOUT_MS + 30_000);
+      locked = await memoryLock.acquire("task", SCAN_TIMEOUT_MS + 30_000, run.abort.signal);
+      if (run.stopped) {
+        log.info("agent run stopped by user while waiting for a memory scan");
+        return;
+      }
       if (!locked) log.warn(`memory lock still held by ${JSON.stringify(memoryLock.current())}; running the task anyway`);
       let before = store.get(userId);
       const idleSession = before.sessionId;

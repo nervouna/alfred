@@ -43,7 +43,7 @@ const MAX_USER_CHARS = 4_000;
 const MAX_ASSISTANT_CHARS = 1_500;
 const MAX_EXISTING_CHARS = 30_000;
 const MAX_CANDIDATES = 10;
-/** After this many failed extractions in a row, the pending entries are skipped so one bad batch cannot cost money every hour. */
+/** A batch that fails this many times in a row is skipped, so one bad batch cannot cost money every hour. */
 const MAX_FAILURES = 3;
 
 export interface TranscriptMessage {
@@ -91,74 +91,141 @@ function userText(e: TranscriptEntry): string | undefined {
 }
 
 /**
- * Parse the complete JSONL lines in `chunk` (bytes read from `base` onwards).
  * Keeps user messages and the text of assistant turns that ended the run
  * (`stop_reason: end_turn`); drops tool calls, tool results, thinking,
- * sidechains, attachments and bookkeeping entries. A trailing partial line is
- * not consumed, so the next read starts at it.
+ * sidechains, attachments and bookkeeping entries. Texts are clipped, so a
+ * long message cannot crowd out the rest of a scan.
  */
-export function parseTranscript(chunk: Buffer, base = 0): { messages: TranscriptMessage[]; next: number } {
-  const messages: TranscriptMessage[] = [];
-  const lastNewline = chunk.lastIndexOf(0x0a);
-  if (lastNewline < 0) return { messages, next: base };
-  let lastAssistantId: string | undefined;
-  let pos = 0;
-  while (pos <= lastNewline) {
-    const eol = chunk.indexOf(0x0a, pos);
-    const line = chunk.subarray(pos, eol).toString("utf-8");
-    pos = eol + 1;
-    const end = base + pos;
+class TranscriptParser {
+  readonly messages: TranscriptMessage[] = [];
+  /** Characters across all kept messages. */
+  chars = 0;
+  private lastAssistantId?: string;
+
+  private add(role: TranscriptMessage["role"], text: string, timestamp: string | undefined, end: number): void {
+    const clipped = clip(text, role === "user" ? MAX_USER_CHARS : MAX_ASSISTANT_CHARS);
+    this.messages.push({ role, text: clipped, timestamp, end });
+    this.chars += clipped.length;
+  }
+
+  /** Parse one JSONL line that ends at byte offset `end`. Returns true when it started a new message. */
+  line(text: string, end: number): boolean {
     let e: TranscriptEntry;
     try {
-      e = JSON.parse(line) as TranscriptEntry;
+      e = JSON.parse(text) as TranscriptEntry;
     } catch {
-      continue;
+      return false;
     }
-    if (e.isSidechain) continue;
+    if (e.isSidechain) return false;
     if (e.type === "user") {
-      lastAssistantId = undefined;
-      const text = userText(e);
-      if (text) messages.push({ role: "user", text, timestamp: e.timestamp, end });
-    } else if (e.type === "assistant") {
-      const msg = e.message;
-      if (e.isApiErrorMessage || msg?.stop_reason !== "end_turn" || !Array.isArray(msg.content)) continue;
-      const text = msg.content
-        .filter((b) => b.type === "text")
-        .map((b) => b.text ?? "")
-        .join("\n")
-        .trim();
-      if (!text) continue;
-      // The transcript stores each content block of one API message as its own entry.
-      const prev = messages.at(-1);
-      if (prev?.role === "assistant" && msg.id && msg.id === lastAssistantId) {
-        prev.text += `\n${text}`;
-        prev.end = end;
-      } else {
-        messages.push({ role: "assistant", text, timestamp: e.timestamp, end });
-      }
-      lastAssistantId = msg.id;
+      this.lastAssistantId = undefined;
+      const t = userText(e);
+      if (!t) return false;
+      this.add("user", t, e.timestamp, end);
+      return true;
     }
+    if (e.type !== "assistant") return false;
+    const msg = e.message;
+    if (e.isApiErrorMessage || msg?.stop_reason !== "end_turn" || !Array.isArray(msg.content)) return false;
+    const t = msg.content
+      .filter((b) => b.type === "text")
+      .map((b) => b.text ?? "")
+      .join("\n")
+      .trim();
+    if (!t) return false;
+    // The transcript stores each content block of one API message as its own entry.
+    const prev = this.messages.at(-1);
+    const continues = prev?.role === "assistant" && msg.id !== undefined && msg.id === this.lastAssistantId;
+    this.lastAssistantId = msg.id;
+    if (prev && continues) {
+      this.chars -= prev.text.length;
+      prev.text = clip(`${prev.text}\n${t}`, MAX_ASSISTANT_CHARS);
+      prev.end = end;
+      this.chars += prev.text.length;
+      return false;
+    }
+    this.add("assistant", t, e.timestamp, end);
+    return true;
   }
-  return { messages, next: base + lastNewline + 1 };
+
+  /** Drop the newest message, which `line` just started. */
+  dropLast(): void {
+    this.chars -= this.messages.pop()?.text.length ?? 0;
+  }
 }
 
-/** Read and parse a transcript from byte `offset`. */
-export function readTranscript(file: string, offset: number): { messages: TranscriptMessage[]; next: number } {
+/** Parse the complete JSONL lines in `chunk` (bytes read from `base` onwards). A trailing partial line is not consumed. */
+export function parseTranscript(chunk: Buffer, base = 0): { messages: TranscriptMessage[]; next: number } {
+  const parser = new TranscriptParser();
+  let pos = 0;
+  for (let eol = chunk.indexOf(0x0a); eol >= 0; eol = chunk.indexOf(0x0a, pos)) {
+    parser.line(chunk.subarray(pos, eol).toString("utf-8"), base + eol + 1);
+    pos = eol + 1;
+  }
+  return { messages: parser.messages, next: base + pos };
+}
+
+export interface ReadLimits {
+  /** Stop before a new message would take the kept text past this many characters (the first message is always kept). */
+  maxChars?: number;
+  chunkBytes?: number;
+  /** Longer lines are skipped unparsed: typed messages and replies are far smaller, bulky tool results are not. */
+  maxLineBytes?: number;
+}
+
+/**
+ * Read and parse a transcript from byte `offset` in bounded chunks, so memory
+ * use does not grow with the transcript. `next` is where the following read
+ * should start: past the last complete line consumed, or at the line of the
+ * message that did not fit in `maxChars`.
+ */
+export function readTranscript(file: string, offset: number, limits: ReadLimits = {}): { messages: TranscriptMessage[]; next: number } {
+  const { maxChars = Infinity, chunkBytes = 1024 * 1024, maxLineBytes = 1024 * 1024 } = limits;
+  const parser = new TranscriptParser();
+  const buf = Buffer.alloc(chunkBytes);
+  let carry: Buffer[] = [];
+  let carryBytes = 0;
+  let skipping = false;
+  let pos = offset;
+  let next = offset;
   const fd = fs.openSync(file, "r");
   try {
-    const size = fs.fstatSync(fd).size;
-    if (size <= offset) return { messages: [], next: offset };
-    const buf = Buffer.alloc(size - offset);
-    let read = 0;
-    while (read < buf.length) {
-      const n = fs.readSync(fd, buf, read, buf.length - read, offset + read);
-      if (n === 0) break;
-      read += n;
+    for (let n = fs.readSync(fd, buf, 0, chunkBytes, pos); n > 0; n = fs.readSync(fd, buf, 0, chunkBytes, pos)) {
+      const chunk = buf.subarray(0, n);
+      let start = 0;
+      for (let eol = chunk.indexOf(0x0a); eol >= 0; eol = chunk.indexOf(0x0a, start)) {
+        const lineEnd = pos + eol + 1;
+        if (!skipping) {
+          const tail = chunk.subarray(start, eol);
+          const line = carryBytes ? Buffer.concat([...carry, tail]) : tail;
+          if (line.length <= maxLineBytes && parser.line(line.toString("utf-8"), lineEnd)) {
+            if (parser.chars > maxChars && parser.messages.length > 1) {
+              parser.dropLast();
+              return { messages: parser.messages, next };
+            }
+          }
+        }
+        carry = [];
+        carryBytes = 0;
+        skipping = false;
+        next = lineEnd;
+        start = eol + 1;
+      }
+      if (!skipping && start < n) {
+        carry.push(Buffer.from(chunk.subarray(start)));
+        carryBytes += n - start;
+        if (carryBytes > maxLineBytes) {
+          carry = [];
+          carryBytes = 0;
+          skipping = true;
+        }
+      }
+      pos += n;
     }
-    return parseTranscript(buf.subarray(0, read), offset);
   } finally {
     fs.closeSync(fd);
   }
+  return { messages: parser.messages, next };
 }
 
 /** Claude Code keys a project's transcripts by its working directory with every non-alphanumeric character replaced. */
@@ -177,8 +244,13 @@ interface ScanState {
   offsets: Record<string, number>;
   lastScanAt?: string;
   totalCostUsd: number;
-  /** Failed extractions in a row on the current entries. */
-  failures?: number;
+  /** The batch whose extraction last failed: the offsets it would have advanced to, and how often it failed. */
+  failed?: { ends: Record<string, number>; count: number };
+}
+
+function sameOffsets(a: Record<string, number>, b: Record<string, number>): boolean {
+  const keys = Object.keys(a);
+  return keys.length === Object.keys(b).length && keys.every((k) => a[k] === b[k]);
 }
 
 const CandidateSchema = z.object({
@@ -360,7 +432,7 @@ export interface ScanOptions {
 
 /**
  * Scan transcripts for new messages and merge extracted memories. Offsets
- * advance only after a successful extraction, so a failed scan is retried
+ * advance only after a successful extraction, so a failed batch is retried
  * (up to MAX_FAILURES times). The caller must hold the memory lock.
  */
 export async function scanTranscripts(opts: ScanOptions): Promise<ScanReport> {
@@ -388,29 +460,20 @@ export async function scanTranscripts(opts: ScanOptions): Promise<ScanReport> {
     if (stat.size < offset) offset = 0; // rewritten
     if (stat.size === offset) continue;
     if (chars >= MAX_CONVERSATION_CHARS) break;
-    const read = readTranscript(file, offset);
+    // Whatever does not fit waits for the next scan.
+    const read = readTranscript(file, offset, { maxChars: MAX_CONVERSATION_CHARS - chars });
     scannedFiles++;
-    let next = read.next;
-    let lastEnd = offset;
-    for (const m of read.messages) {
-      const text = clip(m.text, m.role === "user" ? MAX_USER_CHARS : MAX_ASSISTANT_CHARS);
-      if (chars + text.length > MAX_CONVERSATION_CHARS && messages.length) {
-        next = lastEnd; // the rest of this file waits for the next scan
-        break;
-      }
-      messages.push({ ...m, text });
-      chars += text.length;
-      lastEnd = m.end;
-    }
-    offsets[file] = next;
+    messages.push(...read.messages);
+    for (const m of read.messages) chars += m.text.length;
+    offsets[file] = read.next;
   }
 
-  const save = (costUsd: number, failures = 0) =>
+  const save = (costUsd: number, failed?: ScanState["failed"]) =>
     writeJson(stateFile, {
-      offsets: failures ? before : offsets,
+      offsets: failed ? before : offsets,
       lastScanAt: new Date().toISOString(),
       totalCostUsd: state.totalCostUsd + costUsd,
-      failures,
+      failed,
     } satisfies ScanState);
 
   if (!messages.some((m) => m.role === "user")) {
@@ -429,12 +492,13 @@ export async function scanTranscripts(opts: ScanOptions): Promise<ScanReport> {
       ? await opts.extractFn(prompt)
       : await extract(prompt, opts.budgetUsd ?? MEMORY_SCAN_BUDGET_USD, signal);
   } catch (err) {
-    const failures = (state.failures ?? 0) + 1;
-    if (failures >= MAX_FAILURES) {
+    // Only retries of exactly the same batch count; new entries reset the count.
+    const count = state.failed && sameOffsets(state.failed.ends, offsets) ? state.failed.count + 1 : 1;
+    if (count >= MAX_FAILURES) {
       save(0);
-      throw new Error(`${describeError(err)}; failed ${failures} times in a row, skipping these entries`);
+      throw new Error(`${describeError(err)}; this batch failed ${count} times in a row, skipping it`);
     }
-    save(0, failures);
+    save(0, { ends: offsets, count });
     throw err;
   }
   const { candidates, costUsd } = extracted;

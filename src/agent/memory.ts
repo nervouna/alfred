@@ -224,12 +224,20 @@ export class MemoryLock {
     return false;
   }
 
-  /** Poll until the lock is free or `timeoutMs` passes. */
-  async acquire(holder: LockHolder, timeoutMs: number, pollMs = 500): Promise<boolean> {
+  /** Poll until the lock is free; false when `timeoutMs` passes or `signal` aborts first. */
+  async acquire(holder: LockHolder, timeoutMs: number, signal?: AbortSignal, pollMs = 500): Promise<boolean> {
     const deadline = Date.now() + timeoutMs;
     while (!this.tryAcquire(holder)) {
-      if (Date.now() >= deadline) return false;
-      await new Promise((resolve) => setTimeout(resolve, pollMs));
+      if (signal?.aborted || Date.now() >= deadline) return false;
+      await new Promise<void>((resolve) => {
+        const done = () => {
+          clearTimeout(timer);
+          signal?.removeEventListener("abort", done);
+          resolve();
+        };
+        const timer = setTimeout(done, pollMs);
+        signal?.addEventListener("abort", done, { once: true });
+      });
     }
     return true;
   }
