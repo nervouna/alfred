@@ -14,6 +14,7 @@
     "push": "node src/cli.ts push",
     "status": "node src/cli.ts status",
     "setup:pdf": "node src/cli.ts setup-pdf",
+    "memory-scan": "node src/cli.ts memory-scan",
     "check": "tsc --noEmit",
     "test": "node --test \"src/**/*.test.ts\"",
     "smoke": "node scripts/agent-smoke.ts"

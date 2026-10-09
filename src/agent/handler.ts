@@ -23,9 +23,11 @@ import {
   BUILTIN_TOOLS,
   MAX_BUDGET_USD,
   MAX_TURNS,
+  MEMORY_SCAN_MINUTES,
   MODELS,
   SESSION_IDLE_HOURS,
   agentEnv,
+  checkMemoryScanSettings,
   checkSessionIdleHours,
   isModelKey,
   systemPrompt,
@@ -33,15 +35,19 @@ import {
 import type { ModelKey } from "./config.ts";
 import { workspaceGuard } from "./guard.ts";
 import { TaskInput, answeredBy } from "./input.ts";
+import { MEMORY_LOCK_FILE, MemoryScanScheduler, SCAN_TIMEOUT_MS, scanTranscripts } from "./memory-scan.ts";
+import { MemoryLock, capIndex, loadMemories, syncMemoryIndex } from "./memory.ts";
 import { RULES_FILE, RulesTracker, rulesChangeNotice, rulesDisclosure, seedRules, snapshotRules } from "./rules.ts";
-import { NO_SESSION, accountRun, onSessionRetired, resumePrevious, retire, rotationDueAt, shouldRotate } from "./session.ts";
+import { NO_SESSION, accountRun, resumePrevious, retire, rotationDueAt, shouldRotate } from "./session.ts";
 import type { RetireReason } from "./session.ts";
 import { AgentStateStore } from "./state.ts";
 import type { AgentUserState } from "./state.ts";
 import { ALFRED_TOOL_NAMES, createAlfredTools } from "./tools.ts";
 
 const PROGRESS_INTERVAL_MS = 3 * 60_000;
-const WORKSPACE_SUBDIRS = ["inbox", "reports", "notes", "images", ".trash"];
+const WORKSPACE_SUBDIRS = ["inbox", "reports", "notes", "images", "memory", ".trash"];
+/** Memories listed in the /memory reply; the full index is in memory/MEMORY.md. */
+const MEMORY_REPLY_LINES = 50;
 
 const TOOL_LABELS: Record<string, string> = {
   WebSearch: "搜索",
@@ -61,6 +67,7 @@ const HELP = `Alfred 调研助手
 /resume  切回上一个会话
 /stop  停止当前任务
 /model [sonnet|opus|haiku]  查看或切换模型
+/memory  查看长期记忆（要记住、修改或忘记什么，直接说）
 /status  当前状态和花费
 /help  显示帮助`;
 
@@ -156,6 +163,10 @@ export function agentOptions(params: {
   resume?: string;
   abortController?: AbortController;
 }): Options {
+  const memory = capIndex(syncMemoryIndex(WORKSPACE_DIR));
+  if (memory.lines.length < memory.total) {
+    log.warn(`memory index over its cap: injecting ${memory.lines.length} of ${memory.total} memories`);
+  }
   const rules = new RulesTracker(WORKSPACE_DIR);
   const disclosure = rulesDisclosure(rules);
   return {
@@ -163,7 +174,7 @@ export function agentOptions(params: {
     cwd: WORKSPACE_DIR,
     env: agentEnv(),
     settingSources: [],
-    systemPrompt: systemPrompt(new Date(), { rootRules: rules.loadRoot() }),
+    systemPrompt: systemPrompt(new Date(), { rootRules: rules.loadRoot(), memory }),
     tools: BUILTIN_TOOLS,
     allowedTools: [...BUILTIN_TOOLS, ...ALFRED_TOOL_NAMES],
     permissionMode: "dontAsk",
@@ -184,6 +195,7 @@ export function agentOptions(params: {
 export function createAgentHandler(): MessageHandler {
   agentEnv(); // Fail at startup, not on the first message, if gateway credentials are missing.
   checkSessionIdleHours();
+  checkMemoryScanSettings();
   prepareWorkspace();
 
   const store = new AgentStateStore();
@@ -194,12 +206,24 @@ export function createAgentHandler(): MessageHandler {
     return rt;
   };
 
-  /** Every session retirement goes through here: it is logged and handed to the onSessionRetired hook. */
+  // Tasks and memory scans exclude each other through this lock, so the agent
+  // and the extraction job never edit memory files at the same time.
+  const memoryLock = new MemoryLock(MEMORY_LOCK_FILE);
+  const scheduler = new MemoryScanScheduler({
+    lock: memoryLock,
+    isBusy: () => [...runtimes.values()].some((rt) => rt.busy),
+    scan: () => scanTranscripts({ workspace: WORKSPACE_DIR }),
+  });
+  if (MEMORY_SCAN_MINUTES > 0) scheduler.start(MEMORY_SCAN_MINUTES * 60_000);
+
+  /**
+   * Every session retirement goes through here. It is logged and triggers a
+   * memory scan, so the retired transcript is processed while it is fresh; the
+   * scan waits until no task is running.
+   */
   function retired(userId: string, sessionId: string, reason: RetireReason, note: string): void {
     log.info(`session ${sessionId} retired (${reason}): ${note}`);
-    onSessionRetired({ userId, sessionId, reason }).catch((err) =>
-      log.error(`onSessionRetired failed for ${sessionId}: ${describeError(err)}`),
-    );
+    if (MEMORY_SCAN_MINUTES > 0) scheduler.request(`session retired (${reason})`);
   }
 
   /** Runs the task's query until every message in its input is answered; each result goes to onResult. */
@@ -273,6 +297,7 @@ export function createAgentHandler(): MessageHandler {
       );
     }, PROGRESS_INTERVAL_MS);
 
+    let locked = false;
     let replies = 0;
     let cost = 0;
     const onResult = async (result: SDKResultMessage): Promise<void> => {
@@ -287,6 +312,12 @@ export function createAgentHandler(): MessageHandler {
     };
 
     try {
+      locked = await memoryLock.acquire("task", SCAN_TIMEOUT_MS + 30_000, run.abort.signal);
+      if (run.stopped) {
+        log.info("agent run stopped by user while waiting for a memory scan");
+        return;
+      }
+      if (!locked) log.warn(`memory lock still held by ${JSON.stringify(memoryLock.current())}; running the task anyway`);
       let before = store.get(userId);
       const idleSession = before.sessionId;
       if (idleSession && shouldRotate(before, run.startedAt, SESSION_IDLE_HOURS)) {
@@ -330,6 +361,17 @@ export function createAgentHandler(): MessageHandler {
       } catch (err) {
         log.error(`saving lastRunAt failed: ${describeError(err)}`);
       }
+      // Keep memory/MEMORY.md on disk in step with what the agent wrote, then let scans run again.
+      try {
+        syncMemoryIndex(WORKSPACE_DIR);
+      } catch (err) {
+        log.warn(`memory index sync failed: ${describeError(err)}`);
+      }
+      try {
+        if (locked) memoryLock.release();
+      } catch (err) {
+        log.error(`releasing the memory lock failed: ${describeError(err)}`);
+      }
       // Also after a stop or an error: the run may have changed rules before it ended.
       await notifyRuleChanges(ctx, userId, rulesBefore);
       await stopTyping();
@@ -349,6 +391,7 @@ export function createAgentHandler(): MessageHandler {
       }
     } finally {
       rt.busy = false;
+      scheduler.flush();
     }
   }
 
@@ -395,6 +438,15 @@ export function createAgentHandler(): MessageHandler {
         if (!isModelKey(key)) return reply(ctx, userId, "可选模型：sonnet、opus、haiku");
         store.update(userId, { model: key });
         return reply(ctx, userId, `已切换到 ${key}（${MODELS[key]}）${rt.run ? "，从下一个任务开始生效" : ""}。`);
+      }
+
+      case "/memory": {
+        syncMemoryIndex(WORKSPACE_DIR);
+        const memories = loadMemories(WORKSPACE_DIR);
+        if (!memories.length) return reply(ctx, userId, "还没有长期记忆。说“记住……”就会记下来。");
+        const lines = memories.slice(0, MEMORY_REPLY_LINES).map((m) => `• ${m.name}${m.description ? `：${m.description}` : ""}`);
+        if (memories.length > MEMORY_REPLY_LINES) lines.push(`……还有 ${memories.length - MEMORY_REPLY_LINES} 条，见 memory/MEMORY.md`);
+        return reply(ctx, userId, `长期记忆（${memories.length} 条）：\n${lines.join("\n")}\n\n要修改或忘记哪条，直接告诉我。`);
       }
 
       case "/status": {

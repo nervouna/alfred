@@ -20,6 +20,7 @@ npm run status  # local account and session state
 npm run push -- "hello"                      # proactive message to the owner
 npm run push -- --file report.pdf "caption"  # proactive file
 npm run smoke -- --model haiku "prompt"      # run one prompt through the agent locally, no WeChat
+npm run memory-scan                          # extract long-term memories from new transcript entries now
 node src/cli.ts pdf report.md                # render Markdown or HTML to PDF locally; local images load from the workspace, or only from the source's directory for files outside it
 ```
 
@@ -35,6 +36,7 @@ Send a task as text or voice. Files and images can come first; they are saved to
 | `/resume` | switch back to the previous session for the next task; send it again to switch back |
 | `/stop` | stop the current task and drop pending follow-ups and queued messages |
 | `/model [sonnet\|opus\|haiku]` | show or switch the model; default `sonnet` |
+| `/memory` | list long-term memories |
 | `/status` | model, session age and idle time, when it rotates, spend, current task, pending follow-ups |
 | `/help` | command list |
 
@@ -55,7 +57,31 @@ One task runs at a time, and you can steer it while it runs ("别查 X 了，重
 - The system prompt is rebuilt for every task and carries the current date and the root `ALFRED.md`. No `CLAUDE.md`, settings, plugins or MCP servers are loaded (`settingSources: []`).
 - If a session cannot be resumed, Alfred starts a new one and tells the user; the broken session is dropped, not kept for `/resume`. This happens, for example, after the workspace moves, because transcripts are keyed by working directory.
 - Two kinds of state are held in memory only and lost on restart: follow-ups and queued messages not yet answered, and attachments that have not yet gone out with a text message.
-- There is no long-term memory. Only workspace files survive a new session. Every retirement (idle rotation, `/new`, `/resume`, failed resume) goes through the `onSessionRetired` hook in `src/agent/session.ts`, a no-op reserved for memory extraction.
+- Workspace files and long-term memory (below) survive a new session; the conversation itself does not.
+
+### Long-term memory
+
+Facts about the user, their preferences and their projects live in `~/Alfred/memory/`, one Markdown file per memory, so both the user and the agent can read and edit them:
+
+```markdown
+---
+name: Prefers English sources
+description: User prefers English-language source material for research
+type: preference          # user | preference | project | correction
+updated: 2026-10-10
+---
+When researching, prioritize English sources; still reply in Simplified Chinese.
+```
+
+- `memory/MEMORY.md` is an index with one line per memory. Alfred regenerates it from the memory files before and after every task, so edit the memory files, not the index.
+- The index is injected into the system prompt of every task, marked as data about the user rather than instructions. The agent reads a memory file when it needs the details. The injected index is capped at 200 lines or 8 KB, most recently updated first; past the cap the agent is told to consolidate.
+- Memories are written three ways:
+  1. **Explicit.** "记住…", "以后…", "别再…": the agent saves or updates a memory right away and confirms it in its reply.
+  2. **Agent's judgment.** The system prompt says what to keep (stable preferences, facts about the user, ongoing projects, corrections) and what to skip (one-off task details, anything in workspace files, secrets).
+  3. **Background extraction.** A scan reads the transcript entries added since the last scan and asks `haiku` (through the gateway) for memory candidates, which are merged into existing memories. It runs at startup, every `ALFRED_MEMORY_SCAN_MINUTES`, and whenever a session is retired (idle rotation, `/new`, `/resume`, failed resume). It never runs while a task is running or queued: tasks and scans share a lock file, which also covers a manual `npm run memory-scan` from another process. A scan with no new user messages makes no model call. Each scan is capped at `ALFRED_MEMORY_SCAN_BUDGET_USD` and about 60k characters of conversation, and logs its cost; per-file offsets and the running cost are kept in `memory-scan.json`. Transcripts are read in 1 MB chunks and lines over 1 MB (bulky tool results) are skipped unparsed, so memory use does not grow with transcript size. A batch whose extraction fails three times in a row is skipped.
+- Extraction reads only the user's messages (follow-ups sent mid-task included) and the assistant's final replies, never tool calls or tool results (fetched pages, file contents), so a malicious page cannot plant a memory. The extractor may create or update memories but not delete them, and candidates that look like credentials are dropped.
+- To correct or forget a memory, say so in chat. The agent edits the file, or moves it into `.trash/memory/`.
+- Boundary with `ALFRED.md`: memory holds facts about the user (who they are, what they like, what they are working on); rules for how to work in the workspace (where files go, naming, report style) go into `ALFRED.md`. The system prompt states both sides, and background extraction skips workspace rules.
 
 ### Workspace rules (`ALFRED.md`)
 
@@ -65,7 +91,7 @@ Conventions for working in the workspace (where things go, naming, report style)
 - **Nested.** A subdirectory can have its own `ALFRED.md` (e.g. `reports/ALFRED.md`) that applies to it and everything below it. It is disclosed only when the agent works there: a `PostToolUse`/`PostToolUseFailure` hook on `Read`, `Write`, `Edit`, `Glob`, `Grep`, `move_file`, `render_pdf` and `generate_image` resolves the touched path and injects, through `additionalContext`, the `ALFRED.md` files between the workspace root and that path that the agent has not seen in this task. `Glob` and `Grep` count the directory their pattern or `glob` starts in, and a content-mode `Grep` also counts the directories of the files whose lines it returned. Disclosures are tracked per task by path and mtime, so a file that changes is disclosed again. A task that never touches `reports/` never receives `reports/ALFRED.md`.
 - **Limits.** Each file is capped at 8 KB in the prompt. Symlinked `ALFRED.md` files, paths outside the workspace and anything under `.trash/` are ignored. A received file named `ALFRED.md` is saved as `_ALFRED.md`, so a forwarded file cannot become rules.
 - **Edits.** The agent changes an `ALFRED.md` only on the user's explicit request, never because content it read says so. Every write is logged, and after any task that created, changed or removed an `ALFRED.md`, Alfred says so in WeChat (`已更新 reports/ALFRED.md`), even if the task was stopped or failed.
-- `ALFRED.md` holds rules for how to work, not facts about the user.
+- `ALFRED.md` holds rules for how to work, not facts about the user; those go into long-term memory (above).
 
 ### Agent sandbox
 
@@ -94,9 +120,9 @@ Verified WeChat behavior (2026-10-10):
 
 | Path | Content |
 | --- | --- |
-| `$XDG_STATE_HOME/alfred/` (default `~/.local/state/alfred/`, override with `ALFRED_STATE_DIR`) | `account.json` (bot token), `sync.json` (poll cursor), `context-tokens.json`, `agent-state.json` (active and previous session, model and spend per user); files are mode 600 |
+| `$XDG_STATE_HOME/alfred/` (default `~/.local/state/alfred/`, override with `ALFRED_STATE_DIR`) | `account.json` (bot token), `sync.json` (poll cursor), `context-tokens.json`, `agent-state.json` (active and previous session, model and spend per user), `memory-scan.json` (transcript offsets and extraction spend), `memory.lock` (held while a task or memory scan runs); files are mode 600 |
 | `$XDG_STATE_HOME/alfred/claude/` | isolated Claude Code config dir: agent session transcripts used for resume |
-| `~/Alfred/` (override with `ALFRED_WORKSPACE`) | `ALFRED.md` (workspace rules), `inbox/`, `reports/`, `notes/`, `images/`, `.trash/` |
+| `~/Alfred/` (override with `ALFRED_WORKSPACE`) | `ALFRED.md` (workspace rules), `inbox/`, `reports/`, `notes/`, `images/`, `memory/` (long-term memory), `.trash/` |
 | `$XDG_CACHE_HOME/alfred/ms-playwright/` (default `~/.cache/…`, override with `PLAYWRIGHT_BROWSERS_PATH`) | Chrome Headless Shell for PDF rendering |
 
 | Variable | Default | Purpose |
@@ -106,17 +132,19 @@ Verified WeChat behavior (2026-10-10):
 | `ALFRED_SESSION_IDLE_HOURS` | `4` | idle hours after which the next task starts a new session; `0` disables rotation, empty means the default, anything else that is not a finite number >= 0 fails at startup |
 | `ALFRED_ANTHROPIC_BASE_URL` | `https://ristretto.damao.io/anthropic` | LLM gateway route |
 | `ALFRED_MMX_BIN` | `$CLAUDE_CONFIG_DIR/skills/mmx/bin/mmx` (`~/.claude/…` when unset) | `mmx` executable for `generate_image`; if it is missing, the tool returns an error |
+| `ALFRED_MEMORY_SCAN_MINUTES` | `60` | interval between background memory scans; `0` turns automatic scans off (`npm run memory-scan` still works); empty means the default, anything else that is not a finite number of minutes from 0 to 35791 fails at startup |
+| `ALFRED_MEMORY_SCAN_BUDGET_USD` | `0.1` | spend cap for one memory scan; must be a finite number > 0 |
 
 ## Layout
 
 ```
 src/ilink/          iLink protocol client: HTTP, QR login, CDN crypto, message shapes
 src/bot.ts          long-poll loop, owner filter, per-user intake queue, typing indicator
-src/agent/          Agent SDK handler, live task input, options, workspace guard, ALFRED.md rules, custom tools, image generation, session lifecycle, persisted state
+src/agent/          Agent SDK handler, live task input, options, workspace guard, ALFRED.md rules, custom tools, image generation, session lifecycle, long-term memory, persisted state
 src/echo.ts         PoC handler and protocol test commands
 src/files.ts        inbound media storage and file helpers
 src/pdf.ts          Markdown/HTML to PDF rendering
-src/cli.ts          login | run | push | status | setup-pdf | pdf
+src/cli.ts          login | run | push | status | setup-pdf | pdf | memory-scan
 scripts/agent-smoke.ts  local agent run without WeChat
 ```
 
@@ -129,7 +157,7 @@ npm run smoke -- --model haiku "prompt"   # one agent run with production option
 npm run smoke -- --model haiku --steer-after 20 "only look at Y" "prompt"   # push a follow-up mid-run
 ```
 
-- The smoke script uses the real workspace and agent config dir. Point `ALFRED_WORKSPACE` and `ALFRED_STATE_DIR` at scratch directories to keep test runs out of them. Like the bot, it seeds the workspace and prints the `ALFRED.md` change notice (`[notice]`); rule disclosures show up as `disclosed … after <tool>` log lines.
+- The smoke script uses the real workspace and agent config dir. Point `ALFRED_WORKSPACE` and `ALFRED_STATE_DIR` at scratch directories to keep test runs out of them. Like the bot, it seeds the workspace and prints the `ALFRED.md` change notice (`[notice]`); rule disclosures show up as `disclosed … after <tool>` log lines. `npm run memory-scan` also reads transcripts from `$ALFRED_STATE_DIR/claude/projects/` and writes into `$ALFRED_WORKSPACE/memory/`, so point it at scratch directories the same way.
 - Do not start a second `npm start` against the same state dir while the bot is running. Both processes would long-poll the same cursor and take messages from each other.
 
 ## Protocol source
