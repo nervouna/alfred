@@ -140,16 +140,29 @@ test("touchedPaths maps each file tool to the paths it works in", () => {
   assert.deepEqual(touchedPaths("Glob", { pattern: "/ws/notes/*.md" }), ["/ws/notes"]);
   assert.deepEqual(touchedPaths("Grep", { pattern: "x" }), ["."]);
   assert.deepEqual(touchedPaths("Grep", { pattern: "x", path: "notes/p" }), ["notes/p"]);
+  assert.deepEqual(touchedPaths("Grep", { pattern: "x", glob: "reports/**/*.md" }), ["reports"]);
+  assert.deepEqual(touchedPaths("Grep", { pattern: "x", path: "notes", glob: "*.md" }), ["notes"]);
+  assert.deepEqual(touchedPaths("Grep", { pattern: "x", glob: "!reports/**" }), ["."]);
+  // Content mode returns file lines, so the matched files' directories count as touched.
+  const content = "reports/2026/a.md:3:番茄\nreports/2026/a.md-4-context\n--\nnotes/b.md:1:x: y\n";
+  assert.deepEqual(touchedPaths("Grep", { pattern: "x" }, { mode: "content", content }), [".", "reports/2026", "notes"]);
+  const files = { mode: "files_with_matches", filenames: ["reports/a.md"], numFiles: 1 };
+  assert.deepEqual(touchedPaths("Grep", { pattern: "x" }, files), ["."]);
   assert.deepEqual(touchedPaths("mcp__alfred__move_file", { from: "notes/a.md", to: ".trash/a.md" }), ["notes/a.md", ".trash/a.md"]);
   assert.deepEqual(touchedPaths("mcp__alfred__render_pdf", { source: "reports/a.md" }), ["reports/a.md"]);
   assert.deepEqual(touchedPaths("WebFetch", { url: "https://example.com" }), []);
   assert.deepEqual(touchedPaths("mcp__alfred__send_file", { path: "reports/a.pdf" }), []);
 });
 
-function hookInput(event: "PostToolUse" | "PostToolUseFailure", tool: string, input: Record<string, unknown>): HookInput {
+function hookInput(
+  event: "PostToolUse" | "PostToolUseFailure",
+  tool: string,
+  input: Record<string, unknown>,
+  response: unknown = {},
+): HookInput {
   const base = { session_id: "s", transcript_path: "/t", cwd: "/w", tool_name: tool, tool_input: input, tool_use_id: "t1" };
   return event === "PostToolUse"
-    ? { ...base, hook_event_name: event, tool_response: {} }
+    ? { ...base, hook_event_name: event, tool_response: response }
     : { ...base, hook_event_name: event, error: "failed" };
 }
 
@@ -174,6 +187,15 @@ test("the hook injects undisclosed rules as additionalContext, also after a fail
   assert.doesNotMatch(context ?? "", /notes/);
   assert.equal(await runHook(tracker, hookInput("PostToolUse", "Edit", { file_path: "reports/a.md" })), undefined);
   assert.match((await runHook(tracker, hookInput("PostToolUseFailure", "Read", { file_path: "notes/missing.md" }))) ?? "", /notes\/ALFRED\.md/);
+});
+
+test("a workspace-wide Grep discloses the rules of the files whose lines it returned", async () => {
+  const root = workspace({ "reports/ALFRED.md": "reports rules", "notes/ALFRED.md": "notes rules" });
+  const tracker = new RulesTracker(root);
+  const response = { mode: "content", numFiles: 0, filenames: [], content: "reports/a.md:3:番茄" };
+  const context = await runHook(tracker, hookInput("PostToolUse", "Grep", { pattern: "番茄", output_mode: "content" }, response));
+  assert.match(context ?? "", /path="reports\/ALFRED\.md"/);
+  assert.doesNotMatch(context ?? "", /notes/);
 });
 
 test("reading or writing a rules file counts as seeing it", async () => {

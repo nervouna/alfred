@@ -124,8 +124,40 @@ function str(value: unknown): string | undefined {
   return typeof value === "string" && value ? value : undefined;
 }
 
-/** Paths a file tool call works in. Rules along these paths are disclosed after the call. */
-export function touchedPaths(toolName: string, input: Record<string, unknown>): string[] {
+/** The directory a glob pattern starts in: `base` joined with the pattern's segments before the first wildcard. */
+function globBase(base: string, pattern: string | undefined): string {
+  if (!pattern || pattern.startsWith("!")) return base;
+  const fixed: string[] = [];
+  for (const segment of pattern.split("/")) {
+    if (GLOB_CHARS.test(segment)) break;
+    fixed.push(segment);
+  }
+  const prefix = fixed.join("/");
+  return path.isAbsolute(prefix) ? prefix : path.join(base, prefix);
+}
+
+/**
+ * Directories of the files whose lines a content-mode Grep returned, since the
+ * agent can use those lines without ever reading the files. Each line starts
+ * with the file's workspace-relative path and a colon ("path:12:text").
+ */
+function grepContentDirs(response: unknown): string[] {
+  if (!response || typeof response !== "object") return [];
+  const { mode, content } = response as { mode?: unknown; content?: unknown };
+  if (mode !== "content" || typeof content !== "string") return [];
+  const dirs = new Set<string>();
+  for (const line of content.split("\n")) {
+    const colon = line.indexOf(":");
+    if (colon > 0) dirs.add(path.dirname(line.slice(0, colon)));
+  }
+  return [...dirs];
+}
+
+/**
+ * Paths a file tool call works in. Rules along these paths are disclosed after
+ * the call. `response` is the tool's result, absent when the call failed.
+ */
+export function touchedPaths(toolName: string, input: Record<string, unknown>, response?: unknown): string[] {
   let paths: (string | undefined)[];
   switch (toolName) {
     case "Read":
@@ -133,19 +165,11 @@ export function touchedPaths(toolName: string, input: Record<string, unknown>): 
     case "Edit":
       paths = [str(input.file_path)];
       break;
-    case "Glob": {
-      // The directory the pattern starts in: its segments before the first wildcard.
-      const fixed: string[] = [];
-      for (const segment of (str(input.pattern) ?? "").split("/")) {
-        if (GLOB_CHARS.test(segment)) break;
-        fixed.push(segment);
-      }
-      const prefix = fixed.join("/");
-      paths = [path.isAbsolute(prefix) ? prefix : path.join(str(input.path) ?? ".", prefix)];
+    case "Glob":
+      paths = [globBase(str(input.path) ?? ".", str(input.pattern))];
       break;
-    }
     case "Grep":
-      paths = [str(input.path) ?? "."];
+      paths = [globBase(str(input.path) ?? ".", str(input.glob)), ...grepContentDirs(response)];
       break;
     case "mcp__alfred__move_file":
       paths = [str(input.from), str(input.to)];
@@ -249,8 +273,12 @@ export function rulesDisclosure(tracker: RulesTracker): HookCallbackMatcher {
       async (input) => {
         if (input.hook_event_name !== "PostToolUse" && input.hook_event_name !== "PostToolUseFailure") return {};
         const toolInput = (input.tool_input ?? {}) as Record<string, unknown>;
-        if (input.hook_event_name === "PostToolUse") tracker.recordToolUse(input.tool_name, toolInput);
-        const files = tracker.take(touchedPaths(input.tool_name, toolInput));
+        let response: unknown;
+        if (input.hook_event_name === "PostToolUse") {
+          tracker.recordToolUse(input.tool_name, toolInput);
+          response = input.tool_response;
+        }
+        const files = tracker.take(touchedPaths(input.tool_name, toolInput, response));
         if (!files.length) return {};
         log.info(`disclosed ${files.map((f) => f.rel).join(", ")} after ${input.tool_name}`);
         return { hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: disclosure(files) } };
