@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
+import { checkMemoryScanSettings } from "./agent/config.ts";
 import { createAgentHandler } from "./agent/handler.ts";
 import { MEMORY_LOCK_FILE, describeScan, scanTranscripts } from "./agent/memory-scan.ts";
 import { MemoryLock } from "./agent/memory.ts";
@@ -105,6 +106,7 @@ async function cmdPdf(args: string[]): Promise<void> {
 }
 
 async function cmdMemoryScan(): Promise<void> {
+  checkMemoryScanSettings();
   const lock = new MemoryLock(MEMORY_LOCK_FILE);
   if (!lock.tryAcquire("scan")) {
     const holder = lock.current();

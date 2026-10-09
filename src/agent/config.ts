@@ -20,13 +20,35 @@ const GATEWAY_BASE_URL = process.env.ALFRED_ANTHROPIC_BASE_URL ?? "https://ristr
 export const MAX_TURNS = 60;
 /** Per-task spend cap; the SDK stops the task with error_max_budget_usd when exceeded. */
 export const MAX_BUDGET_USD = Number(process.env.ALFRED_MAX_BUDGET_USD ?? "3");
+const IDLE_HOURS_SETTING = process.env.ALFRED_SESSION_IDLE_HOURS?.trim() || "4";
 /** A task that starts after this many idle hours gets a new session; 0 disables rotation. */
-export const SESSION_IDLE_HOURS = Number(process.env.ALFRED_SESSION_IDLE_HOURS ?? "4");
+export const SESSION_IDLE_HOURS = Number(IDLE_HOURS_SETTING);
 
+/** Fail at startup on an idle threshold that would silently disable or break rotation. */
+export function checkSessionIdleHours(): void {
+  if (!Number.isFinite(SESSION_IDLE_HOURS) || SESSION_IDLE_HOURS < 0) {
+    throw new Error(`ALFRED_SESSION_IDLE_HOURS must be a finite number of hours >= 0 (0 disables), got "${IDLE_HOURS_SETTING}"`);
+  }
+}
+
+const SCAN_MINUTES_SETTING = process.env.ALFRED_MEMORY_SCAN_MINUTES?.trim() || "60";
 /** Background memory extraction runs this often; 0 turns it off (`cli.ts memory-scan` still works). */
-export const MEMORY_SCAN_MINUTES = Number(process.env.ALFRED_MEMORY_SCAN_MINUTES ?? "60");
+export const MEMORY_SCAN_MINUTES = Number(SCAN_MINUTES_SETTING);
+const SCAN_BUDGET_SETTING = process.env.ALFRED_MEMORY_SCAN_BUDGET_USD?.trim() || "0.1";
 /** Spend cap for one extraction scan. */
-export const MEMORY_SCAN_BUDGET_USD = Number(process.env.ALFRED_MEMORY_SCAN_BUDGET_USD ?? "0.1");
+export const MEMORY_SCAN_BUDGET_USD = Number(SCAN_BUDGET_SETTING);
+/** setInterval cannot wait longer than 2^31 - 1 ms (about 24.8 days). */
+const MAX_SCAN_MINUTES = Math.floor((2 ** 31 - 1) / 60_000);
+
+/** Fail at startup on memory scan settings that would silently misbehave. */
+export function checkMemoryScanSettings(): void {
+  if (!Number.isFinite(MEMORY_SCAN_MINUTES) || MEMORY_SCAN_MINUTES < 0 || MEMORY_SCAN_MINUTES > MAX_SCAN_MINUTES) {
+    throw new Error(`ALFRED_MEMORY_SCAN_MINUTES must be a number of minutes from 0 (off) to ${MAX_SCAN_MINUTES}, got "${SCAN_MINUTES_SETTING}"`);
+  }
+  if (!Number.isFinite(MEMORY_SCAN_BUDGET_USD) || MEMORY_SCAN_BUDGET_USD <= 0) {
+    throw new Error(`ALFRED_MEMORY_SCAN_BUDGET_USD must be a finite number > 0, got "${SCAN_BUDGET_SETTING}"`);
+  }
+}
 
 /** Isolated Claude Code config dir: session transcripts live here, apart from the user's own Claude Code. */
 export const AGENT_CONFIG_DIR = path.join(STATE_DIR, "claude");
@@ -111,12 +133,14 @@ Today is ${date} (${weekday}), time zone ${tz}.
 - Research: search the web, read sources, compare and summarize. Prefer primary and recent sources, cross-check important facts, give dates for time-sensitive facts, and cite sources as links.
 - Collect material: when findings are worth keeping, save them as Markdown notes in the workspace.
 - Organize files: read, write, edit and search files in the workspace. Use move_file to move or rename; to delete, move the file into .trash/.
+- Images: generate_image makes images when the user asks for one, or illustrative visuals for reports such as a cover. Never generate an image to show data; draw charts as inline SVG. Each call is billed to the user's quota, even when it fails, so make one image unless asked for more and never retry a failed call on your own. Read every generated image before sending or embedding it, to check that it shows what was asked.
 
 # Workspace
 Your working directory is the workspace, and nothing outside it is accessible.
 - inbox/<date>/  files the user sent (images, PDFs, documents, video)
 - reports/  deliverables you write for the user
 - notes/  working notes and collected material
+- images/<date>/  images you generated
 - memory/  long-term memory about the user (see below)
 - .trash/  deleted files
 
@@ -126,8 +150,8 @@ When a message lists attached files, read them with the Read tool; it handles im
 - Reply in Simplified Chinese unless the user writes in another language.
 - Write for a phone screen: lead with the answer, keep paragraphs short and lists compact. Markdown renders except images, so never embed images.
 - Keep chat replies under about 1500 characters. For anything longer, such as full reports, comparisons or collected material, write a Markdown file in reports/, deliver it with send_file, and reply with a short summary.
-- WeChat opens .md, .pdf, images and Office files, but not .html, so never send HTML.
-- For formal reports, anything with charts or wide tables, or anything the user may keep or forward: write Markdown, or self-contained HTML when you need charts, in reports/, convert it with render_pdf, and send the PDF. Draw charts as inline SVG; rendering is offline, so external images, fonts and scripts do not load.
+- WeChat opens .md, .pdf, images and Office files, but not .html, so never send HTML. Images sent with send_file arrive as image messages.
+- For formal reports, anything with charts or wide tables, or anything the user may keep or forward: write Markdown, or self-contained HTML when you need charts, in reports/, convert it with render_pdf, and send the PDF. Draw charts as inline SVG. Rendering is offline: workspace images load by relative path, e.g. ![](../images/<date>/cover.jpg) from reports/, but external images, fonts and scripts do not.
 - If a request is ambiguous in a way that changes the result, ask one short question. Otherwise proceed and state your assumptions.
 
 ${memorySection(memory)}`;

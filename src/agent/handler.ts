@@ -21,11 +21,12 @@ import {
   BUILTIN_TOOLS,
   MAX_BUDGET_USD,
   MAX_TURNS,
-  MEMORY_SCAN_BUDGET_USD,
   MEMORY_SCAN_MINUTES,
   MODELS,
   SESSION_IDLE_HOURS,
   agentEnv,
+  checkMemoryScanSettings,
+  checkSessionIdleHours,
   isModelKey,
   systemPrompt,
 } from "./config.ts";
@@ -40,7 +41,7 @@ import type { AgentUserState } from "./state.ts";
 import { ALFRED_TOOL_NAMES, createAlfredTools } from "./tools.ts";
 
 const PROGRESS_INTERVAL_MS = 3 * 60_000;
-const WORKSPACE_SUBDIRS = ["inbox", "reports", "notes", "memory", ".trash"];
+const WORKSPACE_SUBDIRS = ["inbox", "reports", "notes", "images", "memory", ".trash"];
 /** Memories listed in the /memory reply; the full index is in memory/MEMORY.md. */
 const MEMORY_REPLY_LINES = 50;
 
@@ -142,7 +143,7 @@ export function agentOptions(params: {
     tools: BUILTIN_TOOLS,
     allowedTools: [...BUILTIN_TOOLS, ...ALFRED_TOOL_NAMES],
     permissionMode: "dontAsk",
-    mcpServers: { alfred: createAlfredTools(params.ctx, params.userId) },
+    mcpServers: { alfred: createAlfredTools(params.ctx, params.userId, params.abortController?.signal) },
     hooks: { PreToolUse: [workspaceGuard(WORKSPACE_DIR)] },
     maxTurns: MAX_TURNS,
     maxBudgetUsd: MAX_BUDGET_USD,
@@ -154,9 +155,8 @@ export function agentOptions(params: {
 
 export function createAgentHandler(): MessageHandler {
   agentEnv(); // Fail at startup, not on the first message, if gateway credentials are missing.
-  if (!(SESSION_IDLE_HOURS >= 0)) throw new Error("ALFRED_SESSION_IDLE_HOURS must be a number of hours, 0 to disable");
-  if (!(MEMORY_SCAN_MINUTES >= 0)) throw new Error("ALFRED_MEMORY_SCAN_MINUTES must be a number of minutes, 0 to disable");
-  if (!(MEMORY_SCAN_BUDGET_USD > 0)) throw new Error("ALFRED_MEMORY_SCAN_BUDGET_USD must be a positive number");
+  checkSessionIdleHours();
+  checkMemoryScanSettings();
   for (const dir of WORKSPACE_SUBDIRS) fs.mkdirSync(path.join(WORKSPACE_DIR, dir), { recursive: true });
 
   const store = new AgentStateStore();
@@ -295,16 +295,25 @@ export function createAgentHandler(): MessageHandler {
       log.error(`agent run failed: ${describeError(err)}`);
       await reply(ctx, userId, `执行出错：${describeError(err)}`).catch(() => {});
     } finally {
+      clearInterval(progress);
       // Stopped and failed tasks count as activity too, so the idle clock restarts after every task.
-      store.update(userId, { lastRunAt: new Date().toISOString() });
-      // Keep memory/MEMORY.md on disk in step with what the agent wrote.
+      // A failed write must not skip the cleanup below or escape from drain().
+      try {
+        store.update(userId, { lastRunAt: new Date().toISOString() });
+      } catch (err) {
+        log.error(`saving lastRunAt failed: ${describeError(err)}`);
+      }
+      // Keep memory/MEMORY.md on disk in step with what the agent wrote, then let scans run again.
       try {
         syncMemoryIndex(WORKSPACE_DIR);
       } catch (err) {
         log.warn(`memory index sync failed: ${describeError(err)}`);
       }
-      if (locked) memoryLock.release();
-      clearInterval(progress);
+      try {
+        if (locked) memoryLock.release();
+      } catch (err) {
+        log.error(`releasing the memory lock failed: ${describeError(err)}`);
+      }
       await stopTyping();
       rt.run = undefined;
     }

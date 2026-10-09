@@ -550,10 +550,15 @@ export class MemoryScanScheduler {
     this.flush();
   }
 
-  /** Start the pending scan if nothing else holds the memory lock. */
+  /** Start the pending scan if nothing else holds the memory lock. Never throws. */
   flush(): void {
     if (!this.pending || this.running || this.isBusy()) return;
-    if (!this.lock.tryAcquire("scan")) return;
+    try {
+      if (!this.lock.tryAcquire("scan")) return;
+    } catch (err) {
+      log.error(`memory lock unavailable, scan stays pending: ${describeError(err)}`);
+      return;
+    }
     const reason = this.pending;
     this.pending = undefined;
     this.running = true;
