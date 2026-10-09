@@ -203,20 +203,28 @@ async function until(check: () => boolean, ms = 3000): Promise<void> {
   }
 }
 
+/** Waits until the script has written its grandchild's pid. */
+async function grandchildPid(pidFile: string): Promise<number> {
+  await until(() => fs.existsSync(pidFile) && fs.readFileSync(pidFile, "utf-8").trim() !== "");
+  return Number(fs.readFileSync(pidFile, "utf-8"));
+}
+
 test("runMmx kills the whole process tree on abort and on timeout", async () => {
   const stopped = hangingBin("stopped");
   const controller = new AbortController();
   const pending = runMmx(stopped.file, [], { timeoutMs: 60_000, signal: controller.signal });
-  await until(() => fs.existsSync(stopped.pidFile) && fs.readFileSync(stopped.pidFile, "utf-8").trim() !== "");
-  const grandchild = Number(fs.readFileSync(stopped.pidFile, "utf-8"));
+  const grandchild = await grandchildPid(stopped.pidFile);
   controller.abort();
   assert.equal((await pending).killed, "aborted");
   await until(() => !alive(grandchild));
 
+  // The timeout must leave the script time to start its grandchild; under load a
+  // short one killed it before the pid file existed, leaving nothing to check.
   const slow = hangingBin("slow");
-  const result = await runMmx(slow.file, [], { timeoutMs: 300 });
-  assert.equal(result.killed, "timeout");
-  await until(() => !alive(Number(fs.readFileSync(slow.pidFile, "utf-8"))));
+  const timedOut = runMmx(slow.file, [], { timeoutMs: 2_000 });
+  const slowGrandchild = await grandchildPid(slow.pidFile);
+  assert.equal((await timedOut).killed, "timeout");
+  await until(() => !alive(slowGrandchild));
 });
 
 test("runMmx returns exit codes and output, and rejects when the binary cannot start", async () => {
