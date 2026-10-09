@@ -196,3 +196,23 @@ test("renderPdf embeds relative workspace images in Markdown but not absolute pa
   assert.ok(images.includes("3x2"), `workspace image missing: ${images}`);
   assert.ok(!images.includes("5x7"), "out-of-root image embedded");
 });
+
+test("renderPdf embeds workspace images referenced by relative path", async (t) => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), "alfred-pdf-"));
+  t.after(() => fs.rmSync(ws, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(ws, "images"));
+  fs.mkdirSync(path.join(ws, "reports"));
+  fs.writeFileSync(path.join(ws, "images", "cover.png"), png(37, 23));
+  const source = path.join(ws, "reports", "r.md");
+  fs.writeFileSync(source, "# Report\n\n![cover](../images/cover.png)\n");
+  const output = path.join(ws, "reports", "r.pdf");
+  try {
+    await renderPdf(source, output, { root: ws });
+  } catch (err) {
+    if (isRendererMissing(err)) return t.skip("Chrome Headless Shell is not installed (npm run setup:pdf)");
+    throw err;
+  }
+  const pdf = fs.readFileSync(output).toString("latin1");
+  assert.match(pdf, /\/Width 37\b/);
+  assert.match(pdf, /\/Height 23\b/);
+});

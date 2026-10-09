@@ -17,14 +17,27 @@ import { humanAge, saveInboundMedia } from "../files.ts";
 import { parseMessage } from "../ilink/inbound.ts";
 import { describeError, log } from "../log.ts";
 import { WORKSPACE_DIR } from "../store.ts";
-import { BUILTIN_TOOLS, MAX_BUDGET_USD, MAX_TURNS, MODELS, agentEnv, isModelKey, systemPrompt } from "./config.ts";
+import {
+  BUILTIN_TOOLS,
+  MAX_BUDGET_USD,
+  MAX_TURNS,
+  MODELS,
+  SESSION_IDLE_HOURS,
+  agentEnv,
+  checkSessionIdleHours,
+  isModelKey,
+  systemPrompt,
+} from "./config.ts";
 import type { ModelKey } from "./config.ts";
 import { workspaceGuard } from "./guard.ts";
+import { NO_SESSION, accountRun, onSessionRetired, resumePrevious, retire, rotationDueAt, shouldRotate } from "./session.ts";
+import type { RetireReason } from "./session.ts";
 import { AgentStateStore } from "./state.ts";
+import type { AgentUserState } from "./state.ts";
 import { ALFRED_TOOL_NAMES, createAlfredTools } from "./tools.ts";
 
 const PROGRESS_INTERVAL_MS = 3 * 60_000;
-const WORKSPACE_SUBDIRS = ["inbox", "reports", "notes", ".trash"];
+const WORKSPACE_SUBDIRS = ["inbox", "reports", "notes", "images", ".trash"];
 
 const TOOL_LABELS: Record<string, string> = {
   WebSearch: "搜索",
@@ -39,7 +52,8 @@ const TOOL_LABELS: Record<string, string> = {
 const HELP = `Alfred 调研助手
 直接发任务给我。文件、图片可以先发，再发说明。
 
-/new  开始新会话（清空上下文）
+/new  开始新会话（清空上下文${SESSION_IDLE_HOURS > 0 ? `；空闲超过 ${SESSION_IDLE_HOURS} 小时也会自动开始` : ""}）
+/resume  切回上一个会话
 /stop  停止当前任务
 /model [sonnet|opus|haiku]  查看或切换模型
 /status  当前状态和花费
@@ -76,6 +90,21 @@ function toolSummary(counts: Map<string, number>): string {
   return parts.length ? parts.join("，") : "还没用工具";
 }
 
+function sessionStatus(user: AgentUserState, now: number): string {
+  if (!user.sessionId) return "新会话";
+  const age = user.sessionStartedAt ? `，已开 ${humanAge(now - Date.parse(user.sessionStartedAt))}` : "";
+  return `${user.sessionId.slice(0, 8)}${age}，本会话花费 ${usd(user.sessionCostUsd)}`;
+}
+
+function idleStatus(user: AgentUserState, now: number): string {
+  const idle = user.lastRunAt ? humanAge(now - Date.parse(user.lastRunAt)) : "未知";
+  if (SESSION_IDLE_HOURS <= 0) return `${idle}（自动开新会话已关闭）`;
+  const due = rotationDueAt(user, SESSION_IDLE_HOURS);
+  if (due === undefined) return idle;
+  if (now > due) return `${idle}，下一个任务会开新会话`;
+  return `${idle}，再过 ${humanAge(due - now)} 下一个任务会开新会话`;
+}
+
 export function buildPrompt(text: string, opts: { attachments: string[]; quotedText?: string; voice: boolean }): string {
   const sections: string[] = [];
   if (opts.attachments.length) {
@@ -103,7 +132,7 @@ export function agentOptions(params: {
     tools: BUILTIN_TOOLS,
     allowedTools: [...BUILTIN_TOOLS, ...ALFRED_TOOL_NAMES],
     permissionMode: "dontAsk",
-    mcpServers: { alfred: createAlfredTools(params.ctx, params.userId) },
+    mcpServers: { alfred: createAlfredTools(params.ctx, params.userId, params.abortController?.signal) },
     hooks: { PreToolUse: [workspaceGuard(WORKSPACE_DIR)] },
     maxTurns: MAX_TURNS,
     maxBudgetUsd: MAX_BUDGET_USD,
@@ -115,6 +144,7 @@ export function agentOptions(params: {
 
 export function createAgentHandler(): MessageHandler {
   agentEnv(); // Fail at startup, not on the first message, if gateway credentials are missing.
+  checkSessionIdleHours();
   for (const dir of WORKSPACE_SUBDIRS) fs.mkdirSync(path.join(WORKSPACE_DIR, dir), { recursive: true });
 
   const store = new AgentStateStore();
@@ -124,6 +154,14 @@ export function createAgentHandler(): MessageHandler {
     if (!rt) runtimes.set(userId, (rt = { busy: false, queue: [], attachments: [] }));
     return rt;
   };
+
+  /** Every session retirement goes through here: it is logged and handed to the onSessionRetired hook. */
+  function retired(userId: string, sessionId: string, reason: RetireReason, note: string): void {
+    log.info(`session ${sessionId} retired (${reason}): ${note}`);
+    onSessionRetired({ userId, sessionId, reason }).catch((err) =>
+      log.error(`onSessionRetired failed for ${sessionId}: ${describeError(err)}`),
+    );
+  }
 
   async function execute(
     ctx: BotContext,
@@ -143,7 +181,9 @@ export function createAgentHandler(): MessageHandler {
       for await (const m of q) {
         if (m.type === "system" && m.subtype === "init") {
           sessionId = m.session_id;
-          if (sessionId !== user.sessionId) store.update(userId, { sessionId, sessionCostUsd: 0 });
+          if (sessionId !== user.sessionId) {
+            store.update(userId, { sessionId, sessionCostUsd: 0, sessionStartedAt: new Date().toISOString() });
+          }
         } else if (m.type === "assistant") {
           for (const block of m.message.content) {
             if (block.type === "tool_use") run.toolCounts.set(block.name, (run.toolCounts.get(block.name) ?? 0) + 1);
@@ -178,12 +218,20 @@ export function createAgentHandler(): MessageHandler {
     }, PROGRESS_INTERVAL_MS);
 
     try {
-      const before = store.get(userId);
+      let before = store.get(userId);
+      const idleSession = before.sessionId;
+      if (idleSession && shouldRotate(before, run.startedAt, SESSION_IDLE_HOURS)) {
+        const idle = humanAge(run.startedAt - Date.parse(before.lastRunAt ?? ""));
+        before = store.update(userId, retire(before));
+        retired(userId, idleSession, "idle", `idle ${idle} > ${SESSION_IDLE_HOURS}h`);
+        await reply(ctx, userId, `距上次对话已超过 ${SESSION_IDLE_HOURS} 小时，已开始新会话（发 /resume 接回上一个会话）。`);
+      }
       log.info(`agent run start model=${before.model} resume=${before.sessionId ?? "none"}`);
       let outcome: ExecOutcome = await execute(ctx, userId, prompt, run, before.sessionId);
       if (outcome.kind === "resume-failed") {
         log.warn(`resume of ${before.sessionId} failed (${outcome.detail}); starting a new session`);
-        store.update(userId, { sessionId: undefined, sessionCostUsd: 0 });
+        store.update(userId, NO_SESSION);
+        if (before.sessionId) retired(userId, before.sessionId, "resume-failed", outcome.detail);
         await reply(ctx, userId, "之前的会话无法恢复，已开始新会话。");
         outcome = await execute(ctx, userId, prompt, run, undefined);
       }
@@ -194,16 +242,10 @@ export function createAgentHandler(): MessageHandler {
       if (outcome.kind === "resume-failed") throw new Error(outcome.detail);
 
       const { result } = outcome;
-      const prev = store.get(userId);
-      // total_cost_usd is the session's running total, including earlier resumed runs.
-      const delta = Math.max(0, result.total_cost_usd - prev.sessionCostUsd);
-      store.update(userId, {
-        sessionCostUsd: result.total_cost_usd,
-        totalCostUsd: prev.totalCostUsd + delta,
-        lastRunAt: new Date().toISOString(),
-      });
+      const { deltaUsd, ...spend } = accountRun(store.get(userId), result.total_cost_usd);
+      store.update(userId, spend);
       log.info(
-        `agent run done subtype=${result.subtype} turns=${result.num_turns} cost=${usd(delta)} ` +
+        `agent run done subtype=${result.subtype} turns=${result.num_turns} cost=${usd(deltaUsd)} ` +
           `time=${humanAge(Date.now() - run.startedAt)} tools=[${toolSummary(run.toolCounts)}]`,
       );
 
@@ -223,6 +265,13 @@ export function createAgentHandler(): MessageHandler {
       await reply(ctx, userId, `执行出错：${describeError(err)}`).catch(() => {});
     } finally {
       clearInterval(progress);
+      // Stopped and failed tasks count as activity too, so the idle clock restarts after every task.
+      // A failed write must not skip the cleanup below or escape from drain().
+      try {
+        store.update(userId, { lastRunAt: new Date().toISOString() });
+      } catch (err) {
+        log.error(`saving lastRunAt failed: ${describeError(err)}`);
+      }
       await stopTyping();
       rt.run = undefined;
     }
@@ -252,8 +301,24 @@ export function createAgentHandler(): MessageHandler {
 
       case "/new":
         if (rt.busy) return reply(ctx, userId, "当前任务还在进行，先发 /stop 或等它完成。");
-        store.update(userId, { sessionId: undefined, sessionCostUsd: 0 });
-        return reply(ctx, userId, "已开始新会话。");
+        if (!user.sessionId) return reply(ctx, userId, "已经是新会话。");
+        store.update(userId, retire(user));
+        retired(userId, user.sessionId, "new", "/new");
+        return reply(ctx, userId, "已开始新会话。发 /resume 可以接回上一个会话。");
+
+      case "/resume": {
+        if (rt.busy) return reply(ctx, userId, "当前任务还在进行，先发 /stop 或等它完成。");
+        const patch = resumePrevious(user, Date.now());
+        if (!patch?.sessionId) return reply(ctx, userId, "没有可以接回的会话。");
+        store.update(userId, patch);
+        if (user.sessionId) retired(userId, user.sessionId, "resume", `/resume to ${patch.sessionId}`);
+        else log.info(`session ${patch.sessionId} resumed`);
+        return reply(
+          ctx,
+          userId,
+          `已切回上一个会话 ${patch.sessionId.slice(0, 8)}，下一个任务接着它继续。${user.sessionId ? "再发 /resume 可以换回来。" : ""}`,
+        );
+      }
 
       case "/stop": {
         if (!rt.run) return reply(ctx, userId, "当前没有进行中的任务。");
@@ -272,12 +337,14 @@ export function createAgentHandler(): MessageHandler {
       }
 
       case "/status": {
-        const lines = [
-          `模型：${user.model}（${MODELS[user.model]}）`,
-          `会话：${user.sessionId ? `${user.sessionId.slice(0, 8)}，本会话花费 ${usd(user.sessionCostUsd)}` : "新会话"}`,
+        const now = Date.now();
+        const lines = [`模型：${user.model}（${MODELS[user.model]}）`, `会话：${sessionStatus(user, now)}`];
+        if (user.sessionId && !rt.run) lines.push(`空闲：${idleStatus(user, now)}`);
+        if (user.previousSession) lines.push(`上一个会话：${user.previousSession.sessionId.slice(0, 8)}，发 /resume 接回`);
+        lines.push(
           `累计花费：${usd(user.totalCostUsd)}`,
-          rt.run ? `任务：进行中 ${humanAge(Date.now() - rt.run.startedAt)}，${toolSummary(rt.run.toolCounts)}` : "任务：空闲",
-        ];
+          rt.run ? `任务：进行中 ${humanAge(now - rt.run.startedAt)}，${toolSummary(rt.run.toolCounts)}` : "任务：空闲",
+        );
         if (rt.queue.length) lines.push(`排队：${rt.queue.length} 条`);
         if (rt.attachments.length) lines.push(`待处理附件：${rt.attachments.join("、")}`);
         return reply(ctx, userId, lines.join("\n"));
