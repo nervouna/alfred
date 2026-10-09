@@ -30,22 +30,26 @@ Send a task as text or voice. Files and images can come first; they are saved to
 
 | Command | Effect |
 | --- | --- |
-| `/new` | start a new session (drops the conversation context) |
+| `/new` | start a new session (drops the conversation context; `/resume` brings it back) |
+| `/resume` | switch back to the previous session for the next task; send it again to switch back |
 | `/stop` | stop the current task and clear queued messages |
 | `/model [sonnet\|opus\|haiku]` | show or switch the model; default `sonnet` |
-| `/status` | model, session, spend, current task |
+| `/status` | model, session age and idle time, when it rotates, spend, current task |
 | `/help` | command list |
 
 One task runs at a time; messages sent meanwhile are queued and handed over together when it finishes.
 
 ### Sessions and context
 
-- Each user has one Claude Code session, and every task resumes it, so the agent remembers earlier tasks until `/new`. The session id is stored in `agent-state.json`; the transcript lives in the isolated config dir.
+- Each user has one active Claude Code session, and every task resumes it, so the agent remembers earlier tasks. The session id is stored in `agent-state.json`; the transcript lives in the isolated config dir.
+- Idle rotation: a task that starts more than `ALFRED_SESSION_IDLE_HOURS` (default 4) after the previous task ended gets a new session, and Alfred says so in one line before it runs. This keeps an old transcript from being re-sent, and billed again once the prompt cache has expired, on every task. Stopped and failed tasks count as activity. `0` disables rotation.
+- `/new` and idle rotation keep the retired session as the previous one. `/resume` makes it active again for the next task and keeps the session it replaced as the previous one, so a second `/resume` undoes the first. Only one previous session is kept.
+- Spend: `sessionCostUsd` is the SDK's running total for the active session (a resumed session continues from the total its transcript saved) and starts at zero in a new session; `totalCostUsd` adds up each task's increment across all sessions.
 - Claude Code compacts the transcript on its own when it nears the context window. Alfred adds no compaction logic and does not log when compaction happens.
 - The system prompt is rebuilt for every task and carries the current date. No `CLAUDE.md`, settings, plugins or MCP servers are loaded (`settingSources: []`).
-- If a session cannot be resumed, Alfred starts a new one and tells the user. This happens, for example, after the workspace moves, because transcripts are keyed by working directory.
+- If a session cannot be resumed, Alfred starts a new one and tells the user; the broken session is dropped, not kept for `/resume`. This happens, for example, after the workspace moves, because transcripts are keyed by working directory.
 - Two kinds of state are held in memory only and lost on restart: queued messages, and attachments that have not yet gone out with a text message.
-- There is no long-term memory. Only workspace files survive `/new`.
+- There is no long-term memory. Only workspace files survive a new session. Every retirement (idle rotation, `/new`, `/resume`, failed resume) goes through the `onSessionRetired` hook in `src/agent/session.ts`, a no-op reserved for memory extraction.
 
 ### Agent sandbox
 
@@ -73,7 +77,7 @@ Verified WeChat behavior (2026-10-10):
 
 | Path | Content |
 | --- | --- |
-| `$XDG_STATE_HOME/alfred/` (default `~/.local/state/alfred/`, override with `ALFRED_STATE_DIR`) | `account.json` (bot token), `sync.json` (poll cursor), `context-tokens.json`, `agent-state.json` (session, model and spend per user); files are mode 600 |
+| `$XDG_STATE_HOME/alfred/` (default `~/.local/state/alfred/`, override with `ALFRED_STATE_DIR`) | `account.json` (bot token), `sync.json` (poll cursor), `context-tokens.json`, `agent-state.json` (active and previous session, model and spend per user); files are mode 600 |
 | `$XDG_STATE_HOME/alfred/claude/` | isolated Claude Code config dir: agent session transcripts used for resume |
 | `~/Alfred/` (override with `ALFRED_WORKSPACE`) | `inbox/`, `reports/`, `notes/`, `.trash/` |
 | `$XDG_CACHE_HOME/alfred/ms-playwright/` (default `~/.cache/…`, override with `PLAYWRIGHT_BROWSERS_PATH`) | Chrome Headless Shell for PDF rendering |
@@ -82,6 +86,7 @@ Verified WeChat behavior (2026-10-10):
 | --- | --- | --- |
 | `ALFRED_LOG` | `info` | `debug` logs every request (credentials redacted) and the agent's stderr |
 | `ALFRED_MAX_BUDGET_USD` | `3` | per-task spend cap |
+| `ALFRED_SESSION_IDLE_HOURS` | `4` | idle hours after which the next task starts a new session; `0` disables rotation |
 | `ALFRED_ANTHROPIC_BASE_URL` | `https://ristretto.damao.io/anthropic` | LLM gateway route |
 
 ## Layout
@@ -89,7 +94,7 @@ Verified WeChat behavior (2026-10-10):
 ```
 src/ilink/          iLink protocol client: HTTP, QR login, CDN crypto, message shapes
 src/bot.ts          long-poll loop, owner filter, per-user intake queue, typing indicator
-src/agent/          Agent SDK handler, options, workspace guard, custom tools, persisted state
+src/agent/          Agent SDK handler, options, workspace guard, custom tools, session lifecycle, persisted state
 src/echo.ts         PoC handler and protocol test commands
 src/files.ts        inbound media storage and file helpers
 src/pdf.ts          Markdown/HTML to PDF rendering
