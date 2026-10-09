@@ -1,6 +1,8 @@
 import path from "node:path";
 
 import { STATE_DIR } from "../store.ts";
+import { rulesPromptSection } from "./rules.ts";
+import type { RulesFile } from "./rules.ts";
 
 export const MODELS = {
   sonnet: "claude-sonnet-5-5",
@@ -60,11 +62,17 @@ export function agentEnv(): Record<string, string> {
   };
 }
 
-export function systemPrompt(now: Date): string {
+/** Per-task inputs to the system prompt beyond the date. */
+export interface PromptContext {
+  /** Root ALFRED.md; undefined when the workspace has none. */
+  rootRules?: RulesFile;
+}
+
+export function systemPrompt(now: Date, context: PromptContext = {}): string {
   const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const date = now.toLocaleDateString("en-CA", { timeZone: tz });
   const weekday = now.toLocaleDateString("en-US", { weekday: "long", timeZone: tz });
-  return `You are Alfred, a personal research assistant for one person. They talk to you through WeChat on their phone and see only your final reply, never your tool calls.
+  const core = `You are Alfred, a personal research assistant for one person. They talk to you through WeChat on their phone and see only your final reply, never your tool calls.
 
 Today is ${date} (${weekday}), time zone ${tz}.
 
@@ -75,20 +83,14 @@ Today is ${date} (${weekday}), time zone ${tz}.
 - Images: generate_image makes images when the user asks for one, or illustrative visuals for reports such as a cover. Never generate an image to show data; draw charts as inline SVG. Each call is billed to the user's quota, even when it fails, so make one image unless asked for more and never retry a failed call on your own. Read every generated image before sending or embedding it, to check that it shows what was asked.
 
 # Workspace
-Your working directory is the workspace, and nothing outside it is accessible.
-- inbox/<date>/  files the user sent (images, PDFs, documents, video)
-- reports/  deliverables you write for the user
-- notes/  working notes and collected material
-- images/<date>/  images you generated
-- .trash/  deleted files
-
-When a message lists attached files, read them with the Read tool; it handles images and PDFs.
+Your working directory is the workspace, and nothing outside it is accessible. Files the user sends are saved under inbox/<date>/; when a message lists attached files, read them with the Read tool, which handles images and PDFs. Where everything else goes is set by the workspace rules below.
 
 # Replying in WeChat
 - Reply in Simplified Chinese unless the user writes in another language.
 - Write for a phone screen: lead with the answer, keep paragraphs short and lists compact. Markdown renders except images, so never embed images.
-- Keep chat replies under about 1500 characters. For anything longer, such as full reports, comparisons or collected material, write a Markdown file in reports/, deliver it with send_file, and reply with a short summary.
+- Keep chat replies under about 1500 characters. For anything longer, such as full reports, comparisons or collected material, write a Markdown file where the workspace rules put deliverables, deliver it with send_file, and reply with a short summary.
 - WeChat opens .md, .pdf, images and Office files, but not .html, so never send HTML. Images sent with send_file arrive as image messages.
-- For formal reports, anything with charts or wide tables, or anything the user may keep or forward: write Markdown, or self-contained HTML when you need charts, in reports/, convert it with render_pdf, and send the PDF. Draw charts as inline SVG. Rendering is sandboxed: only workspace images, stylesheets and fonts load, by relative path, e.g. ![](../images/<date>/cover.jpg) from reports/; network URLs, files outside the workspace, iframes and scripts do not.
+- For formal reports, anything with charts or wide tables, or anything the user may keep or forward: write Markdown, or self-contained HTML when you need charts, convert it with render_pdf, and send the PDF. Draw charts as inline SVG. Rendering is sandboxed: only workspace images, stylesheets and fonts load, by relative path, e.g. ![](../images/<date>/cover.jpg) from reports/; network URLs, files outside the workspace, iframes and scripts do not.
 - If a request is ambiguous in a way that changes the result, ask one short question. Otherwise proceed and state your assumptions.`;
+  return [core, rulesPromptSection(context.rootRules)].join("\n\n");
 }

@@ -33,6 +33,7 @@ import {
 import type { ModelKey } from "./config.ts";
 import { workspaceGuard } from "./guard.ts";
 import { TaskInput, answeredBy } from "./input.ts";
+import { RULES_FILE, RulesTracker, rulesChangeNotice, rulesDisclosure, seedRules, snapshotRules } from "./rules.ts";
 import { NO_SESSION, accountRun, onSessionRetired, resumePrevious, retire, rotationDueAt, shouldRotate } from "./session.ts";
 import type { RetireReason } from "./session.ts";
 import { AgentStateStore } from "./state.ts";
@@ -133,6 +134,20 @@ export function buildPrompt(text: string, opts: { attachments: string[]; quotedT
   return sections.join("\n\n");
 }
 
+/** Create the workspace layout and seed the root ALFRED.md; shared with scripts/agent-smoke.ts. */
+export function prepareWorkspace(): void {
+  for (const dir of WORKSPACE_SUBDIRS) fs.mkdirSync(path.join(WORKSPACE_DIR, dir), { recursive: true });
+  if (seedRules(WORKSPACE_DIR)) log.info(`seeded ${path.join(WORKSPACE_DIR, RULES_FILE)}`);
+}
+
+/** Reply listing the ALFRED.md files a run created, changed or removed, so rule changes never go unnoticed. */
+async function notifyRuleChanges(ctx: BotContext, userId: string, before: Map<string, string>): Promise<void> {
+  const notice = rulesChangeNotice(before, snapshotRules(WORKSPACE_DIR));
+  if (!notice) return;
+  log.info(`workspace rules changed: ${notice.replace(/\n/g, "; ")}`);
+  await reply(ctx, userId, notice).catch((err) => log.warn(`rules notice failed: ${describeError(err)}`));
+}
+
 /** SDK options for one run; shared with scripts/agent-smoke.ts so local tests match production. */
 export function agentOptions(params: {
   ctx: BotContext;
@@ -141,17 +156,23 @@ export function agentOptions(params: {
   resume?: string;
   abortController?: AbortController;
 }): Options {
+  const rules = new RulesTracker(WORKSPACE_DIR);
+  const disclosure = rulesDisclosure(rules);
   return {
     model: MODELS[params.model],
     cwd: WORKSPACE_DIR,
     env: agentEnv(),
     settingSources: [],
-    systemPrompt: systemPrompt(new Date()),
+    systemPrompt: systemPrompt(new Date(), { rootRules: rules.loadRoot() }),
     tools: BUILTIN_TOOLS,
     allowedTools: [...BUILTIN_TOOLS, ...ALFRED_TOOL_NAMES],
     permissionMode: "dontAsk",
     mcpServers: { alfred: createAlfredTools(params.ctx, params.userId, params.abortController?.signal) },
-    hooks: { PreToolUse: [workspaceGuard(WORKSPACE_DIR)] },
+    hooks: {
+      PreToolUse: [workspaceGuard(WORKSPACE_DIR)],
+      PostToolUse: [disclosure],
+      PostToolUseFailure: [disclosure],
+    },
     maxTurns: MAX_TURNS,
     maxBudgetUsd: MAX_BUDGET_USD,
     resume: params.resume,
@@ -163,7 +184,7 @@ export function agentOptions(params: {
 export function createAgentHandler(): MessageHandler {
   agentEnv(); // Fail at startup, not on the first message, if gateway credentials are missing.
   checkSessionIdleHours();
-  for (const dir of WORKSPACE_SUBDIRS) fs.mkdirSync(path.join(WORKSPACE_DIR, dir), { recursive: true });
+  prepareWorkspace();
 
   const store = new AgentStateStore();
   const runtimes = new Map<string, UserRuntime>();
@@ -244,6 +265,7 @@ export function createAgentHandler(): MessageHandler {
       stopped: false,
     };
     rt.run = run;
+    const rulesBefore = snapshotRules(WORKSPACE_DIR);
     const stopTyping = await ctx.typing.start(userId);
     const progress = setInterval(() => {
       reply(ctx, userId, `仍在处理（${humanAge(Date.now() - run.startedAt)}）：${toolSummary(run.toolCounts)}`).catch((err) =>
@@ -308,6 +330,8 @@ export function createAgentHandler(): MessageHandler {
       } catch (err) {
         log.error(`saving lastRunAt failed: ${describeError(err)}`);
       }
+      // Also after a stop or an error: the run may have changed rules before it ended.
+      await notifyRuleChanges(ctx, userId, rulesBefore);
       await stopTyping();
       rt.run = undefined;
     }
