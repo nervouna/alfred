@@ -150,6 +150,8 @@ test("touchedPaths maps each file tool to the paths it works in", () => {
   assert.deepEqual(touchedPaths("Grep", { pattern: "x" }, files), ["."]);
   assert.deepEqual(touchedPaths("mcp__alfred__move_file", { from: "notes/a.md", to: ".trash/a.md" }), ["notes/a.md", ".trash/a.md"]);
   assert.deepEqual(touchedPaths("mcp__alfred__render_pdf", { source: "reports/a.md" }), ["reports/a.md"]);
+  assert.deepEqual(touchedPaths("mcp__alfred__generate_image", { prompt: "p" }), ["images"]);
+  assert.deepEqual(touchedPaths("mcp__alfred__generate_image", { prompt: "p", output: "reports/cover.jpg" }), ["reports/cover.jpg"]);
   assert.deepEqual(touchedPaths("WebFetch", { url: "https://example.com" }), []);
   assert.deepEqual(touchedPaths("mcp__alfred__send_file", { path: "reports/a.pdf" }), []);
 });

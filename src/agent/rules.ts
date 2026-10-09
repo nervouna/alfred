@@ -29,6 +29,7 @@ How Alfred works in this workspace. Alfred reads this file at the start of every
 - inbox/<date>/  files sent in WeChat (images, PDFs, documents, video); Alfred saves them here
 - reports/  deliverables written for the user
 - notes/  working notes and collected material
+- images/<date>/  images Alfred generated
 - .trash/  deleted files
 `;
 
@@ -176,6 +177,9 @@ export function touchedPaths(toolName: string, input: Record<string, unknown>, r
       break;
     case "mcp__alfred__render_pdf":
       paths = [str(input.source), str(input.output)];
+      break;
+    case "mcp__alfred__generate_image":
+      paths = [str(input.output) ?? "images"];
       break;
     default:
       paths = [];

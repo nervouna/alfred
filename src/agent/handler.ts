@@ -24,6 +24,7 @@ import {
   MODELS,
   SESSION_IDLE_HOURS,
   agentEnv,
+  checkSessionIdleHours,
   isModelKey,
   systemPrompt,
 } from "./config.ts";
@@ -37,7 +38,7 @@ import type { AgentUserState } from "./state.ts";
 import { ALFRED_TOOL_NAMES, createAlfredTools } from "./tools.ts";
 
 const PROGRESS_INTERVAL_MS = 3 * 60_000;
-const WORKSPACE_SUBDIRS = ["inbox", "reports", "notes", ".trash"];
+const WORKSPACE_SUBDIRS = ["inbox", "reports", "notes", "images", ".trash"];
 
 const TOOL_LABELS: Record<string, string> = {
   WebSearch: "搜索",
@@ -148,7 +149,7 @@ export function agentOptions(params: {
     tools: BUILTIN_TOOLS,
     allowedTools: [...BUILTIN_TOOLS, ...ALFRED_TOOL_NAMES],
     permissionMode: "dontAsk",
-    mcpServers: { alfred: createAlfredTools(params.ctx, params.userId) },
+    mcpServers: { alfred: createAlfredTools(params.ctx, params.userId, params.abortController?.signal) },
     hooks: {
       PreToolUse: [workspaceGuard(WORKSPACE_DIR)],
       PostToolUse: [disclosure],
@@ -164,7 +165,7 @@ export function agentOptions(params: {
 
 export function createAgentHandler(): MessageHandler {
   agentEnv(); // Fail at startup, not on the first message, if gateway credentials are missing.
-  if (!(SESSION_IDLE_HOURS >= 0)) throw new Error("ALFRED_SESSION_IDLE_HOURS must be a number of hours, 0 to disable");
+  checkSessionIdleHours();
   prepareWorkspace();
 
   const store = new AgentStateStore();
@@ -285,9 +286,14 @@ export function createAgentHandler(): MessageHandler {
       log.error(`agent run failed: ${describeError(err)}`);
       await reply(ctx, userId, `执行出错：${describeError(err)}`).catch(() => {});
     } finally {
-      // Stopped and failed tasks count as activity too, so the idle clock restarts after every task.
-      store.update(userId, { lastRunAt: new Date().toISOString() });
       clearInterval(progress);
+      // Stopped and failed tasks count as activity too, so the idle clock restarts after every task.
+      // A failed write must not skip the cleanup below or escape from drain().
+      try {
+        store.update(userId, { lastRunAt: new Date().toISOString() });
+      } catch (err) {
+        log.error(`saving lastRunAt failed: ${describeError(err)}`);
+      }
       // Also after a stop or an error: the run may have changed rules before it ended.
       await notifyRuleChanges(ctx, userId, rulesBefore);
       await stopTyping();
