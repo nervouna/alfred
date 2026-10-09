@@ -2,6 +2,7 @@
   "name": "alfred",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "description": "Personal research assistant on WeChat (iLink) powered by the Claude Agent SDK",
   "type": "module",
   "engines": {

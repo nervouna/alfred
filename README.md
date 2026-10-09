@@ -38,6 +38,15 @@ Send a task as text or voice. Files and images can come first; they are saved to
 
 One task runs at a time; messages sent meanwhile are queued and handed over together when it finishes.
 
+### Sessions and context
+
+- Each user has one Claude Code session, and every task resumes it, so the agent remembers earlier tasks until `/new`. The session id is stored in `agent-state.json`; the transcript lives in the isolated config dir.
+- Claude Code compacts the transcript on its own when it nears the context window. Alfred adds no compaction logic and does not log when compaction happens.
+- The system prompt is rebuilt for every task and carries the current date. No `CLAUDE.md`, settings, plugins or MCP servers are loaded (`settingSources: []`).
+- If a session cannot be resumed, Alfred starts a new one and tells the user. This happens, for example, after the workspace moves, because transcripts are keyed by working directory.
+- Two kinds of state are held in memory only and lost on restart: queued messages, and attachments that have not yet gone out with a text message.
+- There is no long-term memory. Only workspace files survive `/new`.
+
 ### Agent sandbox
 
 - Built-in tools: `Read`, `Write`, `Edit`, `Glob`, `Grep`, `WebSearch`, `WebFetch`. No shell.
@@ -88,6 +97,21 @@ src/cli.ts          login | run | push | status | setup-pdf | pdf
 scripts/agent-smoke.ts  local agent run without WeChat
 ```
 
+## Development
+
+```bash
+npm run check   # type-check
+npm test        # unit tests
+npm run smoke -- --model haiku "prompt"   # one agent run with production options, WeChat tools stubbed
+```
+
+- The smoke script uses the real workspace and agent config dir. Point `ALFRED_WORKSPACE` and `ALFRED_STATE_DIR` at scratch directories to keep test runs out of them.
+- Do not start a second `npm start` against the same state dir while the bot is running. Both processes would long-poll the same cursor and take messages from each other.
+
 ## Protocol source
 
 There is no public iLink documentation site. The client follows the protocol notes and MIT-licensed reference implementation in [Tencent/openclaw-weixin](https://github.com/Tencent/openclaw-weixin) (v2.4.9); see `NOTICE`. The server contract may change without notice.
+
+## License
+
+MIT, see `LICENSE`. The iLink client under `src/ilink/` is ported from openclaw-weixin, also MIT; its notice is in `NOTICE`.
