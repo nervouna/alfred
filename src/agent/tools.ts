@@ -12,10 +12,11 @@ import { humanSize } from "../files.ts";
 import { MEDIA_MAX_BYTES } from "../ilink/inbound.ts";
 import { sendMedia } from "../ilink/send.ts";
 import { describeError, log } from "../log.ts";
+import { PDF_SOURCE_EXTS, isRendererMissing, renderPdf } from "../pdf.ts";
 import { WORKSPACE_DIR } from "../store.ts";
 import { resolveInside } from "./guard.ts";
 
-export const ALFRED_TOOL_NAMES = ["mcp__alfred__send_file", "mcp__alfred__move_file"];
+export const ALFRED_TOOL_NAMES = ["mcp__alfred__send_file", "mcp__alfred__move_file", "mcp__alfred__render_pdf"];
 
 const UNOPENABLE_EXTS = new Set([".html", ".htm"]);
 
@@ -89,5 +90,38 @@ export function createAlfredTools(ctx: BotContext, userId: string) {
     },
   );
 
-  return createSdkMcpServer({ name: "alfred", version: "0.1.0", tools: [sendFile, moveFile], alwaysLoad: true });
+  const renderPdfTool = tool(
+    "render_pdf",
+    "Convert a Markdown or HTML file in the workspace to an A4 PDF with page numbers. Rendering is offline: external images, fonts and scripts do not load, so draw charts as inline SVG. Deliver the result with send_file.",
+    {
+      source: z.string().describe("Markdown (.md) or HTML (.html) file, relative to the workspace"),
+      output: z.string().optional().describe("PDF path relative to the workspace; defaults to the source path with .pdf"),
+    },
+    async ({ source, output }) => {
+      const src = resolveInside(WORKSPACE_DIR, source);
+      if (!src) return fail(`${source} is outside the workspace.`);
+      if (!fs.existsSync(src) || !fs.statSync(src).isFile()) return fail(`${source} is not an existing file.`);
+      if (!PDF_SOURCE_EXTS.has(path.extname(src).toLowerCase())) return fail("Only .md and .html files can be rendered.");
+      const outRel = output ?? `${source.slice(0, source.length - path.extname(source).length)}.pdf`;
+      const out = resolveInside(WORKSPACE_DIR, outRel);
+      if (!out) return fail(`${outRel} is outside the workspace.`);
+      if (path.extname(out).toLowerCase() !== ".pdf") return fail("The output must end in .pdf.");
+      try {
+        const { bytes } = await renderPdf(src, out);
+        const rel = path.relative(WORKSPACE_DIR, out);
+        log.info(`agent rendered ${rel} (${bytes} bytes)`);
+        return ok(`Wrote ${rel} (${humanSize(bytes)}).`);
+      } catch (err) {
+        if (isRendererMissing(err)) return fail("PDF rendering is not set up on this machine (npm run setup:pdf). Send Markdown instead.");
+        return fail(`Rendering failed: ${describeError(err)}`);
+      }
+    },
+  );
+
+  return createSdkMcpServer({
+    name: "alfred",
+    version: "0.1.0",
+    tools: [sendFile, moveFile, renderPdfTool],
+    alwaysLoad: true,
+  });
 }

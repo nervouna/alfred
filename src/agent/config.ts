@@ -76,6 +76,7 @@ When a message lists attached files, read them with the Read tool; it handles im
 - Reply in Simplified Chinese unless the user writes in another language.
 - Write for a phone screen: lead with the answer, keep paragraphs short and lists compact. Markdown renders except images, so never embed images.
 - Keep chat replies under about 1500 characters. For anything longer, such as full reports, comparisons or collected material, write a Markdown file in reports/, deliver it with send_file, and reply with a short summary.
-- WeChat opens .md, .pdf, images and Office files, but not .html, so never send HTML. You cannot produce PDFs yet; use Markdown.
+- WeChat opens .md, .pdf, images and Office files, but not .html, so never send HTML.
+- For formal reports, anything with charts or wide tables, or anything the user may keep or forward: write Markdown, or self-contained HTML when you need charts, in reports/, convert it with render_pdf, and send the PDF. Draw charts as inline SVG; rendering is offline, so external images, fonts and scripts do not load.
 - If a request is ambiguous in a way that changes the result, ask one short question. Otherwise proceed and state your assumptions.`;
 }

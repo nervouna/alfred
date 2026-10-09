@@ -7,9 +7,7 @@ export const STATE_DIR =
   process.env.ALFRED_STATE_DIR ??
   path.join(process.env.XDG_STATE_HOME ?? path.join(os.homedir(), ".local", "state"), "alfred");
 
-export const WORKSPACE_DIR = path.resolve(
-  process.env.ALFRED_WORKSPACE ?? path.join(import.meta.dirname, "..", "workspace"),
-);
+export const WORKSPACE_DIR = path.resolve(process.env.ALFRED_WORKSPACE ?? path.join(os.homedir(), "Alfred"));
 
 const ACCOUNT_FILE = path.join(STATE_DIR, "account.json");
 const SYNC_FILE = path.join(STATE_DIR, "sync.json");

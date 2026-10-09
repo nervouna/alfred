@@ -12,19 +12,21 @@ A personal research assistant on WeChat: web research, material collection and f
 
 ```bash
 npm install
+npm run setup:pdf  # one-time: download Chrome Headless Shell (~99 MB) for PDF rendering
 npm run login   # scan the QR code with WeChat; the scanner becomes the owner
 npm start       # run the assistant
 npm run status  # local account and session state
 npm run push -- "hello"                      # proactive message to the owner
 npm run push -- --file report.pdf "caption"  # proactive file
 npm run smoke -- --model haiku "prompt"      # run one prompt through the agent locally, no WeChat
+node src/cli.ts pdf report.md                # render Markdown or HTML to PDF locally
 ```
 
 Only messages from the owner are handled; everything else is logged and dropped.
 
 ### In WeChat
 
-Send a task as text or voice. Files and images can come first; they are saved to `workspace/inbox/<date>/` and attached to your next text message. The assistant shows "typing…" while it works, posts a progress note every 3 minutes on long tasks, and delivers long results as Markdown files.
+Send a task as text or voice. Files and images can come first; they are saved to `~/Alfred/inbox/<date>/` and attached to your next text message. The assistant shows "typing…" while it works, posts a progress note every 3 minutes on long tasks, delivers long results as Markdown files, and turns formal reports into PDFs.
 
 | Command | Effect |
 | --- | --- |
@@ -39,7 +41,8 @@ One task runs at a time; messages sent meanwhile are queued and handed over toge
 ### Agent sandbox
 
 - Built-in tools: `Read`, `Write`, `Edit`, `Glob`, `Grep`, `WebSearch`, `WebFetch`. No shell.
-- Custom tools: `send_file` (deliver a workspace file to WeChat; refuses HTML) and `move_file` (move or rename inside the workspace; deleting means moving into `.trash/`).
+- Custom tools: `send_file` (deliver a workspace file to WeChat; refuses HTML), `move_file` (move or rename inside the workspace; deleting means moving into `.trash/`) and `render_pdf` (Markdown or HTML to A4 PDF).
+- PDF rendering uses Playwright's standalone Chrome Headless Shell in `~/.cache/alfred/ms-playwright/`, never the installed Chrome, and loads pages offline, so reports cannot pull or leak anything over the network. Charts must be inline SVG.
 - A `PreToolUse` hook confines every file path to the workspace, following symlinks. Permission mode is `dontAsk`, so anything not listed is denied.
 - The Claude Code subprocess gets a scrubbed environment and its own config dir, so it never loads the user's Claude Code settings, plugins or MCP servers.
 - Each task stops at 60 turns or `ALFRED_MAX_BUDGET_USD` (default $3).
@@ -63,7 +66,8 @@ Verified WeChat behavior (2026-10-10):
 | --- | --- |
 | `$XDG_STATE_HOME/alfred/` (default `~/.local/state/alfred/`, override with `ALFRED_STATE_DIR`) | `account.json` (bot token), `sync.json` (poll cursor), `context-tokens.json`, `agent-state.json` (session, model and spend per user); files are mode 600 |
 | `$XDG_STATE_HOME/alfred/claude/` | isolated Claude Code config dir: agent session transcripts used for resume |
-| `workspace/` (override with `ALFRED_WORKSPACE`) | `inbox/`, `reports/`, `notes/`, `.trash/`; git-ignored |
+| `~/Alfred/` (override with `ALFRED_WORKSPACE`) | `inbox/`, `reports/`, `notes/`, `.trash/` |
+| `$XDG_CACHE_HOME/alfred/ms-playwright/` (default `~/.cache/…`, override with `PLAYWRIGHT_BROWSERS_PATH`) | Chrome Headless Shell for PDF rendering |
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -79,7 +83,8 @@ src/bot.ts          long-poll loop, owner filter, per-user intake queue, typing 
 src/agent/          Agent SDK handler, options, workspace guard, custom tools, persisted state
 src/echo.ts         PoC handler and protocol test commands
 src/files.ts        inbound media storage and file helpers
-src/cli.ts          login | run | push | status
+src/pdf.ts          Markdown/HTML to PDF rendering
+src/cli.ts          login | run | push | status | setup-pdf | pdf
 scripts/agent-smoke.ts  local agent run without WeChat
 ```
 

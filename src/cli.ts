@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -8,6 +9,7 @@ import { DEFAULT_CDN_BASE_URL, IlinkClient } from "./ilink/client.ts";
 import { login } from "./ilink/login.ts";
 import { sendMedia, sendText } from "./ilink/send.ts";
 import { describeError, log, mask } from "./log.ts";
+import { BROWSERS_PATH, renderPdf } from "./pdf.ts";
 import { ContextTokenStore, STATE_DIR, WORKSPACE_DIR, loadAccount, loadCursor, requireAccount, saveAccount } from "./store.ts";
 
 const USAGE = `usage: node src/cli.ts <command>
@@ -16,7 +18,9 @@ const USAGE = `usage: node src/cli.ts <command>
   run [--echo]               start the assistant (--echo: PoC echo bot)
   push [--no-context] [--file <path>] [text]
                              send a proactive message and/or file to the owner
-  status                     show local account and session state`;
+  status                     show local account and session state
+  setup-pdf                  download the headless Chrome used for PDF rendering
+  pdf <source> [output]      render a Markdown or HTML file to PDF`;
 
 function ageOf(epochMs: number): string {
   return `${((Date.now() - epochMs) / 3_600_000).toFixed(2)}h`;
@@ -79,6 +83,24 @@ async function cmdPush(args: string[]): Promise<void> {
   console.log(`sent${noContext ? " without context token" : ""}; the server accepted it (check WeChat to confirm delivery)`);
 }
 
+function cmdSetupPdf(): void {
+  const bin = path.join(import.meta.dirname, "..", "node_modules", ".bin", "playwright-core");
+  console.log(`Installing Chrome Headless Shell into ${BROWSERS_PATH}`);
+  const res = spawnSync(bin, ["install", "chromium-headless-shell"], {
+    stdio: "inherit",
+    env: { ...process.env, PLAYWRIGHT_BROWSERS_PATH: BROWSERS_PATH },
+  });
+  if (res.status !== 0) throw new Error(`playwright install exited with ${res.status ?? res.signal}`);
+}
+
+async function cmdPdf(args: string[]): Promise<void> {
+  const [source, output] = args;
+  if (!source) throw new Error("usage: pdf <source.md|source.html> [output.pdf]");
+  const out = output ?? `${source.slice(0, source.length - path.extname(source).length)}.pdf`;
+  const { bytes } = await renderPdf(path.resolve(source), path.resolve(out));
+  console.log(`wrote ${out} (${bytes} bytes)`);
+}
+
 function cmdStatus(): void {
   const account = loadAccount();
   console.log(`state dir: ${STATE_DIR}\nworkspace: ${WORKSPACE_DIR}`);
@@ -113,6 +135,12 @@ try {
       break;
     case "status":
       cmdStatus();
+      break;
+    case "setup-pdf":
+      cmdSetupPdf();
+      break;
+    case "pdf":
+      await cmdPdf(args);
       break;
     default:
       console.log(USAGE);
