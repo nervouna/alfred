@@ -48,6 +48,8 @@ test("chunkText respects the limit, prefers newlines, and keeps surrogate pairs 
 
 test("outboundKind routes by extension", () => {
   assert.equal(outboundKind("a.JPG"), "image");
+  assert.equal(outboundKind("images/2026-10-10/cover_001.jpg"), "image");
+  assert.equal(outboundKind("chart.png"), "image");
   assert.equal(outboundKind("clip.mp4"), "video");
   assert.equal(outboundKind("report.pdf"), "file");
 });

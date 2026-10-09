@@ -15,8 +15,9 @@ import { describeError, log } from "../log.ts";
 import { PDF_SOURCE_EXTS, isRendererMissing, renderPdf } from "../pdf.ts";
 import { WORKSPACE_DIR } from "../store.ts";
 import { resolveInside } from "./guard.ts";
+import { ASPECT_RATIOS, MAX_IMAGES_PER_CALL, MAX_IMAGES_PER_TASK, createImageGenerator } from "./image.ts";
 
-export const ALFRED_TOOL_NAMES = ["mcp__alfred__send_file", "mcp__alfred__move_file", "mcp__alfred__render_pdf"];
+export const ALFRED_TOOL_NAMES = ["mcp__alfred__send_file", "mcp__alfred__move_file", "mcp__alfred__render_pdf", "mcp__alfred__generate_image"];
 
 const UNOPENABLE_EXTS = new Set([".html", ".htm"]);
 
@@ -28,8 +29,8 @@ function fail(text: string) {
   return { content: [{ type: "text" as const, text }], isError: true };
 }
 
-/** Tools bound to one WeChat user for the duration of a run. */
-export function createAlfredTools(ctx: BotContext, userId: string) {
+/** Tools bound to one WeChat user for the duration of a run; `signal` aborts when the run is stopped. */
+export function createAlfredTools(ctx: BotContext, userId: string, signal?: AbortSignal) {
   const sendFile = tool(
     "send_file",
     "Send a file from the workspace to the user in WeChat. WeChat opens Markdown, PDF, images, video and Office files; it cannot open HTML.",
@@ -92,7 +93,7 @@ export function createAlfredTools(ctx: BotContext, userId: string) {
 
   const renderPdfTool = tool(
     "render_pdf",
-    "Convert a Markdown or HTML file in the workspace to an A4 PDF with page numbers. Rendering is offline: external images, fonts and scripts do not load, so draw charts as inline SVG. Deliver the result with send_file.",
+    "Convert a Markdown or HTML file in the workspace to an A4 PDF with page numbers. Rendering is offline: workspace images load by relative path (e.g. ../images/<date>/cover.jpg from reports/), but external images, fonts and scripts do not, so draw charts as inline SVG. Deliver the result with send_file.",
     {
       source: z.string().describe("Markdown (.md) or HTML (.html) file, relative to the workspace"),
       output: z.string().optional().describe("PDF path relative to the workspace; defaults to the source path with .pdf"),
@@ -118,10 +119,35 @@ export function createAlfredTools(ctx: BotContext, userId: string) {
     },
   );
 
+  // One generator per task, so the image cap applies per task.
+  const generateImages = createImageGenerator({ root: WORKSPACE_DIR, signal });
+  const generateImage = tool(
+    "generate_image",
+    `Generate images from a text prompt with MiniMax image-01 and save them as JPEG in the workspace. Use it when the user asks for an image, or for illustrative visuals such as a report cover; never for charts or data, which you draw as inline SVG. Every call is billed, even when it fails or times out, so never retry a failed call on your own. At most ${MAX_IMAGES_PER_CALL} images per call and ${MAX_IMAGES_PER_TASK} per task. Read each image to check it before using it; send_file delivers .jpg files as WeChat image messages.`,
+    {
+      prompt: z.string().min(1).describe("What the image shows: subject, style, composition, lighting. English or Chinese"),
+      aspect_ratio: z.enum(ASPECT_RATIOS).describe("16:9 for covers and wide illustrations, 1:1 or 3:4 for phone viewing"),
+      n: z.number().int().min(1).max(MAX_IMAGES_PER_CALL).optional().describe("Number of variants; default 1"),
+      output: z
+        .string()
+        .optional()
+        .describe("JPEG path relative to the workspace (.jpg). With n > 1 the files are <stem>_001.jpg and so on. Defaults to images/<date>/<slug>.jpg"),
+    },
+    async ({ prompt, aspect_ratio, n, output }) => {
+      try {
+        const { files, failed } = await generateImages({ prompt, aspectRatio: aspect_ratio, n, output });
+        const note = failed ? ` ${failed} of ${files.length + failed} images failed.` : "";
+        return ok(`Generated ${files.join(", ")}.${note}`);
+      } catch (err) {
+        return fail(describeError(err));
+      }
+    },
+  );
+
   return createSdkMcpServer({
     name: "alfred",
     version: "0.1.0",
-    tools: [sendFile, moveFile, renderPdfTool],
+    tools: [sendFile, moveFile, renderPdfTool, generateImage],
     alwaysLoad: true,
   });
 }

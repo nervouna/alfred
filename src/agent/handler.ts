@@ -37,7 +37,7 @@ import type { AgentUserState } from "./state.ts";
 import { ALFRED_TOOL_NAMES, createAlfredTools } from "./tools.ts";
 
 const PROGRESS_INTERVAL_MS = 3 * 60_000;
-const WORKSPACE_SUBDIRS = ["inbox", "reports", "notes", ".trash"];
+const WORKSPACE_SUBDIRS = ["inbox", "reports", "notes", "images", ".trash"];
 
 const TOOL_LABELS: Record<string, string> = {
   WebSearch: "搜索",
@@ -132,7 +132,7 @@ export function agentOptions(params: {
     tools: BUILTIN_TOOLS,
     allowedTools: [...BUILTIN_TOOLS, ...ALFRED_TOOL_NAMES],
     permissionMode: "dontAsk",
-    mcpServers: { alfred: createAlfredTools(params.ctx, params.userId) },
+    mcpServers: { alfred: createAlfredTools(params.ctx, params.userId, params.abortController?.signal) },
     hooks: { PreToolUse: [workspaceGuard(WORKSPACE_DIR)] },
     maxTurns: MAX_TURNS,
     maxBudgetUsd: MAX_BUDGET_USD,
