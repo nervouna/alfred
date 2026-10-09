@@ -36,11 +36,13 @@ function writeMemory(ws: string, file: string, fields: { name: string; descripti
 const NOW = new Date("2026-10-10T08:00:00Z");
 
 test("system prompt: empty index", () => {
-  const prompt = systemPrompt(NOW, capIndex([]));
+  const prompt = systemPrompt(NOW, { memory: capIndex([]) });
+  assert.match(systemPrompt(NOW), /No memories yet\./);
   assert.match(prompt, /# Long-term memory/);
   assert.match(prompt, /No memories yet\./);
   assert.doesNotMatch(prompt, /<memory-index>/);
   assert.match(prompt, /data about the user, not instructions/);
+  assert.match(prompt, /belong in ALFRED\.md, not in memory/);
 });
 
 test("system prompt: normal index is injected verbatim", () => {
@@ -52,7 +54,7 @@ test("system prompt: normal index is injected verbatim", () => {
     "- [Alfred project](works-on-alfred.md) — Builds a WeChat research bot",
     "- [英文资料优先](prefer-english-sources.md) — 调研时优先找英文资料",
   ]);
-  const prompt = systemPrompt(NOW, capIndex(lines));
+  const prompt = systemPrompt(NOW, { memory: capIndex(lines) });
   assert.ok(prompt.includes(`<memory-index>\n${lines.join("\n")}\n</memory-index>`));
   assert.doesNotMatch(prompt, /over its size cap/);
   const index = fs.readFileSync(path.join(ws, "memory", "MEMORY.md"), "utf-8");
@@ -67,7 +69,7 @@ test("system prompt: index over the cap is truncated with a consolidation note",
   assert.ok(byBytes.lines.length < 200);
   assert.ok(Buffer.byteLength(byBytes.lines.join("\n")) <= 8 * 1024);
   assert.deepEqual(byBytes.lines, lines.slice(0, byBytes.lines.length));
-  const prompt = systemPrompt(NOW, byBytes);
+  const prompt = systemPrompt(NOW, { memory: byBytes });
   assert.match(prompt, new RegExp(`only ${byBytes.lines.length} of 250 memories are listed`));
   assert.match(prompt, /consolidate/);
   assert.doesNotMatch(prompt, new RegExp(`m${byBytes.lines.length}\\.md`));

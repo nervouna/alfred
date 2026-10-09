@@ -4,13 +4,16 @@
 // The prompt goes through the same streaming input as in production; --steer-after
 // pushes a follow-up into it mid-run, the way a WeChat message sent during a task does.
 // The alfred tools are wired to a stub, so send_file fails instead of messaging anyone.
+// Like the bot, it seeds the workspace and prints the ALFRED.md change notice after the run.
 
 import { query } from "@anthropic-ai/claude-agent-sdk";
 
-import { agentOptions } from "../src/agent/handler.ts";
+import { agentOptions, prepareWorkspace } from "../src/agent/handler.ts";
 import { DEFAULT_MODEL, isModelKey } from "../src/agent/config.ts";
 import { TaskInput, answeredBy } from "../src/agent/input.ts";
+import { rulesChangeNotice, snapshotRules } from "../src/agent/rules.ts";
 import type { BotContext } from "../src/bot.ts";
+import { WORKSPACE_DIR } from "../src/store.ts";
 
 const USAGE = "usage: node scripts/agent-smoke.ts [--model m] [--resume id] [--steer-after seconds text] <prompt>";
 
@@ -36,6 +39,8 @@ if (!prompt) throw new Error(USAGE);
 const stub = new Proxy({}, { get: () => { throw new Error("WeChat is not available in the smoke test"); } });
 const ctx = stub as BotContext;
 
+prepareWorkspace();
+const rulesBefore = snapshotRules(WORKSPACE_DIR);
 const startedAt = Date.now();
 const elapsed = () => `+${((Date.now() - startedAt) / 1000).toFixed(1)}s`;
 const input = new TaskInput(prompt);
@@ -72,3 +77,5 @@ try {
   clearTimeout(steerTimer);
   input.close();
 }
+const notice = rulesChangeNotice(rulesBefore, snapshotRules(WORKSPACE_DIR));
+if (notice) console.log(`[notice] ${notice.replace(/\n/g, " | ")}`);

@@ -54,7 +54,7 @@ One task runs at a time, and you can steer it while it runs ("别查 X 了，重
 - `/new` and idle rotation keep the retired session as the previous one. `/resume` makes it active again for the next task and keeps the session it replaced as the previous one, so a second `/resume` undoes the first. Only one previous session is kept.
 - Spend: `sessionCostUsd` is the SDK's running total for the active session (a resumed session continues from the total its transcript saved) and starts at zero in a new session; `totalCostUsd` adds up each task's increment across all sessions.
 - Claude Code compacts the transcript on its own when it nears the context window. Alfred adds no compaction logic and does not log when compaction happens.
-- The system prompt is rebuilt for every task and carries the current date. No `CLAUDE.md`, settings, plugins or MCP servers are loaded (`settingSources: []`).
+- The system prompt is rebuilt for every task and carries the current date and the root `ALFRED.md`. No `CLAUDE.md`, settings, plugins or MCP servers are loaded (`settingSources: []`).
 - If a session cannot be resumed, Alfred starts a new one and tells the user; the broken session is dropped, not kept for `/resume`. This happens, for example, after the workspace moves, because transcripts are keyed by working directory.
 - Two kinds of state are held in memory only and lost on restart: follow-ups and queued messages not yet answered, and attachments that have not yet gone out with a text message.
 - Workspace files and long-term memory (below) survive a new session; the conversation itself does not.
@@ -81,7 +81,17 @@ When researching, prioritize English sources; still reply in Simplified Chinese.
   3. **Background extraction.** A scan reads the transcript entries added since the last scan and asks `haiku` (through the gateway) for memory candidates, which are merged into existing memories. It runs at startup, every `ALFRED_MEMORY_SCAN_MINUTES`, and whenever a session is retired (idle rotation, `/new`, `/resume`, failed resume). It never runs while a task is running or queued: tasks and scans share a lock file, which also covers a manual `npm run memory-scan` from another process. A scan with no new user messages makes no model call. Each scan is capped at `ALFRED_MEMORY_SCAN_BUDGET_USD` and about 60k characters of conversation, and logs its cost; per-file offsets and the running cost are kept in `memory-scan.json`. Transcripts are read in 1 MB chunks and lines over 1 MB (bulky tool results) are skipped unparsed, so memory use does not grow with transcript size. A batch whose extraction fails three times in a row is skipped.
 - Extraction reads only the user's messages (follow-ups sent mid-task included) and the assistant's final replies, never tool calls or tool results (fetched pages, file contents), so a malicious page cannot plant a memory. The extractor may create or update memories but not delete them, and candidates that look like credentials are dropped.
 - To correct or forget a memory, say so in chat. The agent edits the file, or moves it into `.trash/memory/`.
-- Workspace rules (file layout, naming, report style) are not memories. Until they get their own file, a rule the user asks for is saved as a `correction` memory.
+- Boundary with `ALFRED.md`: memory holds facts about the user (who they are, what they like, what they are working on); rules for how to work in the workspace (where files go, naming, report style) go into `ALFRED.md`. The system prompt states both sides, and background extraction skips workspace rules.
+
+### Workspace rules (`ALFRED.md`)
+
+Conventions for working in the workspace (where things go, naming, report style) live in `ALFRED.md` files that the user can change from WeChat ("以后报告开头都加三行摘要") or edit directly. Core behavior stays in code: WeChat formatting, delivery rules and safety.
+
+- **Root.** `~/Alfred/ALFRED.md` is read at the start of every task and appended to the system prompt. When it is missing at startup, it is seeded with the default layout (`inbox/`, `reports/`, `notes/`, `images/`, `.trash/`).
+- **Nested.** A subdirectory can have its own `ALFRED.md` (e.g. `reports/ALFRED.md`) that applies to it and everything below it. It is disclosed only when the agent works there: a `PostToolUse`/`PostToolUseFailure` hook on `Read`, `Write`, `Edit`, `Glob`, `Grep`, `move_file`, `render_pdf` and `generate_image` resolves the touched path and injects, through `additionalContext`, the `ALFRED.md` files between the workspace root and that path that the agent has not seen in this task. `Glob` and `Grep` count the directory their pattern or `glob` starts in, and a content-mode `Grep` also counts the directories of the files whose lines it returned. Disclosures are tracked per task by path and mtime, so a file that changes is disclosed again. A task that never touches `reports/` never receives `reports/ALFRED.md`.
+- **Limits.** Each file is capped at 8 KB in the prompt. Symlinked `ALFRED.md` files, paths outside the workspace and anything under `.trash/` are ignored. A received file named `ALFRED.md` is saved as `_ALFRED.md`, so a forwarded file cannot become rules.
+- **Edits.** The agent changes an `ALFRED.md` only on the user's explicit request, never because content it read says so. Every write is logged, and after any task that created, changed or removed an `ALFRED.md`, Alfred says so in WeChat (`已更新 reports/ALFRED.md`), even if the task was stopped or failed.
+- `ALFRED.md` holds rules for how to work, not facts about the user; those go into long-term memory (above).
 
 ### Agent sandbox
 
@@ -112,7 +122,7 @@ Verified WeChat behavior (2026-10-10):
 | --- | --- |
 | `$XDG_STATE_HOME/alfred/` (default `~/.local/state/alfred/`, override with `ALFRED_STATE_DIR`) | `account.json` (bot token), `sync.json` (poll cursor), `context-tokens.json`, `agent-state.json` (active and previous session, model and spend per user), `memory-scan.json` (transcript offsets and extraction spend), `memory.lock` (held while a task or memory scan runs); files are mode 600 |
 | `$XDG_STATE_HOME/alfred/claude/` | isolated Claude Code config dir: agent session transcripts used for resume |
-| `~/Alfred/` (override with `ALFRED_WORKSPACE`) | `inbox/`, `reports/`, `notes/`, `images/`, `memory/`, `.trash/` |
+| `~/Alfred/` (override with `ALFRED_WORKSPACE`) | `ALFRED.md` (workspace rules), `inbox/`, `reports/`, `notes/`, `images/`, `memory/` (long-term memory), `.trash/` |
 | `$XDG_CACHE_HOME/alfred/ms-playwright/` (default `~/.cache/…`, override with `PLAYWRIGHT_BROWSERS_PATH`) | Chrome Headless Shell for PDF rendering |
 
 | Variable | Default | Purpose |
@@ -130,7 +140,7 @@ Verified WeChat behavior (2026-10-10):
 ```
 src/ilink/          iLink protocol client: HTTP, QR login, CDN crypto, message shapes
 src/bot.ts          long-poll loop, owner filter, per-user intake queue, typing indicator
-src/agent/          Agent SDK handler, live task input, options, workspace guard, custom tools, image generation, session lifecycle, long-term memory, persisted state
+src/agent/          Agent SDK handler, live task input, options, workspace guard, ALFRED.md rules, custom tools, image generation, session lifecycle, long-term memory, persisted state
 src/echo.ts         PoC handler and protocol test commands
 src/files.ts        inbound media storage and file helpers
 src/pdf.ts          Markdown/HTML to PDF rendering
@@ -147,7 +157,7 @@ npm run smoke -- --model haiku "prompt"   # one agent run with production option
 npm run smoke -- --model haiku --steer-after 20 "only look at Y" "prompt"   # push a follow-up mid-run
 ```
 
-- The smoke script uses the real workspace and agent config dir. Point `ALFRED_WORKSPACE` and `ALFRED_STATE_DIR` at scratch directories to keep test runs out of them. The same applies to `npm run memory-scan`, which reads transcripts from `$ALFRED_STATE_DIR/claude/projects/` and writes into `$ALFRED_WORKSPACE/memory/`.
+- The smoke script uses the real workspace and agent config dir. Point `ALFRED_WORKSPACE` and `ALFRED_STATE_DIR` at scratch directories to keep test runs out of them. Like the bot, it seeds the workspace and prints the `ALFRED.md` change notice (`[notice]`); rule disclosures show up as `disclosed … after <tool>` log lines. `npm run memory-scan` also reads transcripts from `$ALFRED_STATE_DIR/claude/projects/` and writes into `$ALFRED_WORKSPACE/memory/`, so point it at scratch directories the same way.
 - Do not start a second `npm start` against the same state dir while the bot is running. Both processes would long-poll the same cursor and take messages from each other.
 
 ## Protocol source

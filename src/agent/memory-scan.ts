@@ -312,9 +312,9 @@ Keep:
 - user: facts about the user (role, background, circumstances)
 - preference: stable preferences (sources, languages, formats, tone)
 - project: ongoing projects and goals the user will come back to
-- correction: corrections to how the assistant works ("别再…", "以后…")
+- correction: corrections to how the assistant talks to or treats the user ("别再…", "以后…")
 
-Skip one-off task details, research findings and other material that belongs in workspace files, short-lived facts, and secrets (passwords, keys, tokens, ID or card numbers).
+Skip one-off task details, research findings and other material that belongs in workspace files, short-lived facts, and secrets (passwords, keys, tokens, ID or card numbers). Also skip rules for how to do the work in the workspace (where files go, naming, how reports look): those live in the workspace rules file, which the assistant edits when the user asks.
 
 Rules:
 - Record only what the user said or clearly confirmed. Assistant replies are context for understanding the user's messages; never record something only because an assistant reply says it.
