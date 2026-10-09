@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
+import { isRulesFileName } from "./agent/rules.ts";
 import { downloadInboundMedia, imageExtension } from "./ilink/inbound.ts";
 import type { InboundMedia } from "./ilink/inbound.ts";
 import { log } from "./log.ts";
@@ -19,12 +20,16 @@ export function localTime(d = new Date()): string {
   return `${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
 }
 
-/** Strip path components and characters that are unsafe in file names. */
+/**
+ * Strip path components and characters that are unsafe in file names. Hidden
+ * files and received ALFRED.md files get a "_" prefix, so a forwarded file
+ * cannot become workspace rules.
+ */
 export function sanitizeFileName(name: string | undefined, fallback: string): string {
   const base = path.basename((name ?? "").replace(/\\/g, "/"));
   const cleaned = base.replace(/[\x00-\x1f<>:"/\\|?*]/g, "_").trim().slice(0, 200);
   if (!cleaned || cleaned === "." || cleaned === "..") return fallback;
-  return cleaned.startsWith(".") ? `_${cleaned}` : cleaned;
+  return cleaned.startsWith(".") || isRulesFileName(cleaned) ? `_${cleaned}` : cleaned;
 }
 
 /** Pick a path in `dir` that does not exist yet. */

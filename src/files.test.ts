@@ -11,4 +11,6 @@ test("sanitizeFileName strips paths and unsafe characters", () => {
   assert.equal(sanitizeFileName("..", "fallback.bin"), "fallback.bin");
   assert.equal(sanitizeFileName(undefined, "fallback.bin"), "fallback.bin");
   assert.equal(sanitizeFileName("报告 2026.pdf", "x"), "报告 2026.pdf");
+  assert.equal(sanitizeFileName("ALFRED.md", "x"), "_ALFRED.md");
+  assert.equal(sanitizeFileName("notes/alfred.md", "x"), "_alfred.md");
 });

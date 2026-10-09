@@ -1,12 +1,15 @@
 // Runs one prompt through the production agent options without WeChat.
 // usage: node scripts/agent-smoke.ts [--model sonnet|opus|haiku] [--resume <session>] <prompt>
 // The alfred tools are wired to a stub, so send_file fails instead of messaging anyone.
+// Like the bot, it seeds the workspace and prints the ALFRED.md change notice after the run.
 
 import { query } from "@anthropic-ai/claude-agent-sdk";
 
-import { agentOptions } from "../src/agent/handler.ts";
+import { agentOptions, prepareWorkspace } from "../src/agent/handler.ts";
 import { DEFAULT_MODEL, isModelKey } from "../src/agent/config.ts";
+import { rulesChangeNotice, snapshotRules } from "../src/agent/rules.ts";
 import type { BotContext } from "../src/bot.ts";
+import { WORKSPACE_DIR } from "../src/store.ts";
 
 const args = process.argv.slice(2);
 let model = DEFAULT_MODEL;
@@ -24,6 +27,8 @@ if (!prompt) throw new Error("usage: node scripts/agent-smoke.ts [--model m] [--
 const stub = new Proxy({}, { get: () => { throw new Error("WeChat is not available in the smoke test"); } });
 const ctx = stub as BotContext;
 
+prepareWorkspace();
+const rulesBefore = snapshotRules(WORKSPACE_DIR);
 for await (const m of query({ prompt, options: agentOptions({ ctx, userId: "smoke", model, resume }) })) {
   if (m.type === "system" && m.subtype === "init") {
     console.log(`[init] session=${m.session_id} model=${m.model} tools=${m.tools.join(",")}`);
@@ -37,3 +42,5 @@ for await (const m of query({ prompt, options: agentOptions({ ctx, userId: "smok
     else console.log(m.errors.join("\n"));
   }
 }
+const notice = rulesChangeNotice(rulesBefore, snapshotRules(WORKSPACE_DIR));
+if (notice) console.log(`[notice] ${notice.replace(/\n/g, " | ")}`);
