@@ -3,6 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { createAgentHandler } from "./agent/handler.ts";
+import { MEMORY_LOCK_FILE, describeScan, scanTranscripts } from "./agent/memory-scan.ts";
+import { MemoryLock } from "./agent/memory.ts";
 import { runBot } from "./bot.ts";
 import { echoHandler } from "./echo.ts";
 import { DEFAULT_CDN_BASE_URL, IlinkClient } from "./ilink/client.ts";
@@ -20,7 +22,8 @@ const USAGE = `usage: node src/cli.ts <command>
                              send a proactive message and/or file to the owner
   status                     show local account and session state
   setup-pdf                  download the headless Chrome used for PDF rendering
-  pdf <source> [output]      render a Markdown or HTML file to PDF`;
+  pdf <source> [output]      render a Markdown or HTML file to PDF
+  memory-scan                extract long-term memories from new transcript entries now`;
 
 function ageOf(epochMs: number): string {
   return `${((Date.now() - epochMs) / 3_600_000).toFixed(2)}h`;
@@ -101,6 +104,21 @@ async function cmdPdf(args: string[]): Promise<void> {
   console.log(`wrote ${out} (${bytes} bytes)`);
 }
 
+async function cmdMemoryScan(): Promise<void> {
+  const lock = new MemoryLock(MEMORY_LOCK_FILE);
+  if (!lock.tryAcquire("scan")) {
+    const holder = lock.current();
+    throw new Error(`memory is busy (${holder ? `${holder.holder} in pid ${holder.pid} since ${holder.since}` : "lock file unreadable"}); try again later`);
+  }
+  try {
+    const report = await scanTranscripts({ workspace: WORKSPACE_DIR });
+    console.log(describeScan(report));
+    for (const a of report.applied) console.log(`  ${a.action} memory/${a.file}: ${a.name}`);
+  } finally {
+    lock.release();
+  }
+}
+
 function cmdStatus(): void {
   const account = loadAccount();
   console.log(`state dir: ${STATE_DIR}\nworkspace: ${WORKSPACE_DIR}`);
@@ -141,6 +159,9 @@ try {
       break;
     case "pdf":
       await cmdPdf(args);
+      break;
+    case "memory-scan":
+      await cmdMemoryScan();
       break;
     default:
       console.log(USAGE);

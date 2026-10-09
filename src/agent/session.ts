@@ -17,20 +17,6 @@ export type RetireReason =
   /** Claude Code could not resume it; it is dropped, not kept for /resume. */
   | "resume-failed";
 
-export interface RetiredSession {
-  userId: string;
-  sessionId: string;
-  reason: RetireReason;
-}
-
-/**
- * Hook for long-term memory (#2): called once each time a session stops being the
- * user's active session, so its transcript can be processed. A session can be
- * retired more than once if /resume brings it back. The handler does not await it;
- * a rejection is logged. No-op for now.
- */
-export async function onSessionRetired(_session: RetiredSession): Promise<void> {}
-
 /** When an idle session will rotate (epoch ms), or undefined if it will not. */
 export function rotationDueAt(state: AgentUserState, idleHours: number): number | undefined {
   if (!state.sessionId || !state.lastRunAt || !(idleHours > 0)) return undefined;
