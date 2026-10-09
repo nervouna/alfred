@@ -26,6 +26,64 @@ node src/cli.ts pdf report.md                # render Markdown or HTML to PDF lo
 
 Only messages from the owner are handled; everything else is logged and dropped.
 
+### Run at login (macOS)
+
+A LaunchAgent can start Alfred at login and restart it if it crashes. launchd does not read your shell profile, so the plist has to set `PATH`, the mmx location and the gateway credentials itself. To keep the credentials out of the plist, Node reads them from an env file (mode 600) via `--env-file`. That file holds `CF_ID=…` and `CF_SECRET=…`, with or without `export`.
+
+Save as `~/Library/LaunchAgents/<label>.plist`, replacing the paths:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>local.alfred</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/opt/node@24/bin/node</string>
+    <string>--env-file=/path/to/alfred.env</string>
+    <string>src/cli.ts</string>
+    <string>run</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/path/to/alfred</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/opt/node@24/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>ALFRED_MMX_BIN</key>
+    <string>/path/to/mmx</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/you/.local/state/alfred/alfred.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/you/.local/state/alfred/alfred.log</string>
+</dict>
+</plist>
+```
+
+- `PATH` must contain Node's `bin` directory; the mmx wrapper runs `npx`. Point `ALFRED_MMX_BIN` at the mmx executable, or leave it out if you don't use image generation.
+- A crash restarts Alfred after 30 s. A clean exit (SIGTERM, `launchctl bootout`) does not.
+- Stop any `npm start` instance first: two processes on the same state dir take messages from each other.
+- The agent starts after you log in, not at boot.
+
+```bash
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.alfred.plist   # install and start
+launchctl kickstart -k gui/$(id -u)/local.alfred                             # restart, e.g. after git pull
+launchctl bootout gui/$(id -u)/local.alfred                                  # stop and unload
+launchctl print gui/$(id -u)/local.alfred | grep -E 'state|pid'              # status
+```
+
 ### In WeChat
 
 Send a task as text or voice. Files and images can come first; they are saved to `~/Alfred/inbox/<date>/` and attached to your next text message. The assistant shows "typing…" while it works, posts a progress note every 3 minutes on long tasks, delivers long results as Markdown files, turns formal reports into PDFs, and generates images on request.
