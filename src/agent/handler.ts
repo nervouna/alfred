@@ -24,7 +24,7 @@ import { AgentStateStore } from "./state.ts";
 import { ALFRED_TOOL_NAMES, createAlfredTools } from "./tools.ts";
 
 const PROGRESS_INTERVAL_MS = 3 * 60_000;
-const WORKSPACE_SUBDIRS = ["inbox", "reports", "notes", ".trash"];
+const WORKSPACE_SUBDIRS = ["inbox", "reports", "notes", "images", ".trash"];
 
 const TOOL_LABELS: Record<string, string> = {
   WebSearch: "搜索",
