@@ -1,13 +1,13 @@
 // PoC handler: echoes text, saves inbound media, and exposes commands that
 // exercise the parts of the iLink protocol the real assistant will rely on.
 
-import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
 import { reply } from "./bot.ts";
 import type { BotContext, MessageHandler } from "./bot.ts";
-import { downloadInboundMedia, imageExtension, parseMessage } from "./ilink/inbound.ts";
+import { humanAge, humanSize, localDate, localTime, saveInboundMedia } from "./files.ts";
+import { parseMessage } from "./ilink/inbound.ts";
 import type { InboundMedia } from "./ilink/inbound.ts";
 import { sendMedia } from "./ilink/send.ts";
 import type { WeixinMessage } from "./ilink/types.ts";
@@ -31,69 +31,11 @@ Text is echoed back. Images, files, video and voice are saved to the workspace.
 /** Last saved media per user, for /sendback. */
 const lastMedia = new Map<string, { filePath: string; fileName: string }>();
 
-function pad(n: number): string {
-  return String(n).padStart(2, "0");
-}
-
-function localDate(d = new Date()): string {
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-}
-
-function localTime(d = new Date()): string {
-  return `${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
-}
-
-/** Strip path components and characters that are unsafe in file names. */
-export function sanitizeFileName(name: string | undefined, fallback: string): string {
-  const base = path.basename((name ?? "").replace(/\\/g, "/"));
-  const cleaned = base.replace(/[\x00-\x1f<>:"/\\|?*]/g, "_").trim().slice(0, 200);
-  if (!cleaned || cleaned === "." || cleaned === "..") return fallback;
-  return cleaned.startsWith(".") ? `_${cleaned}` : cleaned;
-}
-
-/** Pick a path in `dir` that does not exist yet. */
-function uniquePath(dir: string, fileName: string): string {
-  const ext = path.extname(fileName);
-  const stem = fileName.slice(0, fileName.length - ext.length);
-  let candidate = path.join(dir, fileName);
-  for (let i = 1; fs.existsSync(candidate); i++) candidate = path.join(dir, `${stem}-${i}${ext}`);
-  return candidate;
-}
-
-function humanSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-}
-
-function humanAge(ms: number): string {
-  const s = Math.round(ms / 1000);
-  if (s < 120) return `${s}s`;
-  if (s < 7200) return `${Math.round(s / 60)}min`;
-  return `${(s / 3600).toFixed(1)}h`;
-}
-
 async function saveMedia(ctx: BotContext, userId: string, m: InboundMedia): Promise<string> {
-  const data = await downloadInboundMedia(m, ctx.cdnBaseUrl);
-  const time = localTime();
-  const fileName =
-    m.kind === "file"
-      ? sanitizeFileName(m.fileName, `file-${time}.bin`)
-      : m.kind === "image"
-        ? `image-${time}${imageExtension(data)}`
-        : m.kind === "video"
-          ? `video-${time}.mp4`
-          : `voice-${time}.silk`;
-  const dir = path.join(WORKSPACE_DIR, "inbox", localDate());
-  fs.mkdirSync(dir, { recursive: true });
-  const filePath = uniquePath(dir, fileName);
-  fs.writeFileSync(filePath, data);
-  if (m.kind !== "voice") lastMedia.set(userId, { filePath, fileName: path.basename(filePath) });
-
-  const md5 = crypto.createHash("md5").update(data).digest("hex");
-  const md5Note = m.declaredMd5 ? (m.declaredMd5.toLowerCase() === md5 ? ", md5 ok" : ", md5 MISMATCH") : "";
-  log.info(`saved ${m.kind} ${filePath} (${data.length} bytes)`);
-  return `${m.kind}: saved ${path.relative(WORKSPACE_DIR, filePath)} (${humanSize(data.length)}${md5Note})`;
+  const saved = await saveInboundMedia(m, ctx.cdnBaseUrl);
+  if (m.kind !== "voice") lastMedia.set(userId, { filePath: saved.filePath, fileName: path.basename(saved.filePath) });
+  const md5Note = saved.md5Ok === undefined ? "" : saved.md5Ok ? ", md5 ok" : ", md5 MISMATCH";
+  return `${m.kind}: saved ${saved.relPath} (${humanSize(saved.size)}${md5Note})`;
 }
 
 function markdownSample(): string {

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { createAgentHandler } from "./agent/handler.ts";
 import { runBot } from "./bot.ts";
 import { echoHandler } from "./echo.ts";
 import { DEFAULT_CDN_BASE_URL, IlinkClient } from "./ilink/client.ts";
@@ -12,7 +13,7 @@ import { ContextTokenStore, STATE_DIR, WORKSPACE_DIR, loadAccount, loadCursor, r
 const USAGE = `usage: node src/cli.ts <command>
 
   login                      scan a QR code with WeChat to bind the bot
-  run                        start the echo bot
+  run [--echo]               start the assistant (--echo: PoC echo bot)
   push [--no-context] [--file <path>] [text]
                              send a proactive message and/or file to the owner
   status                     show local account and session state`;
@@ -32,7 +33,8 @@ async function cmdLogin(): Promise<void> {
   console.log(`Logged in as bot ${result.botId}. Credentials saved to ${STATE_DIR}. Next: npm start`);
 }
 
-async function cmdRun(): Promise<void> {
+async function cmdRun(args: string[]): Promise<void> {
+  const handler = args.includes("--echo") ? echoHandler : createAgentHandler();
   const controller = new AbortController();
   const stop = (sig: string) => {
     if (controller.signal.aborted) process.exit(1);
@@ -41,7 +43,7 @@ async function cmdRun(): Promise<void> {
   };
   process.on("SIGINT", () => stop("SIGINT"));
   process.on("SIGTERM", () => stop("SIGTERM"));
-  await runBot(echoHandler, controller.signal);
+  await runBot(handler, controller.signal);
 }
 
 async function cmdPush(args: string[]): Promise<void> {
@@ -104,7 +106,7 @@ try {
       await cmdLogin();
       break;
     case "run":
-      await cmdRun();
+      await cmdRun(args);
       break;
     case "push":
       await cmdPush(args);

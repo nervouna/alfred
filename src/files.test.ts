@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { sanitizeFileName } from "./echo.ts";
+import { sanitizeFileName } from "./files.ts";
 
 test("sanitizeFileName strips paths and unsafe characters", () => {
   assert.equal(sanitizeFileName("../../etc/passwd", "x"), "passwd");

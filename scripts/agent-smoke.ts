@@ -1,0 +1,39 @@
+// Runs one prompt through the production agent options without WeChat.
+// usage: node scripts/agent-smoke.ts [--model sonnet|opus|haiku] [--resume <session>] <prompt>
+// The alfred tools are wired to a stub, so send_file fails instead of messaging anyone.
+
+import { query } from "@anthropic-ai/claude-agent-sdk";
+
+import { agentOptions } from "../src/agent/handler.ts";
+import { DEFAULT_MODEL, isModelKey } from "../src/agent/config.ts";
+import type { BotContext } from "../src/bot.ts";
+
+const args = process.argv.slice(2);
+let model = DEFAULT_MODEL;
+let resume: string | undefined;
+const words: string[] = [];
+for (let i = 0; i < args.length; i++) {
+  const arg = args[i] ?? "";
+  if (arg === "--model" && isModelKey(args[i + 1] ?? "")) model = args[++i] as typeof model;
+  else if (arg === "--resume") resume = args[++i];
+  else words.push(arg);
+}
+const prompt = words.join(" ");
+if (!prompt) throw new Error("usage: node scripts/agent-smoke.ts [--model m] [--resume id] <prompt>");
+
+const stub = new Proxy({}, { get: () => { throw new Error("WeChat is not available in the smoke test"); } });
+const ctx = stub as BotContext;
+
+for await (const m of query({ prompt, options: agentOptions({ ctx, userId: "smoke", model, resume }) })) {
+  if (m.type === "system" && m.subtype === "init") {
+    console.log(`[init] session=${m.session_id} model=${m.model} tools=${m.tools.join(",")}`);
+  } else if (m.type === "assistant") {
+    for (const block of m.message.content) {
+      if (block.type === "tool_use") console.log(`[tool] ${block.name} ${JSON.stringify(block.input).slice(0, 160)}`);
+    }
+  } else if (m.type === "result") {
+    console.log(`[result] subtype=${m.subtype} turns=${m.num_turns} cost=$${m.total_cost_usd.toFixed(4)} denials=${m.permission_denials.length}`);
+    if (m.subtype === "success") console.log(m.result);
+    else console.log(m.errors.join("\n"));
+  }
+}
