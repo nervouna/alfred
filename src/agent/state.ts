@@ -6,14 +6,26 @@ import type { ModelKey } from "./config.ts";
 
 const AGENT_STATE_FILE = path.join(STATE_DIR, "agent-state.json");
 
+/** A retired session, kept so /resume can switch back to it. */
+export interface SessionSnapshot {
+  sessionId: string;
+  sessionCostUsd: number;
+  sessionStartedAt?: string;
+}
+
 export interface AgentUserState {
-  /** Claude Code session to resume; cleared by /new. */
+  /** Claude Code session to resume; retired by /new and idle rotation. */
   sessionId?: string;
+  /** When the current session started; unknown for sessions created before this field existed. */
+  sessionStartedAt?: string;
   model: ModelKey;
   /** Running cost total the SDK reported for the current session. */
   sessionCostUsd: number;
   totalCostUsd: number;
+  /** When the last task ended or /resume was sent; idle rotation counts from here. */
   lastRunAt?: string;
+  /** The session retired last; /resume switches back to it. */
+  previousSession?: SessionSnapshot;
 }
 
 /** Per-user agent state, persisted so sessions and settings survive restarts. */
