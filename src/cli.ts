@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
+import { resolveInside } from "./agent/guard.ts";
 import { createAgentHandler } from "./agent/handler.ts";
 import { runBot } from "./bot.ts";
 import { echoHandler } from "./echo.ts";
@@ -97,7 +98,10 @@ async function cmdPdf(args: string[]): Promise<void> {
   const [source, output] = args;
   if (!source) throw new Error("usage: pdf <source.md|source.html> [output.pdf]");
   const out = output ?? `${source.slice(0, source.length - path.extname(source).length)}.pdf`;
-  const { bytes } = await renderPdf(path.resolve(source), path.resolve(out));
+  const src = path.resolve(source);
+  // Local images may come from the whole workspace for workspace files, else only from the source's directory.
+  const inWorkspace = fs.existsSync(WORKSPACE_DIR) && resolveInside(WORKSPACE_DIR, src);
+  const { bytes } = await renderPdf(src, path.resolve(out), { root: inWorkspace ? WORKSPACE_DIR : path.dirname(src) });
   console.log(`wrote ${out} (${bytes} bytes)`);
 }
 

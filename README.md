@@ -19,7 +19,7 @@ npm run status  # local account and session state
 npm run push -- "hello"                      # proactive message to the owner
 npm run push -- --file report.pdf "caption"  # proactive file
 npm run smoke -- --model haiku "prompt"      # run one prompt through the agent locally, no WeChat
-node src/cli.ts pdf report.md                # render Markdown or HTML to PDF locally
+node src/cli.ts pdf report.md                # render Markdown or HTML to PDF locally; local images load from the workspace, or only from the source's directory for files outside it
 ```
 
 Only messages from the owner are handled; everything else is logged and dropped.
@@ -51,7 +51,7 @@ One task runs at a time; messages sent meanwhile are queued and handed over toge
 
 - Built-in tools: `Read`, `Write`, `Edit`, `Glob`, `Grep`, `WebSearch`, `WebFetch`. No shell.
 - Custom tools: `send_file` (deliver a workspace file to WeChat; refuses HTML), `move_file` (move or rename inside the workspace; deleting means moving into `.trash/`) and `render_pdf` (Markdown or HTML to A4 PDF).
-- PDF rendering uses Playwright's standalone Chrome Headless Shell in `~/.cache/alfred/ms-playwright/`, never the installed Chrome, and loads pages offline, so reports cannot pull or leak anything over the network. Charts must be inline SVG.
+- PDF rendering uses Playwright's standalone Chrome Headless Shell in `~/.cache/alfred/ms-playwright/`, never the installed Chrome. Every request the page makes goes through a route handler that serves only the source itself plus images, stylesheets and fonts whose real path (symlinks followed) is inside the workspace. Other local files, iframes, objects and embeds, network URLs and every other scheme except `data:` are refused, and a CSP plus disabled JavaScript back this up. So a report can neither pull a file from outside the workspace into the PDF nor leak anything over the network. Reference workspace images by relative path (`![chart](../images/a.jpg)` from `reports/`); charts must be inline SVG.
 - A `PreToolUse` hook confines every file path to the workspace, following symlinks. Permission mode is `dontAsk`, so anything not listed is denied.
 - The Claude Code subprocess gets a scrubbed environment and its own config dir, so it never loads the user's Claude Code settings, plugins or MCP servers.
 - Each task stops at 60 turns or `ALFRED_MAX_BUDGET_USD` (default $3).

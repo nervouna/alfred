@@ -92,7 +92,7 @@ export function createAlfredTools(ctx: BotContext, userId: string) {
 
   const renderPdfTool = tool(
     "render_pdf",
-    "Convert a Markdown or HTML file in the workspace to an A4 PDF with page numbers. Rendering is offline: external images, fonts and scripts do not load, so draw charts as inline SVG. Deliver the result with send_file.",
+    "Convert a Markdown or HTML file in the workspace to an A4 PDF with page numbers. Only images, stylesheets and fonts inside the workspace load (reference them by relative path, e.g. ../images/a.jpg from reports/); network URLs, files outside the workspace, iframes, embeds and scripts are blocked, so draw charts as inline SVG. Deliver the result with send_file.",
     {
       source: z.string().describe("Markdown (.md) or HTML (.html) file, relative to the workspace"),
       output: z.string().optional().describe("PDF path relative to the workspace; defaults to the source path with .pdf"),
@@ -107,7 +107,7 @@ export function createAlfredTools(ctx: BotContext, userId: string) {
       if (!out) return fail(`${outRel} is outside the workspace.`);
       if (path.extname(out).toLowerCase() !== ".pdf") return fail("The output must end in .pdf.");
       try {
-        const { bytes } = await renderPdf(src, out);
+        const { bytes } = await renderPdf(src, out, { root: WORKSPACE_DIR });
         const rel = path.relative(WORKSPACE_DIR, out);
         log.info(`agent rendered ${rel} (${bytes} bytes)`);
         return ok(`Wrote ${rel} (${humanSize(bytes)}).`);
