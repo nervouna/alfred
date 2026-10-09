@@ -2,8 +2,10 @@
 //
 // Intake runs inside the bot's per-user queue and returns quickly; the agent
 // runs in the background so /stop and /status stay responsive. One task runs
-// per user at a time; messages that arrive meanwhile are queued and handed to
-// the agent together once the current task finishes.
+// per user at a time. A task is one query() in streaming input mode: messages
+// that arrive while it runs are pushed into its live input (see input.ts) and
+// steer it, and every result is sent back as its own reply. Messages that
+// arrive after the input closed are queued and start the next task.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -30,6 +32,7 @@ import {
 } from "./config.ts";
 import type { ModelKey } from "./config.ts";
 import { workspaceGuard } from "./guard.ts";
+import { TaskInput, answeredBy } from "./input.ts";
 import { RULES_FILE, RulesTracker, rulesChangeNotice, rulesDisclosure, seedRules, snapshotRules } from "./rules.ts";
 import { NO_SESSION, accountRun, onSessionRetired, resumePrevious, retire, rotationDueAt, shouldRotate } from "./session.ts";
 import type { RetireReason } from "./session.ts";
@@ -52,6 +55,7 @@ const TOOL_LABELS: Record<string, string> = {
 
 const HELP = `Alfred 调研助手
 直接发任务给我。文件、图片可以先发，再发说明。
+任务进行中也可以接着发消息补充或改方向，Alfred 会在当前步骤结束后看到。
 
 /new  开始新会话（清空上下文${SESSION_IDLE_HOURS > 0 ? `；空闲超过 ${SESSION_IDLE_HOURS} 小时也会自动开始` : ""}）
 /resume  切回上一个会话
@@ -62,6 +66,8 @@ const HELP = `Alfred 调研助手
 
 interface Run {
   abort: AbortController;
+  /** Live input of the task's query: the prompt and follow-ups sent while it runs. */
+  input: TaskInput;
   startedAt: number;
   toolCounts: Map<string, number>;
   stopped: boolean;
@@ -71,14 +77,14 @@ interface UserRuntime {
   /** True from the start of a task until the queue is drained. */
   busy: boolean;
   run?: Run;
-  /** Prompts received while a task was running. */
+  /** Prompts received after the running task stopped taking follow-ups; they start the next task. */
   queue: string[];
   /** Files received since the last text message, relative to the workspace. */
   attachments: string[];
 }
 
 type ExecOutcome =
-  | { kind: "result"; result: SDKResultMessage; sessionId?: string }
+  | { kind: "done" }
   | { kind: "stopped" }
   | { kind: "resume-failed"; detail: string };
 
@@ -104,6 +110,18 @@ function idleStatus(user: AgentUserState, now: number): string {
   if (due === undefined) return idle;
   if (now > due) return `${idle}，下一个任务会开新会话`;
   return `${idle}，再过 ${humanAge(due - now)} 下一个任务会开新会话`;
+}
+
+/** WeChat reply for one result. */
+function resultReply(result: SDKResultMessage): string {
+  if (result.subtype === "success") {
+    return result.is_error ? `出错了：${result.result}` : result.result.trim() || "完成。";
+  }
+  if (result.subtype === "error_max_turns") return `任务步骤超过 ${MAX_TURNS} 步，已中止。发“继续”可以接着做。`;
+  if (result.subtype === "error_max_budget_usd") {
+    return `本次任务花费超过上限 ${usd(MAX_BUDGET_USD)}，已中止。发“继续”可以接着做，或者把任务拆小。`;
+  }
+  return `执行出错：${result.errors.join("; ") || result.subtype}`;
 }
 
 export function buildPrompt(text: string, opts: { attachments: string[]; quotedText?: string; voice: boolean }): string {
@@ -184,25 +202,28 @@ export function createAgentHandler(): MessageHandler {
     );
   }
 
+  /** Runs the task's query until every message in its input is answered; each result goes to onResult. */
   async function execute(
     ctx: BotContext,
     userId: string,
-    prompt: string,
     run: Run,
     resume: string | undefined,
+    onResult: (result: SDKResultMessage) => Promise<void>,
   ): Promise<ExecOutcome> {
     const user = store.get(userId);
     let sessionId: string | undefined;
-    let result: SDKResultMessage | undefined;
+    let results = 0;
     const q = query({
-      prompt,
+      prompt: run.input,
       options: agentOptions({ ctx, userId, model: user.model, resume, abortController: run.abort }),
     });
     try {
       for await (const m of q) {
+        if (run.stopped) break;
         if (m.type === "system" && m.subtype === "init") {
+          // Every turn of a streaming query starts with an init message, so compare with the stored session.
           sessionId = m.session_id;
-          if (sessionId !== user.sessionId) {
+          if (sessionId !== store.get(userId).sessionId) {
             store.update(userId, { sessionId, sessionCostUsd: 0, sessionStartedAt: new Date().toISOString() });
           }
         } else if (m.type === "assistant") {
@@ -210,26 +231,39 @@ export function createAgentHandler(): MessageHandler {
             if (block.type === "tool_use") run.toolCounts.set(block.name, (run.toolCounts.get(block.name) ?? 0) + 1);
           }
         } else if (m.type === "result") {
-          result = m;
+          if (resume && results === 0 && m.is_error && m.num_turns === 0) {
+            run.input.rewind(); // The retry in a new session gets the same messages.
+            return { kind: "resume-failed", detail: m.subtype === "success" ? m.result : m.errors.join("; ") };
+          }
+          results++;
+          run.input.settle(answeredBy(m));
+          await onResult(m);
         }
       }
     } catch (err) {
       if (run.stopped) return { kind: "stopped" };
-      if (resume && !sessionId) return { kind: "resume-failed", detail: describeError(err) };
+      if (resume && !sessionId) {
+        run.input.rewind();
+        return { kind: "resume-failed", detail: describeError(err) };
+      }
+      // After an error result the CLI exits non-zero once its input closes; by then everything was answered.
+      if (results > 0 && run.input.pending === 0) return { kind: "done" };
       throw err;
     }
     if (run.stopped) return { kind: "stopped" };
-    if (!result) throw new Error("agent ended without a result");
-    if (resume && result.is_error && result.num_turns === 0) {
-      const detail = result.subtype === "success" ? result.result : result.errors.join("; ");
-      return { kind: "resume-failed", detail };
-    }
-    return { kind: "result", result, sessionId };
+    if (run.input.pending) throw new Error(`agent ended with ${run.input.pending} unanswered message(s)`);
+    return { kind: "done" };
   }
 
   async function runAgent(ctx: BotContext, userId: string, prompt: string): Promise<void> {
     const rt = runtime(userId);
-    const run: Run = { abort: new AbortController(), startedAt: Date.now(), toolCounts: new Map(), stopped: false };
+    const run: Run = {
+      abort: new AbortController(),
+      input: new TaskInput(prompt),
+      startedAt: Date.now(),
+      toolCounts: new Map(),
+      stopped: false,
+    };
     rt.run = run;
     const rulesBefore = snapshotRules(WORKSPACE_DIR);
     const stopTyping = await ctx.typing.start(userId);
@@ -238,6 +272,19 @@ export function createAgentHandler(): MessageHandler {
         log.warn(`progress note failed: ${describeError(err)}`),
       );
     }, PROGRESS_INTERVAL_MS);
+
+    let replies = 0;
+    let cost = 0;
+    const onResult = async (result: SDKResultMessage): Promise<void> => {
+      // total_cost_usd is cumulative across the turns of this query, so each result is accounted on its own.
+      const { deltaUsd, ...spend } = accountRun(store.get(userId), result.total_cost_usd);
+      store.update(userId, spend);
+      replies++;
+      cost += deltaUsd;
+      log.info(`agent turn done subtype=${result.subtype} turns=${result.num_turns} cost=${usd(deltaUsd)}`);
+      // A failed send must not end the query while later turns are still coming.
+      await reply(ctx, userId, resultReply(result)).catch((err) => log.error(`reply failed: ${describeError(err)}`));
+    };
 
     try {
       let before = store.get(userId);
@@ -249,43 +296,32 @@ export function createAgentHandler(): MessageHandler {
         await reply(ctx, userId, `距上次对话已超过 ${SESSION_IDLE_HOURS} 小时，已开始新会话（发 /resume 接回上一个会话）。`);
       }
       log.info(`agent run start model=${before.model} resume=${before.sessionId ?? "none"}`);
-      let outcome: ExecOutcome = await execute(ctx, userId, prompt, run, before.sessionId);
+      let outcome: ExecOutcome = await execute(ctx, userId, run, before.sessionId, onResult);
       if (outcome.kind === "resume-failed") {
         log.warn(`resume of ${before.sessionId} failed (${outcome.detail}); starting a new session`);
         store.update(userId, NO_SESSION);
         if (before.sessionId) retired(userId, before.sessionId, "resume-failed", outcome.detail);
         await reply(ctx, userId, "之前的会话无法恢复，已开始新会话。");
-        outcome = await execute(ctx, userId, prompt, run, undefined);
+        outcome = await execute(ctx, userId, run, undefined, onResult);
       }
       if (outcome.kind === "stopped") {
         log.info("agent run stopped by user");
         return;
       }
       if (outcome.kind === "resume-failed") throw new Error(outcome.detail);
-
-      const { result } = outcome;
-      const { deltaUsd, ...spend } = accountRun(store.get(userId), result.total_cost_usd);
-      store.update(userId, spend);
       log.info(
-        `agent run done subtype=${result.subtype} turns=${result.num_turns} cost=${usd(deltaUsd)} ` +
+        `agent run done replies=${replies} cost=${usd(cost)} ` +
           `time=${humanAge(Date.now() - run.startedAt)} tools=[${toolSummary(run.toolCounts)}]`,
       );
-
-      let text: string;
-      if (result.subtype === "success") {
-        text = result.is_error ? `出错了：${result.result}` : result.result.trim() || "完成。";
-      } else if (result.subtype === "error_max_turns") {
-        text = `任务步骤超过 ${MAX_TURNS} 步，已中止。发“继续”可以接着做。`;
-      } else if (result.subtype === "error_max_budget_usd") {
-        text = `本次任务花费超过上限 ${usd(MAX_BUDGET_USD)}，已中止。发“继续”可以接着做，或者把任务拆小。`;
-      } else {
-        text = `执行出错：${result.errors.join("; ") || result.subtype}`;
-      }
-      await reply(ctx, userId, text);
     } catch (err) {
+      // Close before the first await, so a message arriving while the error reply goes out is queued for the next task.
+      run.input.close();
       log.error(`agent run failed: ${describeError(err)}`);
-      await reply(ctx, userId, `执行出错：${describeError(err)}`).catch(() => {});
+      const missed = run.input.followUps;
+      const note = missed ? `\n期间追加的 ${missed} 条消息没有处理，需要的话请重发。` : "";
+      await reply(ctx, userId, `执行出错：${describeError(err)}${note}`).catch(() => {});
     } finally {
+      run.input.close();
       clearInterval(progress);
       // Stopped and failed tasks count as activity too, so the idle clock restarts after every task.
       // A failed write must not skip the cleanup below or escape from drain().
@@ -346,7 +382,8 @@ export function createAgentHandler(): MessageHandler {
 
       case "/stop": {
         if (!rt.run) return reply(ctx, userId, "当前没有进行中的任务。");
-        const dropped = rt.queue.splice(0).length;
+        const dropped = rt.queue.splice(0).length + rt.run.input.followUps;
+        rt.run.input.close();
         rt.run.stopped = true;
         rt.run.abort.abort();
         return reply(ctx, userId, dropped ? `已停止当前任务，并清空排队的 ${dropped} 条消息。` : "已停止当前任务。");
@@ -369,6 +406,7 @@ export function createAgentHandler(): MessageHandler {
           `累计花费：${usd(user.totalCostUsd)}`,
           rt.run ? `任务：进行中 ${humanAge(now - rt.run.startedAt)}，${toolSummary(rt.run.toolCounts)}` : "任务：空闲",
         );
+        if (rt.run?.input.followUps) lines.push(`追加消息：${rt.run.input.followUps} 条待 Alfred 处理`);
         if (rt.queue.length) lines.push(`排队：${rt.queue.length} 条`);
         if (rt.attachments.length) lines.push(`待处理附件：${rt.attachments.join("、")}`);
         return reply(ctx, userId, lines.join("\n"));
@@ -413,6 +451,10 @@ export function createAgentHandler(): MessageHandler {
     }
 
     const prompt = buildPrompt(trimmed, { attachments: rt.attachments.splice(0), quotedText, voice });
+    if (rt.run?.input.push(prompt)) {
+      await reply(ctx, userId, "收到，会在当前步骤结束后转给 Alfred。");
+      return;
+    }
     if (rt.busy) {
       rt.queue.push(prompt);
       await reply(ctx, userId, "收到，排在当前任务之后处理。发 /stop 可以停止当前任务。");

@@ -33,12 +33,17 @@ Send a task as text or voice. Files and images can come first; they are saved to
 | --- | --- |
 | `/new` | start a new session (drops the conversation context; `/resume` brings it back) |
 | `/resume` | switch back to the previous session for the next task; send it again to switch back |
-| `/stop` | stop the current task and clear queued messages |
+| `/stop` | stop the current task and drop pending follow-ups and queued messages |
 | `/model [sonnet\|opus\|haiku]` | show or switch the model; default `sonnet` |
-| `/status` | model, session age and idle time, when it rotates, spend, current task |
+| `/status` | model, session age and idle time, when it rotates, spend, current task, pending follow-ups |
 | `/help` | command list |
 
-One task runs at a time; messages sent meanwhile are queued and handed over together when it finishes.
+One task runs at a time, and you can steer it while it runs ("别查 X 了，重点看 Y"):
+
+- A message sent during a task is acknowledged (`收到，会在当前步骤结束后转给 Alfred。`) and handed to the running agent at the next step boundary, once the current model call and its tool calls finish. A tool call in flight is not interrupted. Files sent mid-task travel with the next text message, as before.
+- If the agent is still working through tool calls, the follow-up joins the current turn and one reply answers both. If it was already writing its final answer, the follow-up runs as its own turn right after, and each turn gets its own reply, sent as soon as it ends.
+- The typing indicator and the 3-minute progress notes cover the whole task, follow-up turns included.
+- Once every message has been answered, the task ends. A message that arrives after that is queued and starts the next task, which resumes the same session.
 
 ### Sessions and context
 
@@ -49,7 +54,7 @@ One task runs at a time; messages sent meanwhile are queued and handed over toge
 - Claude Code compacts the transcript on its own when it nears the context window. Alfred adds no compaction logic and does not log when compaction happens.
 - The system prompt is rebuilt for every task and carries the current date and the root `ALFRED.md`. No `CLAUDE.md`, settings, plugins or MCP servers are loaded (`settingSources: []`).
 - If a session cannot be resumed, Alfred starts a new one and tells the user; the broken session is dropped, not kept for `/resume`. This happens, for example, after the workspace moves, because transcripts are keyed by working directory.
-- Two kinds of state are held in memory only and lost on restart: queued messages, and attachments that have not yet gone out with a text message.
+- Two kinds of state are held in memory only and lost on restart: follow-ups and queued messages not yet answered, and attachments that have not yet gone out with a text message.
 - There is no long-term memory. Only workspace files survive a new session. Every retirement (idle rotation, `/new`, `/resume`, failed resume) goes through the `onSessionRetired` hook in `src/agent/session.ts`, a no-op reserved for memory extraction.
 
 ### Workspace rules (`ALFRED.md`)
@@ -70,7 +75,7 @@ Conventions for working in the workspace (where things go, naming, report style)
 - `generate_image` runs `mmx` without a shell, in its own process group, from the Alfred process rather than the agent's Claude Code subprocess. `/stop` or the 10-minute timeout kills the whole group. It uses the user's own Token Plan key, not the LLM gateway. Output paths must resolve inside the workspace. Existing files and paths a running call will write are never overwritten; the default is `images/<date>/<slug>.jpg`. A task may request at most 4 images per call and 8 in total. Failed and timed-out calls count, because MiniMax bills them too, and the tool never retries. `mmx` errors, quota errors included, reach the agent verbatim, and every call is logged.
 - A `PreToolUse` hook confines every file path to the workspace, following symlinks. Permission mode is `dontAsk`, so anything not listed is denied.
 - The Claude Code subprocess gets a scrubbed environment and its own config dir, so it never loads the user's Claude Code settings, plugins or MCP servers.
-- Each task stops at 60 turns or `ALFRED_MAX_BUDGET_USD` (default $3).
+- Spend is capped per task at `ALFRED_MAX_BUDGET_USD` (default $3), follow-up turns included; once it is reached, the task stops and any follow-up still waiting fails at once without spending. Model round-trips are capped at 60 per turn, so a follow-up that starts a turn of its own gets a fresh 60.
 - Residual risk: `WebFetch` can reach any URL, so a malicious page could try to make the agent leak workspace content through a request. Keep secrets out of the workspace.
 
 ### PoC echo bot
@@ -97,7 +102,7 @@ Verified WeChat behavior (2026-10-10):
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `ALFRED_LOG` | `info` | `debug` logs every request (credentials redacted) and the agent's stderr |
-| `ALFRED_MAX_BUDGET_USD` | `3` | per-task spend cap |
+| `ALFRED_MAX_BUDGET_USD` | `3` | per-task spend cap, follow-up turns included |
 | `ALFRED_SESSION_IDLE_HOURS` | `4` | idle hours after which the next task starts a new session; `0` disables rotation, empty means the default, anything else that is not a finite number >= 0 fails at startup |
 | `ALFRED_ANTHROPIC_BASE_URL` | `https://ristretto.damao.io/anthropic` | LLM gateway route |
 | `ALFRED_MMX_BIN` | `$CLAUDE_CONFIG_DIR/skills/mmx/bin/mmx` (`~/.claude/…` when unset) | `mmx` executable for `generate_image`; if it is missing, the tool returns an error |
@@ -107,7 +112,7 @@ Verified WeChat behavior (2026-10-10):
 ```
 src/ilink/          iLink protocol client: HTTP, QR login, CDN crypto, message shapes
 src/bot.ts          long-poll loop, owner filter, per-user intake queue, typing indicator
-src/agent/          Agent SDK handler, options, workspace guard, ALFRED.md rules, custom tools, image generation, session lifecycle, persisted state
+src/agent/          Agent SDK handler, live task input, options, workspace guard, ALFRED.md rules, custom tools, image generation, session lifecycle, persisted state
 src/echo.ts         PoC handler and protocol test commands
 src/files.ts        inbound media storage and file helpers
 src/pdf.ts          Markdown/HTML to PDF rendering
@@ -121,6 +126,7 @@ scripts/agent-smoke.ts  local agent run without WeChat
 npm run check   # type-check
 npm test        # unit tests
 npm run smoke -- --model haiku "prompt"   # one agent run with production options, WeChat tools stubbed
+npm run smoke -- --model haiku --steer-after 20 "only look at Y" "prompt"   # push a follow-up mid-run
 ```
 
 - The smoke script uses the real workspace and agent config dir. Point `ALFRED_WORKSPACE` and `ALFRED_STATE_DIR` at scratch directories to keep test runs out of them. Like the bot, it seeds the workspace and prints the `ALFRED.md` change notice (`[notice]`); rule disclosures show up as `disclosed … after <tool>` log lines.
