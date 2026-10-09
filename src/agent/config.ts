@@ -19,8 +19,16 @@ const GATEWAY_BASE_URL = process.env.ALFRED_ANTHROPIC_BASE_URL ?? "https://ristr
 export const MAX_TURNS = 60;
 /** Per-task spend cap; the SDK stops the task with error_max_budget_usd when exceeded. */
 export const MAX_BUDGET_USD = Number(process.env.ALFRED_MAX_BUDGET_USD ?? "3");
+const IDLE_HOURS_SETTING = process.env.ALFRED_SESSION_IDLE_HOURS?.trim() || "4";
 /** A task that starts after this many idle hours gets a new session; 0 disables rotation. */
-export const SESSION_IDLE_HOURS = Number(process.env.ALFRED_SESSION_IDLE_HOURS ?? "4");
+export const SESSION_IDLE_HOURS = Number(IDLE_HOURS_SETTING);
+
+/** Fail at startup on an idle threshold that would silently disable or break rotation. */
+export function checkSessionIdleHours(): void {
+  if (!Number.isFinite(SESSION_IDLE_HOURS) || SESSION_IDLE_HOURS < 0) {
+    throw new Error(`ALFRED_SESSION_IDLE_HOURS must be a finite number of hours >= 0 (0 disables), got "${IDLE_HOURS_SETTING}"`);
+  }
+}
 
 /** Isolated Claude Code config dir: session transcripts live here, apart from the user's own Claude Code. */
 export const AGENT_CONFIG_DIR = path.join(STATE_DIR, "claude");

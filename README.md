@@ -86,7 +86,7 @@ Verified WeChat behavior (2026-10-10):
 | --- | --- | --- |
 | `ALFRED_LOG` | `info` | `debug` logs every request (credentials redacted) and the agent's stderr |
 | `ALFRED_MAX_BUDGET_USD` | `3` | per-task spend cap |
-| `ALFRED_SESSION_IDLE_HOURS` | `4` | idle hours after which the next task starts a new session; `0` disables rotation |
+| `ALFRED_SESSION_IDLE_HOURS` | `4` | idle hours after which the next task starts a new session; `0` disables rotation, empty means the default, anything else that is not a finite number >= 0 fails at startup |
 | `ALFRED_ANTHROPIC_BASE_URL` | `https://ristretto.damao.io/anthropic` | LLM gateway route |
 
 ## Layout
