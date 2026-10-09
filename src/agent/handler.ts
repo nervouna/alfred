@@ -24,6 +24,7 @@ import {
   MODELS,
   SESSION_IDLE_HOURS,
   agentEnv,
+  checkSessionIdleHours,
   isModelKey,
   systemPrompt,
 } from "./config.ts";
@@ -143,7 +144,7 @@ export function agentOptions(params: {
 
 export function createAgentHandler(): MessageHandler {
   agentEnv(); // Fail at startup, not on the first message, if gateway credentials are missing.
-  if (!(SESSION_IDLE_HOURS >= 0)) throw new Error("ALFRED_SESSION_IDLE_HOURS must be a number of hours, 0 to disable");
+  checkSessionIdleHours();
   for (const dir of WORKSPACE_SUBDIRS) fs.mkdirSync(path.join(WORKSPACE_DIR, dir), { recursive: true });
 
   const store = new AgentStateStore();
@@ -263,9 +264,14 @@ export function createAgentHandler(): MessageHandler {
       log.error(`agent run failed: ${describeError(err)}`);
       await reply(ctx, userId, `执行出错：${describeError(err)}`).catch(() => {});
     } finally {
-      // Stopped and failed tasks count as activity too, so the idle clock restarts after every task.
-      store.update(userId, { lastRunAt: new Date().toISOString() });
       clearInterval(progress);
+      // Stopped and failed tasks count as activity too, so the idle clock restarts after every task.
+      // A failed write must not skip the cleanup below or escape from drain().
+      try {
+        store.update(userId, { lastRunAt: new Date().toISOString() });
+      } catch (err) {
+        log.error(`saving lastRunAt failed: ${describeError(err)}`);
+      }
       await stopTyping();
       rt.run = undefined;
     }
