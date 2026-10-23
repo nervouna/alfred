@@ -1,9 +1,9 @@
 // Image generation through MiniMax's mmx CLI (model image-01) on the user's Token Plan.
 //
-// mmx is toolchain: it uses the user's own key from ~/.config/mmx/config.json
-// and does not go through the LLM gateway. MiniMax bills every request, even
-// when the client times out, so nothing here retries and the per-task cap
-// counts requested images before the call.
+// mmx uses the user's own key from its config file (~/.mmx/config.json, or
+// $MMX_CONFIG_DIR/config.json). MiniMax bills every request, even when the
+// client times out, so nothing here retries and the per-task cap counts
+// requested images before the call.
 
 import { spawn } from "node:child_process";
 import fs from "node:fs";

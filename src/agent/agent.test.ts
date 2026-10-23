@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
 
+import { agentEnv } from "./config.ts";
 import { checkToolInput, resolveInside } from "./guard.ts";
 import { buildPrompt } from "./handler.ts";
 
@@ -51,4 +52,30 @@ test("buildPrompt lists attachments, quotes and voice transcripts", () => {
   assert.match(prompt, /- inbox\/2026-10-10\/a\.pdf/);
   assert.match(prompt, /> line1\n> line2/);
   assert.match(prompt, /\(Voice message, server transcript\)\n总结一下$/);
+});
+
+test("agentEnv passes Alfred's API key and drops inherited Claude and Anthropic variables", () => {
+  const vars = ["ALFRED_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_ENTRYPOINT"];
+  const saved = vars.map((name) => [name, process.env[name]] as const);
+  try {
+    Object.assign(process.env, {
+      ALFRED_ANTHROPIC_API_KEY: "sk-alfred",
+      ANTHROPIC_API_KEY: "sk-shell",
+      ANTHROPIC_BASE_URL: "https://proxy.invalid",
+      CLAUDE_CODE_ENTRYPOINT: "claude-desktop",
+    });
+    const env = agentEnv();
+    assert.equal(env.ANTHROPIC_API_KEY, "sk-alfred");
+    assert.equal(env.ANTHROPIC_BASE_URL, undefined);
+    assert.equal(env.CLAUDE_CODE_ENTRYPOINT, undefined);
+    assert.equal(env.ALFRED_ANTHROPIC_API_KEY, undefined);
+
+    delete process.env.ALFRED_ANTHROPIC_API_KEY;
+    assert.throws(() => agentEnv(), /ALFRED_ANTHROPIC_API_KEY must be set/);
+  } finally {
+    for (const [name, value] of saved) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
 });

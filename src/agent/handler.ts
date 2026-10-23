@@ -193,7 +193,7 @@ export function agentOptions(params: {
 }
 
 export function createAgentHandler(): MessageHandler {
-  agentEnv(); // Fail at startup, not on the first message, if gateway credentials are missing.
+  agentEnv(); // Fail at startup, not on the first message, if the API key is missing.
   checkSessionIdleHours();
   checkMemoryScanSettings();
   prepareWorkspace();

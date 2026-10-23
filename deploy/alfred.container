@@ -1,0 +1,30 @@
+# Rootless podman Quadlet for Alfred. Install it as
+# ~/.config/containers/systemd/alfred.container for a dedicated user with
+# lingering enabled (loginctl enable-linger <user>), then
+# `systemctl --user daemon-reload && systemctl --user start alfred`.
+[Unit]
+Description=Alfred WeChat assistant
+
+[Container]
+Image=localhost/alfred:latest
+ContainerName=alfred
+# The host user becomes the image's `node` user, so volume files stay owned by the host user.
+UserNS=keep-id:uid=1000,gid=1000
+Volume=%h/data/state:/data/state
+Volume=%h/data/workspace:/workspace
+# Your time zone: dates in replies and inbox folder names follow it.
+Environment=TZ=Asia/Taipei
+Secret=alfred_anthropic_api_key,type=env,target=ALFRED_ANTHROPIC_API_KEY
+Secret=alfred_mmx_config,type=mount,target=/home/node/.mmx/config.json,uid=1000,gid=1000,mode=0400
+# Node runs as PID 1 and spawns Claude Code and mmx process trees; an init reaps them.
+RunInit=true
+NoNewPrivileges=true
+DropCapability=all
+PodmanArgs=--memory=2g --pids-limit=512
+
+[Service]
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=default.target

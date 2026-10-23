@@ -17,8 +17,6 @@ export function isModelKey(value: string): value is ModelKey {
   return Object.hasOwn(MODELS, value);
 }
 
-const GATEWAY_BASE_URL = process.env.ALFRED_ANTHROPIC_BASE_URL ?? "https://ristretto.damao.io/anthropic";
-
 export const MAX_TURNS = 60;
 /** Per-task spend cap; the SDK stops the task with error_max_budget_usd when exceeded. */
 export const MAX_BUDGET_USD = Number(process.env.ALFRED_MAX_BUDGET_USD ?? "3");
@@ -57,26 +55,27 @@ export const AGENT_CONFIG_DIR = path.join(STATE_DIR, "claude");
 
 export const BUILTIN_TOOLS = ["Read", "Write", "Edit", "Glob", "Grep", "WebSearch", "WebFetch"];
 
+const API_KEY_VAR = "ALFRED_ANTHROPIC_API_KEY";
+
 /**
  * Environment for the Claude Code subprocess. Inherited CLAUDE* and ANTHROPIC*
  * variables are dropped: an inherited CLAUDE_CODE_ENTRYPOINT (e.g. when started
  * from a Claude Code terminal) makes the API bill the request as Claude Code,
- * which the Max plan's API credits do not cover.
+ * which the Max plan's API credits do not cover, and an inherited key or base
+ * URL would send the requests elsewhere. The key comes from its own variable so
+ * that a shell's ANTHROPIC_API_KEY is never picked up by accident.
  */
 export function agentEnv(): Record<string, string> {
-  const { CF_ID, CF_SECRET } = process.env;
-  if (!CF_ID || !CF_SECRET) throw new Error("CF_ID and CF_SECRET must be set to reach the LLM gateway");
+  const apiKey = process.env[API_KEY_VAR];
+  if (!apiKey) throw new Error(`${API_KEY_VAR} must be set`);
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
-    if (value === undefined || key.startsWith("CLAUDE") || key.startsWith("ANTHROPIC_")) continue;
+    if (value === undefined || key === API_KEY_VAR || key.startsWith("CLAUDE") || key.startsWith("ANTHROPIC_")) continue;
     env[key] = value;
   }
   return {
     ...env,
-    ANTHROPIC_BASE_URL: GATEWAY_BASE_URL,
-    // The gateway strips client credentials and injects the real key.
-    ANTHROPIC_API_KEY: "unused",
-    ANTHROPIC_CUSTOM_HEADERS: `CF-Access-Client-Id: ${CF_ID}\nCF-Access-Client-Secret: ${CF_SECRET}`,
+    ANTHROPIC_API_KEY: apiKey,
     CLAUDE_CONFIG_DIR: AGENT_CONFIG_DIR,
     CLAUDE_AGENT_SDK_CLIENT_APP: "alfred/0.1.0",
   };
