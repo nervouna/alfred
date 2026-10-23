@@ -8,6 +8,8 @@ Description=Alfred WeChat assistant
 [Container]
 Image=localhost/alfred:latest
 ContainerName=alfred
+# Rootless podman defaults to k8s-file, whose logs go away with each --rm container.
+LogDriver=journald
 # The host user becomes the image's `node` user, so volume files stay owned by the host user.
 UserNS=keep-id:uid=1000,gid=1000
 Volume=%h/data/state:/data/state
