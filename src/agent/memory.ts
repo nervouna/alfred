@@ -184,12 +184,25 @@ function isAlive(pid: number): boolean {
   }
 }
 
+/** Lock files that a MemoryLock in this process holds. */
+const heldHere = new Set<string>();
+
+/**
+ * Whether the lock described by `info` is still held. One that names this
+ * process's pid but is not held here was left by an earlier process with the
+ * same pid: a restarted container gives its new process the pid of the one
+ * that was killed.
+ */
+function isHeld(file: string, info: LockInfo): boolean {
+  return info.pid === process.pid ? heldHere.has(file) : isAlive(info.pid);
+}
+
 /**
  * Mutual exclusion between agent tasks and memory scans, so the agent and the
  * extraction job never edit memory files at the same time. It is a lock file
  * because a manual scan (`cli.ts memory-scan`) runs in a separate process from
  * the bot. Tasks share the lock with each other; a scan holds it alone. A lock
- * left by a dead process is taken over.
+ * whose holder is gone is taken over.
  */
 export class MemoryLock {
   private readonly file: string;
@@ -197,7 +210,7 @@ export class MemoryLock {
   private count = 0;
 
   constructor(file: string) {
-    this.file = file;
+    this.file = path.resolve(file);
   }
 
   tryAcquire(holder: LockHolder): boolean {
@@ -213,12 +226,13 @@ export class MemoryLock {
         fs.writeFileSync(this.file, JSON.stringify(info), { flag: "wx", mode: 0o600 });
         this.holder = holder;
         this.count = 1;
+        heldHere.add(this.file);
         return true;
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
       }
       const current = this.current();
-      if (current ? isAlive(current.pid) : this.justCreated()) return false;
+      if (current ? isHeld(this.file, current) : this.justCreated()) return false;
       fs.rmSync(this.file, { force: true });
     }
     return false;
@@ -245,6 +259,7 @@ export class MemoryLock {
   release(): void {
     if (!this.holder || --this.count > 0) return;
     this.holder = undefined;
+    heldHere.delete(this.file);
     fs.rmSync(this.file, { force: true });
   }
 

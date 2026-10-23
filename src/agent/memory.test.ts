@@ -372,6 +372,18 @@ test("memory lock: scans are exclusive, tasks share, stale locks are taken over"
   a.release();
 });
 
+test("memory lock: a lock naming this pid that nothing here holds is stale", () => {
+  // A restarted container gives the new process the pid of the killed one, so
+  // the pid it left in the lock is alive but is not the holder.
+  const file = path.join(tmp, "reused-pid.lock");
+  fs.writeFileSync(file, JSON.stringify({ pid: process.pid, holder: "task", since: "2026-01-01" }));
+  const lock = new MemoryLock(file);
+  assert.ok(lock.tryAcquire("scan"));
+  assert.ok(!new MemoryLock(file).tryAcquire("task"), "a lock held in this process still excludes other instances");
+  lock.release();
+  assert.ok(!fs.existsSync(file));
+});
+
 test("memory lock: a waiting task gives up when it is stopped", async () => {
   const file = path.join(tmp, "abort.lock");
   const scan = new MemoryLock(file);
