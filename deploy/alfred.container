@@ -20,6 +20,9 @@ Secret=alfred_anthropic_api_key,type=env,target=ALFRED_ANTHROPIC_API_KEY
 Secret=alfred_mmx_config,type=mount,target=/home/node/.mmx/config.json,uid=1000,gid=1000,mode=0400
 # Node runs as PID 1 and spawns Claude Code and mmx process trees; an init reaps them.
 RunInit=true
+# Shutdown waits up to 10 s for running tasks and 10 s for the iLink stop notice;
+# podman's default of 10 s would kill it partway.
+StopTimeout=30
 NoNewPrivileges=true
 DropCapability=all
 PodmanArgs=--memory=2g --pids-limit=512

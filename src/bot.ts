@@ -36,6 +36,20 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
+/**
+ * Waits up to `ms` for the per-user queues to finish. The timer is cleared as
+ * soon as they do: a pending timer keeps Node alive, and a container stop that
+ * waits on it gets the process killed instead.
+ */
+export async function drain(queues: Iterable<Promise<unknown>>, ms: number): Promise<void> {
+  const settled = new AbortController();
+  try {
+    await Promise.race([Promise.allSettled(queues), sleep(ms, settled.signal)]);
+  } finally {
+    settled.abort();
+  }
+}
+
 /** Reply to a user with the context token from their latest message. */
 export async function reply(ctx: BotContext, to: string, text: string): Promise<void> {
   await sendText({ client: ctx.client, to, text, contextToken: ctx.tokens.get(to)?.token });
@@ -159,7 +173,7 @@ export async function runBot(handler: MessageHandler, signal: AbortSignal): Prom
   }
 
   log.info("Shutting down...");
-  await Promise.race([Promise.allSettled(queues.values()), sleep(SHUTDOWN_DRAIN_MS)]);
+  await drain(queues.values(), SHUTDOWN_DRAIN_MS);
   try {
     await client.notifyStop();
   } catch (err) {
