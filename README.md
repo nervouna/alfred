@@ -102,6 +102,7 @@ systemctl --user daemon-reload && systemctl --user start alfred
 - Without `generate_image`, skip the mmx secret and delete its `Secret=` line from the Quadlet.
 - Set `TZ` in the Quadlet to your time zone.
 - The container restarts 30 s after any exit and starts at boot.
+- `journalctl --user` needs a persistent journal. If `/var/log/journal` does not exist, create it as root, run `systemd-tmpfiles --create --prefix /var/log/journal`, restart `systemd-journald` and run `journalctl --rotate`. Until then, root can read the logs with `journalctl CONTAINER_NAME=alfred`.
 - Podman stores secrets unencrypted, readable only by that user. They stay out of the image, the unit file and the repo.
 - An env secret keeps its bytes as they are, so create the key without a trailing newline, as above.
 
