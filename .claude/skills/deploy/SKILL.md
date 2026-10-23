@@ -32,7 +32,7 @@ ssh $HOST 'systemctl --user is-active alfred; journalctl --user -u alfred -n 60 
 
 - Each task logs `agent run start` and `agent run done` (cost, duration, tools). `render_pdf`, `generate_image`, `send_file` and memory scans log their own lines.
 - A start without a matching done means a task is running.
-- `memory lock still held by …; running the task anyway` at the start of a task means a killed container left a stale lock behind. Each task then waits minutes before it runs. `update.sh --restart` removes the stale lock.
+- `memory lock still held by …; running the task anyway` means the task waited minutes for the lock. If no other task or memory scan was running, the lock is stale. The bot takes over locks left by a killed container (#20), so look for another process holding it, e.g. a manual `memory-scan`. `update.sh --restart` removes a stale lock.
 
 ## Secrets
 
