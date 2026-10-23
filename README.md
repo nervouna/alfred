@@ -84,6 +84,32 @@ launchctl bootout gui/$(id -u)/local.alfred                                  # s
 launchctl print gui/$(id -u)/local.alfred | grep -E 'state|pid'              # status
 ```
 
+### Run in a container (Linux)
+
+`Containerfile` builds an image with Node 24, Chrome Headless Shell, CJK fonts and the `mmx` CLI. `deploy/alfred.container` runs it as a rootless podman Quadlet: the state dir and workspace are bind mounts under `~/data/`, the API key and the mmx config are podman secrets, and logs go to the journal. Use a dedicated, unprivileged user with lingering enabled (`loginctl enable-linger <user>`), and run everything below as that user:
+
+```bash
+git clone https://github.com/nervouna/alfred ~/alfred && cd ~/alfred
+podman build -t localhost/alfred:latest .
+mkdir -p ~/data/state ~/data/workspace
+read -rs KEY && printf %s "$KEY" | podman secret create alfred_anthropic_api_key - && unset KEY   # paste the key, Enter
+podman secret create alfred_mmx_config /path/to/mmx/config.json
+podman run --rm -it --userns=keep-id:uid=1000,gid=1000 -v ~/data/state:/data/state localhost/alfred:latest node src/cli.ts login
+install -Dm644 deploy/alfred.container ~/.config/containers/systemd/alfred.container
+systemctl --user daemon-reload && systemctl --user start alfred
+```
+
+- Without `generate_image`, skip the mmx secret and delete its `Secret=` line from the Quadlet.
+- Set `TZ` in the Quadlet to your time zone.
+- The container restarts 30 s after any exit and starts at boot.
+- Podman stores secrets unencrypted, readable only by that user. They stay out of the image, the unit file and the repo.
+- An env secret keeps its bytes as they are, so create the key without a trailing newline, as above.
+
+```bash
+journalctl --user -u alfred -f                                                             # logs
+cd ~/alfred && git pull && podman build -t localhost/alfred:latest . && systemctl --user restart alfred   # update
+```
+
 ### In WeChat
 
 Send a task as text or voice. Files and images can come first; they are saved to `~/Alfred/inbox/<date>/` and attached to your next text message. The assistant shows "typing…" while it works, posts a progress note every 3 minutes on long tasks, delivers long results as Markdown files, turns formal reports into PDFs, and generates images on request.
