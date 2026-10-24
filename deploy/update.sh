@@ -8,13 +8,18 @@
 #   deploy/update.sh --stop        stop Alfred, e.g. for a new QR login
 #
 #   --wait SECONDS       how long to wait for a running task (default 900)
-#   --install-quadlet    replace the installed Quadlet with deploy/alfred.container
-#   --keep-quadlet       keep an installed Quadlet that differs from the repo's
+#   --install-quadlet    replace installed Quadlets that differ from deploy/
+#   --keep-quadlet       keep installed Quadlets that differ from the repo's
+#
+# When the workbench pod is installed (workbench.pod next to alfred.container),
+# an update also installs its changed Quadlets and restarts it on a new image.
 set -euo pipefail
 
 repo=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
 state_dir=${ALFRED_HOST_STATE_DIR:-$HOME/data/state}
-quadlet=${XDG_CONFIG_HOME:-$HOME/.config}/containers/systemd/alfred.container
+systemd_dir=${XDG_CONFIG_HOME:-$HOME/.config}/containers/systemd
+quadlet=$systemd_dir/alfred.container
+workbench_units="workbench.pod workbench.container workbench-tunnel.container"
 unit=alfred
 image=localhost/alfred:latest
 previous=localhost/alfred:previous
@@ -30,7 +35,7 @@ while [ $# -gt 0 ]; do
     --wait) wait_s=${2:?--wait needs a number of seconds}; shift ;;
     --install-quadlet) quadlet_choice=install ;;
     --keep-quadlet) quadlet_choice=keep ;;
-    -h | --help) sed -n '2,12p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,15p' "$0"; exit 0 ;;
     *) echo "update.sh: unknown option $1" >&2; exit 2 ;;
   esac
   shift
@@ -39,7 +44,21 @@ done
 say() { printf '%s\n' "$*"; }
 die() { printf 'update.sh: %s\n' "$*" >&2; exit 1; }
 
-running_image() { podman inspect "$unit" --format '{{.Image}}' 2>/dev/null || true; }
+running_image() { podman inspect "${1:-$unit}" --format '{{.Image}}' 2>/dev/null || true; }
+
+workbench_installed() { [ -f "$systemd_dir/workbench.pod" ]; }
+
+# The workbench only reads, so it restarts without waiting for a task.
+update_workbench() {
+  if [ -n "$workbench_changed" ]; then
+    for u in $workbench_units; do install -m644 "$repo/deploy/$u" "$systemd_dir/$u"; done
+    systemctl --user daemon-reload
+    say "Installed the repo's workbench Quadlets."
+  fi
+  systemctl --user restart workbench.service
+  [ -z "$workbench_changed" ] || systemctl --user restart workbench-tunnel.service
+  say "The workbench runs image $(running_image workbench | cut -c1-12)."
+}
 
 # Tasks and memory scans hold $state_dir/memory.lock. A lock taken before the
 # container started is left over from a killed one; its pid proves nothing,
@@ -106,6 +125,8 @@ case $mode in
     wait_until_idle
     podman tag "$previous" "$image"
     restart
+    workbench_changed=
+    if workbench_installed; then update_workbench; fi
     ;;
 
   update)
@@ -119,6 +140,19 @@ case $mode in
           die "the installed Quadlet differs from deploy/alfred.container (diff above); rerun with --install-quadlet to replace it or --keep-quadlet to keep it" ;;
       esac
     fi
+    workbench_changed=
+    if workbench_installed; then
+      for u in $workbench_units; do
+        cmp -s "$repo/deploy/$u" "$systemd_dir/$u" && continue
+        case $quadlet_choice in
+          install) workbench_changed=1 ;;
+          keep) say "Keeping the installed $u, which differs from deploy/$u." ;;
+          *)
+            diff -u "$systemd_dir/$u" "$repo/deploy/$u" >&2 || true
+            die "the installed $u differs from deploy/$u (diff above); rerun with --install-quadlet to replace it or --keep-quadlet to keep it" ;;
+        esac
+      done
+    fi
 
     if git -C "$repo" symbolic-ref -q HEAD >/dev/null; then
       git -C "$repo" pull --ff-only --quiet
@@ -131,6 +165,10 @@ case $mode in
     current=$(running_image)
     built=$(podman image inspect "$image" --format '{{.Id}}')
     if [ "$current" = "$built" ] && [ -z "$quadlet_changed" ]; then
+      if workbench_installed && { [ "$(running_image workbench)" != "$built" ] || [ -n "$workbench_changed" ]; }; then
+        update_workbench
+        exit 0
+      fi
       say "Alfred already runs this build; nothing to restart."
       exit 0
     fi
@@ -145,6 +183,7 @@ case $mode in
       podman tag "$current" "$previous"
     fi
     restart
+    if workbench_installed; then update_workbench; fi
     podman image prune -f >/dev/null
     ;;
 esac

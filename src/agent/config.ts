@@ -52,6 +52,31 @@ export function checkMemoryScanSettings(): void {
   }
 }
 
+const WORKBENCH_URL_SETTING = process.env.ALFRED_WORKBENCH_URL?.trim() ?? "";
+/** Base URL of the workbench, for links in WeChat replies; empty means replies carry run ids only. */
+export const WORKBENCH_URL = WORKBENCH_URL_SETTING.replace(/\/+$/, "");
+/** Whether a workbench is deployed: the agent is told HTML reports can be read there. Implied by a URL. */
+export const WORKBENCH_ON = Boolean(WORKBENCH_URL) || process.env.ALFRED_WORKBENCH?.trim() === "on";
+
+/** Fail at startup on a workbench URL that would put broken links in replies. */
+export function checkWorkbenchSettings(): void {
+  if (!WORKBENCH_URL) return;
+  let url: URL;
+  try {
+    url = new URL(WORKBENCH_URL);
+  } catch {
+    throw new Error(`ALFRED_WORKBENCH_URL must be an absolute https URL, got "${WORKBENCH_URL_SETTING}"`);
+  }
+  if (url.protocol !== "https:" || url.search || url.hash) {
+    throw new Error(`ALFRED_WORKBENCH_URL must be an https URL without query or fragment, got "${WORKBENCH_URL_SETTING}"`);
+  }
+}
+
+/** Link to a run's card, or undefined without a workbench URL. */
+export function runCardUrl(runId: string): string | undefined {
+  return WORKBENCH_URL ? `${WORKBENCH_URL}/runs/${runId}` : undefined;
+}
+
 /** Isolated Claude Code config dir: session transcripts live here, apart from the user's own Claude Code. */
 export const AGENT_CONFIG_DIR = path.join(STATE_DIR, "claude");
 
@@ -222,6 +247,11 @@ Review every result before you reply:
 If a result falls short, start the same role once more with a brief that says what to fix. If it still falls short, reply with what you have and say what is missing.`;
 }
 
+const WORKBENCH_SECTION = `# Workbench
+The user can also follow your work in a read-only web workbench. Each task is a run with a short id (given below), and its card lists every file the run wrote, so you never need to send a file just so it can be found.
+- HTML reports open on the workbench in a sandbox where inline scripts, styles and SVG charts work, with no network access. A report with charts can stay HTML: write it where the workspace rules put deliverables, say in your reply that it is on the workbench, and render a PDF only when the user wants one to keep or forward. WeChat still cannot open HTML, so never send an HTML file.
+- When a message names a run id, its record (title, status and files) is attached to the message. Open the run's files when they matter for the request.`;
+
 /** Per-task inputs to the system prompt beyond the date. */
 export interface PromptContext {
   /** Root ALFRED.md; undefined when the workspace has none. */
@@ -230,6 +260,9 @@ export interface PromptContext {
   memory?: PromptIndex;
   /** Whether the Agent tool and its delegation rules are offered; default true. */
   subagents?: boolean;
+  /** This run's id, shown with the workbench section; default WORKBENCH_ON. */
+  runId?: string;
+  workbench?: boolean;
 }
 
 export function systemPrompt(now: Date, context: PromptContext = {}): string {
@@ -257,6 +290,9 @@ Your working directory is the workspace, and nothing outside it is accessible. F
 - For formal reports, anything with charts or wide tables, or anything the user may keep or forward: write Markdown, or self-contained HTML when you need charts, convert it with render_pdf, and send the PDF. Draw charts as inline SVG. Rendering is sandboxed: only workspace images, stylesheets and fonts load, by relative path, e.g. ![](../images/<date>/cover.jpg) from reports/; network URLs, files outside the workspace, iframes and scripts do not.
 - If a request is ambiguous in a way that changes the result, ask one short question. Otherwise proceed and state your assumptions.`;
   const sections = [core];
+  if (context.workbench ?? WORKBENCH_ON) {
+    sections.push(context.runId ? `${WORKBENCH_SECTION}\n\nThis run's id is ${context.runId}.` : WORKBENCH_SECTION);
+  }
   if (context.subagents !== false) sections.push(delegationSection());
   sections.push(rulesPromptSection(context.rootRules), memorySection(context.memory ?? { lines: [], total: 0 }));
   return sections.join("\n\n");

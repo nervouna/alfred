@@ -13,7 +13,9 @@ import { MEDIA_MAX_BYTES } from "../ilink/inbound.ts";
 import { sendMedia } from "../ilink/send.ts";
 import { describeError, log } from "../log.ts";
 import { PDF_SOURCE_EXTS, isRendererMissing, renderPdf } from "../pdf.ts";
+import type { RunRecorder } from "../runs.ts";
 import { WORKSPACE_DIR } from "../store.ts";
+import { WORKBENCH_ON } from "./config.ts";
 import { resolveInside } from "./guard.ts";
 import { ASPECT_RATIOS, MAX_IMAGES_PER_CALL, MAX_IMAGES_PER_TASK, createImageGenerator } from "./image.ts";
 
@@ -29,8 +31,16 @@ function fail(text: string) {
   return { content: [{ type: "text" as const, text }], isError: true };
 }
 
-/** Tools bound to one WeChat user for the duration of a run; `signal` aborts when the run is stopped. */
-export function createAlfredTools(ctx: BotContext, userId: string, signal?: AbortSignal) {
+/** Workspace-relative form of a path resolveInside returned. */
+function relPath(real: string): string {
+  return path.relative(fs.realpathSync(WORKSPACE_DIR), real);
+}
+
+/**
+ * Tools bound to one WeChat user for the duration of a run; `signal` aborts when
+ * the run is stopped, and `run` records the files they write and failed sends.
+ */
+export function createAlfredTools(ctx: BotContext, userId: string, signal?: AbortSignal, run?: RunRecorder) {
   const sendFile = tool(
     "send_file",
     "Send a file from the workspace to the user in WeChat. WeChat opens Markdown, PDF, images, video and Office files; it cannot open HTML.",
@@ -65,7 +75,12 @@ export function createAlfredTools(ctx: BotContext, userId: string, signal?: Abor
         log.info(`agent sent ${path.relative(WORKSPACE_DIR, real)} as ${kind}`);
         return ok(`Sent ${path.basename(real)} (${humanSize(stat.size)}) to the user as ${kind}.`);
       } catch (err) {
-        return fail(`Sending failed: ${describeError(err)}`);
+        const error = describeError(err);
+        log.warn(`sending ${relPath(real)} failed: ${error}`);
+        if (!run) return fail(`Sending failed: ${error}`);
+        run.undelivered({ kind: "file", path: relPath(real), error });
+        const where = WORKBENCH_ON ? ` and is listed on run ${run.id}'s card in the workbench, marked as not delivered` : "";
+        return fail(`Sending failed: ${error}. The file stays in the workspace${where}. Do not retry; say in your reply that it did not arrive and where it is.`);
       }
     },
   );
@@ -87,6 +102,7 @@ export function createAlfredTools(ctx: BotContext, userId: string, signal?: Abor
       if (dst.startsWith(src + path.sep)) return fail("Cannot move a directory into itself.");
       fs.mkdirSync(path.dirname(dst), { recursive: true });
       fs.renameSync(src, dst);
+      run?.moved(relPath(src), relPath(dst));
       return ok(`Moved ${from} to ${to}.`);
     },
   );
@@ -111,6 +127,7 @@ export function createAlfredTools(ctx: BotContext, userId: string, signal?: Abor
         const { bytes } = await renderPdf(src, out, { root: WORKSPACE_DIR });
         const rel = path.relative(WORKSPACE_DIR, out);
         log.info(`agent rendered ${rel} (${bytes} bytes)`);
+        run?.wrote(relPath(out), "render_pdf");
         return ok(`Wrote ${rel} (${humanSize(bytes)}).`);
       } catch (err) {
         if (isRendererMissing(err)) return fail("PDF rendering is not set up on this machine (npm run setup:pdf). Send Markdown instead.");
@@ -136,6 +153,7 @@ export function createAlfredTools(ctx: BotContext, userId: string, signal?: Abor
     async ({ prompt, aspect_ratio, n, output }) => {
       try {
         const { files, failed } = await generateImages({ prompt, aspectRatio: aspect_ratio, n, output });
+        for (const f of files) run?.wrote(f, "generate_image");
         const note = failed ? ` ${failed} of ${files.length + failed} images failed.` : "";
         return ok(`Generated ${files.join(", ")}.${note}`);
       } catch (err) {
