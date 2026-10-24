@@ -150,6 +150,14 @@ case $mode in
     ;;
 
   update)
+    # Pull first, so the Quadlets compared below are the ones this update brings.
+    if git -C "$repo" symbolic-ref -q HEAD >/dev/null; then
+      git -C "$repo" pull --ff-only --quiet
+    else
+      say "HEAD is detached; building the checked-out commit as it is."
+    fi
+    say "Code: $(git -C "$repo" log --oneline -1)"
+
     quadlet_changed=
     if ! cmp -s "$repo/deploy/alfred.container" "$quadlet"; then
       case $quadlet_choice in
@@ -174,12 +182,6 @@ case $mode in
       done
     fi
 
-    if git -C "$repo" symbolic-ref -q HEAD >/dev/null; then
-      git -C "$repo" pull --ff-only --quiet
-    else
-      say "HEAD is detached; building the checked-out commit as it is."
-    fi
-    say "Code: $(git -C "$repo" log --oneline -1)"
     podman build --quiet -t "$image" "$repo" >/dev/null
 
     current=$(running_image)
