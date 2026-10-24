@@ -42,6 +42,7 @@ import {
   checkWorkbenchSettings,
   isModelKey,
   runCardUrl,
+  runIdNote,
   subagentDefinitions,
   systemPrompt,
 } from "./config.ts";
@@ -314,7 +315,7 @@ export function agentOptions(params: {
     env: agentEnv(),
     settingSources: [],
     settings: AGENT_SETTINGS,
-    systemPrompt: systemPrompt(new Date(), { rootRules: rules.loadRoot(), memory, subagents, runId: params.run?.id }),
+    systemPrompt: systemPrompt(new Date(), { rootRules: rules.loadRoot(), memory, subagents }),
     tools,
     allowedTools: [...tools, ...ALFRED_TOOL_NAMES],
     agents: subagents ? subagentDefinitions() : undefined,
@@ -584,7 +585,8 @@ export function createAgentHandler(): MessageHandler {
     });
     const run: Run = {
       abort: new AbortController(),
-      input: new TaskInput(prompt, { keepOpen: () => !background.idle }),
+      // The run id rides with the first message, not the system prompt, which then stays cacheable across runs.
+      input: new TaskInput(WORKBENCH_ON ? `${runIdNote(recorder.id)}\n\n${prompt}` : prompt, { keepOpen: () => !background.idle }),
       startedAt: Date.now(),
       toolCounts: new Map(),
       subagents: new SubagentTracker(),

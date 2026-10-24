@@ -275,16 +275,25 @@ No message reaches a running subagent. When the user changes its work while it r
 If a message could be about more than one running subagent, ask which one.`;
 }
 
-/** The workbench section of the system prompt; `url` is its base URL when links are configured. */
-function workbenchSection(url: string, runId: string | undefined): string {
+/**
+ * The workbench section of the system prompt; `url` is its base URL when links
+ * are configured. It stays the same from run to run, so the prompt cache holds:
+ * the run's own id comes with the task's first message (runIdNote).
+ */
+function workbenchSection(url: string): string {
   const where = url
-    ? `- The workbench is at ${url}, and a run's card at ${url}/runs/<run id>. When the user asks where to find something, give the card link (or the workbench link), not a description: the workbench has no search. Alfred also appends the card link to your reply by itself when this run wrote files or started or reported on background subagents, so you need not repeat it there.`
-    : `- You do not know the workbench's address, so name runs by id: the user opens a card at <workbench>/runs/<run id>. The workbench has no search. Alfred appends the run id to your reply by itself when this run wrote files or started or reported on background subagents.`;
+    ? `- The workbench is at ${url}. A run's card is at ${url}/runs/<run id>; the Files page, ${url}/files, browses the whole workspace by folder (\`?path=reports\` opens a folder), and there are pages for spend, sessions, memory and logs. There is no search. When the user asks where to find something, give the card or folder link, not a description. Alfred also appends the card link to your reply by itself when this run wrote files or started or reported on background subagents, so you need not repeat it there.`
+    : `- You do not know the workbench's address, so name runs by id (the user opens a card at <workbench>/runs/<run id>) and files by their workspace path (the Files page browses the workspace by folder). There is no search. Alfred appends the run id to your reply by itself when this run wrote files or started or reported on background subagents.`;
   return `# Workbench
-The user can also follow your work in a read-only web workbench. Each task is a run with a short id${runId ? ` (this one is ${runId})` : ""}, and its card lists every file the run wrote, so you never need to send a file just so it can be found.
+The user can also follow your work in a read-only web workbench. Each task is a run with a short id, given at the top of the task's first message, and its card lists every file the run wrote, so you never need to send a file just so it can be found.
 ${where}
 - HTML reports open on the workbench in a sandbox where inline scripts, styles and SVG charts work, with no network access. A report with charts can stay HTML: write it where the workspace rules put deliverables, say in your reply that it is on the workbench, and render a PDF only when the user wants one to keep or forward. WeChat still cannot open HTML, so never send an HTML file.
 - When a message names a run id, its record (title, status and files) is attached to the message. Open the run's files when they matter for the request.`;
+}
+
+/** The line that tells the agent its run id, at the top of a task's first message when a workbench is deployed. */
+export function runIdNote(runId: string): string {
+  return `[Alfred] This task is run ${runId} on the workbench.`;
 }
 
 /** Per-task inputs to the system prompt beyond the date. */
@@ -295,8 +304,6 @@ export interface PromptContext {
   memory?: PromptIndex;
   /** Whether the Agent tool and its delegation rules are offered; default true. */
   subagents?: boolean;
-  /** This run's id, shown with the workbench section. */
-  runId?: string;
   /** Whether the workbench section is included; default WORKBENCH_ON. */
   workbench?: boolean;
   /** The workbench's base URL for links; default WORKBENCH_URL. */
@@ -328,7 +335,7 @@ Your working directory is the workspace, and nothing outside it is accessible. F
 - For formal reports, anything with charts or wide tables, or anything the user may keep or forward: write Markdown, or self-contained HTML when you need charts, convert it with render_pdf, and send the PDF. Draw charts as inline SVG. Rendering is sandboxed: only workspace images, stylesheets and fonts load, by relative path, e.g. ![](../images/<date>/cover.jpg) from reports/; network URLs, files outside the workspace, iframes and scripts do not.
 - If a request is ambiguous in a way that changes the result, ask one short question. Otherwise proceed and state your assumptions.`;
   const sections = [core];
-  if (context.workbench ?? WORKBENCH_ON) sections.push(workbenchSection(context.workbenchUrl ?? WORKBENCH_URL, context.runId));
+  if (context.workbench ?? WORKBENCH_ON) sections.push(workbenchSection(context.workbenchUrl ?? WORKBENCH_URL));
   if (context.subagents !== false) sections.push(delegationSection());
   sections.push(rulesPromptSection(context.rootRules), memorySection(context.memory ?? { lines: [], total: 0 }));
   return sections.join("\n\n");

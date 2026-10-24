@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
 
-import { agentEnv, systemPrompt } from "./config.ts";
+import { agentEnv, runIdNote, systemPrompt } from "./config.ts";
 import { checkToolInput, resolveInside } from "./guard.ts";
 import { buildPrompt, runTitle, undeliveredNote } from "./handler.ts";
 
@@ -111,17 +111,25 @@ test("undeliveredNote names the runs whose results did not reach WeChat", () => 
   assert.match(undeliveredNote([{ id: "k7m2qa", title: "a" }, { id: "p3x9za", title: "b" }]), /^有 2 个任务的结果没送到微信：「a」（k7m2qa）、「b」（p3x9za）。/);
 });
 
-test("the workbench section gives the agent the workbench and card links when a URL is set", () => {
+test("the workbench section gives the agent the workbench, card and Files links when a URL is set", () => {
   const now = new Date("2026-10-25T00:00:00Z");
-  const withUrl = systemPrompt(now, { workbench: true, workbenchUrl: "https://alfred.example.com", runId: "k7m2qa" });
+  const withUrl = systemPrompt(now, { workbench: true, workbenchUrl: "https://alfred.example.com" });
   assert.match(withUrl, /# Workbench/);
-  assert.match(withUrl, /this one is k7m2qa/);
-  assert.match(withUrl, /The workbench is at https:\/\/alfred\.example\.com, and a run's card at https:\/\/alfred\.example\.com\/runs\/<run id>/);
+  assert.match(withUrl, /The workbench is at https:\/\/alfred\.example\.com\. A run's card is at https:\/\/alfred\.example\.com\/runs\/<run id>/);
+  assert.match(withUrl, /https:\/\/alfred\.example\.com\/files, browses the whole workspace by folder/);
   assert.match(withUrl, /no search/);
 
-  const withoutUrl = systemPrompt(now, { workbench: true, workbenchUrl: "", runId: "k7m2qa" });
+  const withoutUrl = systemPrompt(now, { workbench: true, workbenchUrl: "" });
   assert.match(withoutUrl, /You do not know the workbench's address/);
   assert.doesNotMatch(withoutUrl, /https:\/\//);
 
   assert.doesNotMatch(systemPrompt(now, { workbench: false }), /# Workbench/);
+});
+
+test("the system prompt is the same for every run of a day, so the prompt cache holds across runs", () => {
+  const now = new Date("2026-10-25T08:00:00Z");
+  const later = new Date("2026-10-25T09:30:00Z");
+  const ctx = { workbench: true, workbenchUrl: "https://alfred.example.com" };
+  assert.equal(systemPrompt(now, ctx), systemPrompt(later, ctx));
+  assert.equal(runIdNote("k7m2qa"), "[Alfred] This task is run k7m2qa on the workbench.");
 });
