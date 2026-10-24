@@ -10,6 +10,7 @@ const AGENT_STATE_FILE = path.join(STATE_DIR, "agent-state.json");
 export interface SessionSnapshot {
   sessionId: string;
   sessionCostUsd: number;
+  sessionModelCostUsd?: Record<string, number>;
   sessionStartedAt?: string;
 }
 
@@ -21,6 +22,8 @@ export interface AgentUserState {
   model: ModelKey;
   /** Running cost total the SDK reported for the current session. */
   sessionCostUsd: number;
+  /** The same running total per model (model id to USD), subagents included. */
+  sessionModelCostUsd?: Record<string, number>;
   totalCostUsd: number;
   /** When the last task ended or /resume was sent; idle rotation counts from here. */
   lastRunAt?: string;

@@ -31,6 +31,7 @@ import {
   checkMemoryScanSettings,
   checkSessionIdleHours,
   isModelKey,
+  subagentDefinitions,
   systemPrompt,
 } from "./config.ts";
 import type { ModelKey } from "./config.ts";
@@ -39,10 +40,12 @@ import { TaskInput, answeredBy } from "./input.ts";
 import { MEMORY_LOCK_FILE, MemoryScanScheduler, SCAN_TIMEOUT_MS, scanTranscripts } from "./memory-scan.ts";
 import { MemoryLock, capIndex, loadMemories, syncMemoryIndex } from "./memory.ts";
 import { RULES_FILE, RulesTracker, rulesChangeNotice, rulesDisclosure, seedRules, snapshotRules } from "./rules.ts";
-import { NO_SESSION, accountRun, resumePrevious, retire, rotationDueAt, shouldRotate } from "./session.ts";
+import { NO_SESSION, accountModels, accountRun, resumePrevious, retire, rotationDueAt, shouldRotate } from "./session.ts";
 import type { RetireReason } from "./session.ts";
 import { AgentStateStore } from "./state.ts";
 import type { AgentUserState } from "./state.ts";
+import { SubagentTracker, subagentGuard } from "./subagents.ts";
+import type { LiveSubagent } from "./subagents.ts";
 import { ALFRED_TOOL_NAMES, createAlfredTools } from "./tools.ts";
 
 const PROGRESS_INTERVAL_MS = 3 * 60_000;
@@ -58,6 +61,7 @@ const TOOL_LABELS: Record<string, string> = {
   Edit: "改文件",
   Glob: "找文件",
   Grep: "查内容",
+  Agent: "派子任务",
 };
 
 const HELP = `Alfred 调研助手
@@ -78,6 +82,7 @@ interface Run {
   input: TaskInput;
   startedAt: number;
   toolCounts: Map<string, number>;
+  subagents: SubagentTracker;
   stopped: boolean;
 }
 
@@ -103,6 +108,22 @@ function usd(n: number): string {
 function toolSummary(counts: Map<string, number>): string {
   const parts = [...counts].map(([name, n]) => `${TOOL_LABELS[name] ?? name.replace(/^mcp__alfred__/, "")} ${n} 次`);
   return parts.length ? parts.join("，") : "还没用工具";
+}
+
+function subagentSummary(running: LiveSubagent[], now: number): string {
+  return running.map((s) => `${s.role}「${s.description}」${humanAge(now - s.startedAt)}`).join("，");
+}
+
+/** Progress of a running task: tool counts, plus the subagents still working. */
+function runSummary(run: Run, now: number): string {
+  const running = run.subagents.running;
+  const tools = toolSummary(run.toolCounts);
+  return running.length ? `${tools}；子任务进行中：${subagentSummary(running, now)}` : tools;
+}
+
+/** Per-model spend for the run log, most expensive first. */
+function modelSummary(costs: Map<string, number>): string {
+  return [...costs].sort((a, b) => b[1] - a[1]).map(([model, cost]) => `${model} ${usd(cost)}`).join(", ");
 }
 
 function sessionStatus(user: AgentUserState, now: number): string {
@@ -163,6 +184,8 @@ export function agentOptions(params: {
   model: ModelKey;
   resume?: string;
   abortController?: AbortController;
+  /** Offer the Agent tool and the subagent roles; default true. */
+  subagents?: boolean;
 }): Options {
   const memory = capIndex(syncMemoryIndex(WORKSPACE_DIR));
   if (memory.lines.length < memory.total) {
@@ -170,19 +193,22 @@ export function agentOptions(params: {
   }
   const rules = new RulesTracker(WORKSPACE_DIR);
   const disclosure = rulesDisclosure(rules);
+  const subagents = params.subagents !== false;
+  const tools = subagents ? BUILTIN_TOOLS : BUILTIN_TOOLS.filter((t) => t !== "Agent");
   return {
     model: MODELS[params.model],
     cwd: WORKSPACE_DIR,
     env: agentEnv(),
     settingSources: [],
     settings: AGENT_SETTINGS,
-    systemPrompt: systemPrompt(new Date(), { rootRules: rules.loadRoot(), memory }),
-    tools: BUILTIN_TOOLS,
-    allowedTools: [...BUILTIN_TOOLS, ...ALFRED_TOOL_NAMES],
+    systemPrompt: systemPrompt(new Date(), { rootRules: rules.loadRoot(), memory, subagents }),
+    tools,
+    allowedTools: [...tools, ...ALFRED_TOOL_NAMES],
+    agents: subagents ? subagentDefinitions() : undefined,
     permissionMode: "dontAsk",
     mcpServers: { alfred: createAlfredTools(params.ctx, params.userId, params.abortController?.signal) },
     hooks: {
-      PreToolUse: [workspaceGuard(WORKSPACE_DIR)],
+      PreToolUse: [workspaceGuard(WORKSPACE_DIR), subagentGuard(WORKSPACE_DIR)],
       PostToolUse: [disclosure],
       PostToolUseFailure: [disclosure],
     },
@@ -246,11 +272,12 @@ export function createAgentHandler(): MessageHandler {
     try {
       for await (const m of q) {
         if (run.stopped) break;
+        run.subagents.observe(m);
         if (m.type === "system" && m.subtype === "init") {
           // Every turn of a streaming query starts with an init message, so compare with the stored session.
           sessionId = m.session_id;
           if (sessionId !== store.get(userId).sessionId) {
-            store.update(userId, { sessionId, sessionCostUsd: 0, sessionStartedAt: new Date().toISOString() });
+            store.update(userId, { ...NO_SESSION, sessionId, sessionStartedAt: new Date().toISOString() });
           }
         } else if (m.type === "assistant") {
           for (const block of m.message.content) {
@@ -288,13 +315,15 @@ export function createAgentHandler(): MessageHandler {
       input: new TaskInput(prompt),
       startedAt: Date.now(),
       toolCounts: new Map(),
+      subagents: new SubagentTracker(),
       stopped: false,
     };
     rt.run = run;
     const rulesBefore = snapshotRules(WORKSPACE_DIR);
     const stopTyping = await ctx.typing.start(userId);
     const progress = setInterval(() => {
-      reply(ctx, userId, `仍在处理（${humanAge(Date.now() - run.startedAt)}）：${toolSummary(run.toolCounts)}`).catch((err) =>
+      const now = Date.now();
+      reply(ctx, userId, `仍在处理（${humanAge(now - run.startedAt)}）：${runSummary(run, now)}`).catch((err) =>
         log.warn(`progress note failed: ${describeError(err)}`),
       );
     }, PROGRESS_INTERVAL_MS);
@@ -302,10 +331,15 @@ export function createAgentHandler(): MessageHandler {
     let locked = false;
     let replies = 0;
     let cost = 0;
+    const modelCosts = new Map<string, number>();
     const onResult = async (result: SDKResultMessage): Promise<void> => {
-      // total_cost_usd is cumulative across the turns of this query, so each result is accounted on its own.
-      const { deltaUsd, ...spend } = accountRun(store.get(userId), result.total_cost_usd);
-      store.update(userId, spend);
+      // total_cost_usd and modelUsage are cumulative across the turns of this query, so each result is accounted on its own.
+      const user = store.get(userId);
+      const { deltaUsd, ...spend } = accountRun(user, result.total_cost_usd);
+      const reported = Object.fromEntries(Object.entries(result.modelUsage ?? {}).map(([model, u]) => [model, u.costUSD]));
+      const models = accountModels(user, reported);
+      store.update(userId, { ...spend, sessionModelCostUsd: models.sessionModelCostUsd });
+      for (const [model, usd] of Object.entries(models.deltaUsd)) modelCosts.set(model, (modelCosts.get(model) ?? 0) + usd);
       replies++;
       cost += deltaUsd;
       log.info(`agent turn done subtype=${result.subtype} turns=${result.num_turns} cost=${usd(deltaUsd)}`);
@@ -344,7 +378,7 @@ export function createAgentHandler(): MessageHandler {
       if (outcome.kind === "resume-failed") throw new Error(outcome.detail);
       log.info(
         `agent run done replies=${replies} cost=${usd(cost)} ` +
-          `time=${humanAge(Date.now() - run.startedAt)} tools=[${toolSummary(run.toolCounts)}]`,
+          `time=${humanAge(Date.now() - run.startedAt)} tools=[${toolSummary(run.toolCounts)}] models=[${modelSummary(modelCosts)}]`,
       );
     } catch (err) {
       // Close before the first await, so a message arriving while the error reply goes out is queued for the next task.
@@ -458,7 +492,7 @@ export function createAgentHandler(): MessageHandler {
         if (user.previousSession) lines.push(`上一个会话：${user.previousSession.sessionId.slice(0, 8)}，发 /resume 接回`);
         lines.push(
           `累计花费：${usd(user.totalCostUsd)}`,
-          rt.run ? `任务：进行中 ${humanAge(now - rt.run.startedAt)}，${toolSummary(rt.run.toolCounts)}` : "任务：空闲",
+          rt.run ? `任务：进行中 ${humanAge(now - rt.run.startedAt)}，${runSummary(rt.run, now)}` : "任务：空闲",
         );
         if (rt.run?.input.followUps) lines.push(`追加消息：${rt.run.input.followUps} 条待 Alfred 处理`);
         if (rt.queue.length) lines.push(`排队：${rt.queue.length} 条`);
