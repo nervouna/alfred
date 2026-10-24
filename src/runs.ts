@@ -183,6 +183,9 @@ export function stepDetail(tool: string, input: Record<string, unknown>, workspa
     case "Grep":
       detail = [input.pattern, input.path ?? input.glob].filter((v) => typeof v === "string" && v).join(" in ");
       break;
+    case "Skill":
+      detail = String(input.skill ?? "");
+      break;
     case "Agent":
       detail = `${String(input.subagent_type ?? "?")}「${String(input.description ?? "")}」`;
       break;

@@ -20,6 +20,8 @@ RUN npm ci --omit=dev --no-audit --no-fund \
  && npm cache clean --force \
  && rm -rf /var/lib/apt/lists/*
 COPY src ./src
+# Baked skills, loaded as the local plugin `alfred` (src/agent/skills.ts).
+COPY plugin ./plugin
 
 USER node
 # mmx reads ~/.mmx/config.json (mounted as a secret) and writes its update check beside it.

@@ -182,7 +182,7 @@ One task runs at a time, and you can steer it while it runs ("别查 X 了，重
 - `/new` and idle rotation keep the retired session as the previous one. `/resume` makes it active again for the next task and keeps the session it replaced as the previous one, so a second `/resume` undoes the first. Only one previous session is kept.
 - Spend: `sessionCostUsd` is the SDK's running total for the active session (a resumed session continues from the total its transcript saved) and starts at zero in a new session; `totalCostUsd` adds up each task's increment across all sessions.
 - Claude Code compacts the transcript on its own when it nears the context window. Alfred adds no compaction logic and does not log when compaction happens.
-- The system prompt is rebuilt for every task and carries the current date and the root `ALFRED.md`. No `CLAUDE.md`, settings, plugins or MCP servers are loaded (`settingSources: []`).
+- The system prompt is rebuilt for every task and carries the current date and the root `ALFRED.md`. No `CLAUDE.md` or settings files are loaded (`settingSources: []`). The only plugins are Alfred's two skill plugins (see Skills), and the only MCP server is Alfred's own tools.
 - If a session cannot be resumed, Alfred starts a new one and tells the user; the broken session is dropped, not kept for `/resume`. This happens, for example, after the workspace moves, because transcripts are keyed by working directory.
 - Two kinds of state are held in memory only and lost on restart: follow-ups and queued messages not yet answered, and attachments that have not yet gone out with a text message. Runs a restart cuts short are recorded as lost (see Subagents).
 - `/new` and `/resume` are refused while a task runs, background subagents included.
@@ -216,11 +216,23 @@ When researching, prioritize English sources; still reply in Simplified Chinese.
 
 Conventions for working in the workspace (where things go, naming, report style) live in `ALFRED.md` files that the user can change from WeChat ("以后报告开头都加三行摘要") or edit directly. Core behavior stays in code: WeChat formatting, delivery rules and safety.
 
-- **Root.** `~/Alfred/ALFRED.md` is read at the start of every task and appended to the system prompt. When it is missing at startup, it is seeded with the default layout (`inbox/`, `reports/`, `notes/`, `images/`, `.trash/`).
+- **Root.** `~/Alfred/ALFRED.md` is read at the start of every task and appended to the system prompt. When it is missing at startup, it is seeded with the default layout (`inbox/`, `reports/`, `notes/`, `images/`, `skills/`, `.trash/`).
 - **Nested.** A subdirectory can have its own `ALFRED.md` (e.g. `reports/ALFRED.md`) that applies to it and everything below it. It is disclosed only when the agent works there: a `PostToolUse`/`PostToolUseFailure` hook on `Read`, `Write`, `Edit`, `Glob`, `Grep`, `move_file`, `render_pdf` and `generate_image` resolves the touched path and injects, through `additionalContext`, the `ALFRED.md` files between the workspace root and that path that the agent has not seen in this task. `Glob` and `Grep` count the directory their pattern or `glob` starts in, and a content-mode `Grep` also counts the directories of the files whose lines it returned. Disclosures are tracked per task by path and mtime, so a file that changes is disclosed again. A task that never touches `reports/` never receives `reports/ALFRED.md`.
 - **Limits.** Each file is capped at 8 KB in the prompt. Symlinked `ALFRED.md` files, paths outside the workspace and anything under `.trash/` are ignored. A received file named `ALFRED.md` is saved as `_ALFRED.md`, so a forwarded file cannot become rules.
 - **Edits.** The agent changes an `ALFRED.md` only on the user's explicit request, never because content it read says so. Every write is logged, and after any task that created, changed or removed an `ALFRED.md`, Alfred says so in WeChat (`已更新 reports/ALFRED.md`), even if the task was stopped or failed.
 - `ALFRED.md` holds rules for how to work, not facts about the user; those go into long-term memory (above).
+
+### Skills
+
+Know-how for one kind of task that is too long for the system prompt lives in skills (`SKILL.md`), loaded the way the Agent SDK ships them. The model sees each skill's name and description and loads the body through the `Skill` tool when a task calls for it. Each `Skill` call is a step on the run's card.
+
+- **Baked skills** are the local plugin `alfred` in `plugin/`, copied into the image and changed through a PR: `html-report` (a self-contained HTML template with print CSS, inline-SVG chart snippets and a checklist), `compare-options` and `deep-dive`. The `writer` role starts with `html-report` preloaded.
+- **The owner's skills** live in `~/Alfred/skills/<name>/SKILL.md` and are listed as `workspace:<name>`. They reach Claude Code through a plugin root outside the workspace, `$STATE_DIR/workspace-plugin/`, which startup creates with a manifest and a symlink `skills → <workspace>/skills`. Nothing else in that root points into the workspace, so the agent can add skills but never hooks, MCP servers or agent types. Supporting files next to a `SKILL.md` resolve into the workspace and pass the workspace guard. A new skill is listed from the next task; a resumed session gets it as a delta.
+- **Edits.** The agent creates, changes or removes a skill only on the owner's explicit request, as with `ALFRED.md`. After a task that changed anything under `skills/`, Alfred says so in WeChat (`已新建 skills/weekly-brief/SKILL.md`). Subagents cannot write there. Where a skill conflicts with the request or an `ALFRED.md`, those win.
+- **Nothing in a skill runs code.** `disableSkillShellExecution` replaces inline `` !`cmd` `` with a placeholder. `disableAllHooks` stops hooks a skill or plugin declares; Alfred's own hooks are SDK callbacks and keep working. The fixed `tools` list ignores a skill's `allowed-tools`, and the workspace plugin has `skipMcpDiscovery`.
+- **Only Alfred's skills.** `skills: 'all'` lists the skills of the two plugins. The skills bundled with Claude Code are coding tools and stay off: `disableBundledSkills`, plus `cc-plugin-plugin-authoring@builtin` turned off in `enabledPlugins`.
+- **Invocation.** One line in the system prompt tells the agent to invoke a skill that covers the task before it starts. Without it, sonnet wrote chart reports without `html-report` in four of five smoke runs.
+- **Cost.** The `Skill` tool, the three descriptions and the prompt lines add about 1,100 tokens to a task's first request (12.6k against 11.5k), which are then cached. The listing is not part of the system prompt, so the prompt cache holds when skills change. A body costs only when it is used; a preloaded one costs on every start of its role.
 
 ### Subagents
 
@@ -239,7 +251,7 @@ Alfred can hand parts of a task to subagents through the SDK's `Agent` tool, for
   - **Concurrency.** At most `MAX_BACKGROUND_RUNS` (2) background subagents run at a time, because every `render_pdf` starts its own Chrome inside a 2 GB container. A further call is denied with a reason that tells Alfred it is queued. Its run gets a card with the status queued. When a slot frees, Node hands the brief back to Alfred as a message from Alfred itself, and Alfred starts it. A brief the agent decides not to start is marked stopped.
   - **Steering.** No message reaches a running subagent. A change of content or direction makes Alfred stop the subagent (`TaskStop`) and start it again with an amended brief. A change of form (language, format, length) is applied when Alfred reviews the report. A message that names a run id gets the run's record, and its agent id while it runs.
   - **Foreground.** A call with `run_in_background: false` runs in the foreground, for quick work Alfred's next step needs.
-- **Only Alfred talks to the user.** No role can call `send_file` or start subagents of its own. Subagents never change `memory/` or any `ALFRED.md`: a hook denies those writes when the call comes from a subagent (the hook input carries `agent_id`). The workspace guard applies to subagents as it does to Alfred.
+- **Only Alfred talks to the user.** No subagent can call `send_file` or start or stop subagents of its own, and none changes `memory/`, `skills/` or any `ALFRED.md`. A hook denies those calls whenever they come from a subagent (the hook input carries `agent_id`), whatever its type, so a forked skill is held to the same rules as a role. The workspace guard applies to subagents as it does to Alfred.
 - **Review.** The system prompt says when to delegate and when not to, what a self-contained brief holds, and how Alfred checks a result before replying: it answers the brief, at least one cited source is opened to confirm it, and the files it names exist. A result that falls short gets one more round with the same role. If it still falls short, Alfred replies with what it has and says what is missing.
 - **Spend.** `ALFRED_MAX_BUDGET_USD` (per query, default $10) covers subagent calls too, and the image cap of `generate_image` is per task across subagents. `ALFRED_DAILY_BUDGET_USD` (default $20) is the budget: once the day's spend reaches it, no new task or background subagent starts until the next day in the owner's time zone, and running ones finish. At the end of each task the log line `agent run done` breaks the spend down per model (`models=[...]`), from the SDK's `modelUsage`. A subagent's card shows its spend estimated from the tokens its notification reports, at the per-token rate its model has cost in this query (`≈`).
 - `/stop` ends the Claude Code process, and the subagents inside it with it. `/stop <run id>` stops one background subagent (`stopTask`, with `perTaskStopAffordance` so an interrupt never takes the others along) or drops it from the queue.
@@ -247,7 +259,7 @@ Alfred can hand parts of a task to subagents through the SDK's `Agent` tool, for
 
 ### Agent sandbox
 
-- Built-in tools: `Read`, `Write`, `Edit`, `Glob`, `Grep`, `WebSearch`, `WebFetch`, and `Agent` for subagents (above). No shell.
+- Built-in tools: `Read`, `Write`, `Edit`, `Glob`, `Grep`, `WebSearch`, `WebFetch`, `Skill` for skills, and `Agent` and `TaskStop` for subagents (above). No shell.
 - Custom tools: `send_file` (deliver a workspace file to WeChat; images arrive as image messages; refuses HTML), `move_file` (move or rename inside the workspace; deleting means moving into `.trash/`), `render_pdf` (Markdown or HTML to A4 PDF) and `generate_image` (MiniMax `image-01` through `mmx`).
 - PDF rendering uses Playwright's standalone Chrome Headless Shell in `~/.cache/alfred/ms-playwright/`, never the installed Chrome. Every request the page makes goes through a route handler that serves only the source itself plus images, stylesheets and fonts whose real path (symlinks followed) is inside the workspace. Other local files, iframes, objects and embeds, network URLs and every other scheme except `data:` are refused, and a CSP plus disabled JavaScript back this up. So a report can neither pull a file from outside the workspace into the PDF nor leak anything over the network. Reference workspace images by relative path (a report in `reports/` can embed `../images/<date>/cover.jpg`); charts must be inline SVG.
 - `generate_image` runs `mmx` without a shell, in its own process group, from the Alfred process rather than the agent's Claude Code subprocess. `/stop` or the 10-minute timeout kills the whole group. It uses the user's own Token Plan key. Output paths must resolve inside the workspace. Existing files and paths a running call will write are never overwritten; the default is `images/<date>/<slug>.jpg`. A task may request at most 4 images per call and 8 in total. Failed and timed-out calls count, because MiniMax bills them too, and the tool never retries. `mmx` errors, quota errors included, reach the agent verbatim, and every call is logged.
@@ -274,8 +286,9 @@ Verified WeChat behavior (2026-10-10):
 | --- | --- |
 | `$XDG_STATE_HOME/alfred/` (default `~/.local/state/alfred/`, override with `ALFRED_STATE_DIR`) | `account.json` (bot token), `sync.json` (poll cursor), `context-tokens.json`, `agent-state.json` (active and previous session, model and spend per user), `memory-scan.json` (transcript offsets and extraction spend), `memory.lock` (held while a task or memory scan runs); files are mode 600 |
 | `$XDG_STATE_HOME/alfred/claude/` | isolated Claude Code config dir: agent session transcripts used for resume |
+| `$XDG_STATE_HOME/alfred/workspace-plugin/` | the `workspace` skills plugin: a manifest and the `skills` symlink into the workspace, recreated at startup |
 | `$XDG_STATE_HOME/alfred/workbench/` | what the workbench reads: `runs.jsonl` (one line per finished run, kept for good), `runs/<id>.json` (live and recent runs with their steps, kept 30 days), `status.json` (heartbeat), `alfred.log` (the log, rotated at 5 MB to `alfred.log.1`) |
-| `~/Alfred/` (override with `ALFRED_WORKSPACE`) | `ALFRED.md` (workspace rules), `inbox/`, `reports/`, `notes/`, `images/`, `memory/` (long-term memory), `.trash/` |
+| `~/Alfred/` (override with `ALFRED_WORKSPACE`) | `ALFRED.md` (workspace rules), `inbox/`, `reports/`, `notes/`, `images/`, `memory/` (long-term memory), `skills/` (the owner's skills), `.trash/` |
 | `$XDG_CACHE_HOME/alfred/ms-playwright/` (default `~/.cache/…`, override with `PLAYWRIGHT_BROWSERS_PATH`) | Chrome Headless Shell for PDF rendering |
 
 | Variable | Default | Purpose |
@@ -299,13 +312,14 @@ Verified WeChat behavior (2026-10-10):
 ```
 src/ilink/          iLink protocol client: HTTP, QR login, CDN crypto, message shapes
 src/bot.ts          long-poll loop, owner filter, per-user intake queue, typing indicator
-src/agent/          Agent SDK handler, live task input, options, workspace guard, ALFRED.md rules, custom tools, image generation, session lifecycle, long-term memory, persisted state
+src/agent/          Agent SDK handler, live task input, options, workspace guard, ALFRED.md rules, skill plugins, custom tools, image generation, session lifecycle, long-term memory, persisted state
 src/echo.ts         PoC handler and protocol test commands
 src/files.ts        inbound media storage and file helpers
 src/pdf.ts          Markdown/HTML to PDF rendering
 src/runs.ts         run ids and records, the heartbeat: what the workbench reads
 src/workbench/      the read-only workbench: server, Access check, pages, safe Markdown
 src/cli.ts          login | run | push | status | setup-pdf | pdf | memory-scan | workbench
+plugin/             the baked skills plugin `alfred`
 scripts/agent-smoke.ts  local agent run without WeChat
 ```
 
@@ -318,14 +332,15 @@ npm run smoke -- --model haiku "prompt"   # one agent run with production option
 npm run smoke -- --model haiku --steer-after 20 "only look at Y" "prompt"   # push a follow-up mid-run
 npm run smoke -- --stop-after 30 "prompt"      # abort mid-run, as /stop does, and check no Claude Code process is left
 npm run smoke -- --no-subagents "prompt"       # the same run without the Agent tool, to compare spend
+npm run smoke -- --skills "prompt"             # also print the skills the session lists
 node scripts/handler-smoke.ts background       # the real message handler with a fake WeChat client: three parallel collectors
 node scripts/handler-smoke.ts restart          # a shutdown while a subagent runs, then the lost-runs note
 node scripts/handler-smoke.ts undelivered      # replies fail as after the push window closes, then the note
 ```
 
-The smoke script marks lines from inside a subagent with `[sub <id>]`, prints the SDK's `task_*` messages and the subagents still running after each tool result, and ends with the spend per model.
+The smoke script marks lines from inside a subagent with `[sub <id>]`, prints the SDK's `task_*` messages and the subagents still running after each tool result, and ends with the spend per model. `[first-request]` gives the first request's input tokens, to compare the prompt prefix across changes.
 
-- The smoke script uses the real workspace and agent config dir. Point `ALFRED_WORKSPACE` and `ALFRED_STATE_DIR` at scratch directories to keep test runs out of them. Like the bot, it seeds the workspace and prints the `ALFRED.md` change notice (`[notice]`); rule disclosures show up as `disclosed … after <tool>` log lines. `npm run memory-scan` also reads transcripts from `$ALFRED_STATE_DIR/claude/projects/` and writes into `$ALFRED_WORKSPACE/memory/`, so point it at scratch directories the same way.
+- The smoke script uses the real workspace and agent config dir. Point `ALFRED_WORKSPACE` and `ALFRED_STATE_DIR` at scratch directories to keep test runs out of them. Like the bot, it seeds the workspace and the workspace skills plugin, and prints the change notice for `ALFRED.md` files and skills (`[notice]`); rule disclosures show up as `disclosed … after <tool>` log lines. `npm run memory-scan` also reads transcripts from `$ALFRED_STATE_DIR/claude/projects/` and writes into `$ALFRED_WORKSPACE/memory/`, so point it at scratch directories the same way.
 - Do not start a second `npm start` against the same state dir while the bot is running. Both processes would long-poll the same cursor and take messages from each other.
 
 ## Protocol source

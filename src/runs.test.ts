@@ -101,6 +101,7 @@ test("stepDetail summarizes tool inputs with workspace-relative paths", () => {
   assert.equal(stepDetail("Read", { file_path: "/workspace/notes/a.md" }, ws), "notes/a.md");
   assert.equal(stepDetail("WebFetch", { url: "https://example.com/x", prompt: "..." }, ws), "https://example.com/x");
   assert.equal(stepDetail("Agent", { subagent_type: "researcher", description: "线程一" }, ws), "researcher「线程一」");
+  assert.equal(stepDetail("Skill", { skill: "alfred:html-report" }, ws), "alfred:html-report");
   assert.equal(stepDetail("mcp__alfred__move_file", { from: "a.md", to: "b/a.md" }, ws), "a.md → b/a.md");
   assert.equal(stepDetail("WebSearch", { query: "x".repeat(300) }, ws).length, 160);
 });

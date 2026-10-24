@@ -1,7 +1,8 @@
 // Subagent guard rails and tracking. Roles are defined in config.ts; this
 // module keeps the role the only lever on an Agent call, lets the task admit or
-// queue background calls (background.ts), keeps subagents away from memory and
-// workspace rules, and follows which foreground subagents are running.
+// queue background calls (background.ts), keeps every subagent (roles, built-in
+// agent types, forked skills) away from memory, skills, workspace rules and the
+// user, and follows which foreground subagents are running.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -9,10 +10,11 @@ import path from "node:path";
 import type { HookCallbackMatcher, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 
 import { log } from "../log.ts";
-import { SUBAGENT_ROLES, isSubagentRole } from "./config.ts";
+import { SUBAGENT_DISALLOWED_TOOLS, SUBAGENT_ROLES, isSubagentRole } from "./config.ts";
 import type { SubagentRoleName } from "./config.ts";
 import { resolveInside } from "./guard.ts";
 import { RULES_FILE } from "./rules.ts";
+import { SKILLS_DIR } from "./skills.ts";
 
 const AGENT_TOOL = "Agent";
 
@@ -58,7 +60,10 @@ const WRITE_PATHS: Record<string, string[]> = {
   mcp__alfred__generate_image: ["output"],
 };
 
-/** Returns a denial reason when a subagent's tool call would change long-term memory or a workspace rules file. */
+/** Top-level workspace directories only Alfred's main thread changes. */
+const PROTECTED_DIRS = new Set(["memory", SKILLS_DIR]);
+
+/** Returns a denial reason when a subagent's tool call would change long-term memory, a skill or a workspace rules file. */
 export function checkSubagentWrite(root: string, toolName: string, input: Record<string, unknown>): string | undefined {
   const rootReal = fs.realpathSync(root);
   for (const key of WRITE_PATHS[toolName] ?? []) {
@@ -68,8 +73,8 @@ export function checkSubagentWrite(root: string, toolName: string, input: Record
     if (!real) continue; // The workspace guard refuses paths outside the workspace.
     const rel = path.relative(rootReal, real);
     const top = rel.split(path.sep)[0]?.toLowerCase();
-    if (top === "memory" || path.basename(rel).toLowerCase() === RULES_FILE.toLowerCase()) {
-      return `Subagents may not change ${p}: only Alfred changes memory/ and ${RULES_FILE} files. Report what should change in your final message instead.`;
+    if ((top && PROTECTED_DIRS.has(top)) || path.basename(rel).toLowerCase() === RULES_FILE.toLowerCase()) {
+      return `Subagents may not change ${p}: only Alfred changes memory/, ${SKILLS_DIR}/ and ${RULES_FILE} files. Report what should change in your final message instead.`;
     }
   }
   return undefined;
@@ -79,7 +84,17 @@ function deny(reason: string) {
   return { hookSpecificOutput: { hookEventName: "PreToolUse" as const, permissionDecision: "deny" as const, permissionDecisionReason: reason } };
 }
 
-/** PreToolUse hook: rewrites, admits or denies Agent calls, and denies subagent writes to memory and rules. */
+/**
+ * Returns a denial reason when a subagent calls a tool only Alfred may use. A
+ * role's disallowedTools already hide them, but built-in agent types and forked
+ * skills get every tool the main thread has.
+ */
+export function checkSubagentTool(toolName: string): string | undefined {
+  if (!SUBAGENT_DISALLOWED_TOOLS.includes(toolName)) return undefined;
+  return `Subagents may not call ${toolName}: only Alfred sends files to the user and starts or stops subagents. Say what you need in your final message instead.`;
+}
+
+/** PreToolUse hook: rewrites, admits or denies Agent calls, and denies subagents Alfred's own tools and writes to memory, skills and rules. */
 export function subagentGuard(root: string, admission?: AgentAdmission): HookCallbackMatcher {
   return {
     hooks: [
@@ -87,7 +102,7 @@ export function subagentGuard(root: string, admission?: AgentAdmission): HookCal
         if (input.hook_event_name !== "PreToolUse") return {};
         const toolInput = (input.tool_input ?? {}) as Record<string, unknown>;
         if (input.agent_id) {
-          const reason = checkSubagentWrite(root, input.tool_name, toolInput);
+          const reason = checkSubagentTool(input.tool_name) ?? checkSubagentWrite(root, input.tool_name, toolInput);
           if (!reason) return {};
           log.warn(`denied ${input.tool_name} in subagent ${input.agent_type ?? input.agent_id}: ${reason}`);
           return deny(reason);
