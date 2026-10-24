@@ -1,11 +1,13 @@
 // Runs one prompt through the production agent options without WeChat.
 // usage: node scripts/agent-smoke.ts [--model sonnet|opus|haiku] [--resume <session>]
-//          [--steer-after <seconds> <follow-up>] [--stop-after <seconds>] [--no-subagents] <prompt>
+//          [--steer-after <seconds> <follow-up>] [--stop-after <seconds>] [--no-subagents] [--skills] <prompt>
 // The prompt goes through the same streaming input as in production; --steer-after
 // pushes a follow-up into it mid-run, the way a WeChat message sent during a task does.
 // --stop-after aborts the run the way /stop does. --no-subagents drops the Agent tool
-// and the roles, for comparing a run against one that delegates. Lines from inside a
-// subagent are marked with its Agent call's id.
+// and the roles, for comparing a run against one that delegates. --skills prints the
+// skills the session lists, from getContextUsage(). Lines from inside a subagent are
+// marked with its Agent call's id. The first request's input tokens are printed, to
+// compare the prompt prefix across changes.
 // The alfred tools are wired to a stub, so send_file fails instead of messaging anyone.
 // Like the bot, it seeds the workspace, records the run for the workbench under
 // $ALFRED_STATE_DIR/workbench, and prints the ALFRED.md change notice after the run.
@@ -24,7 +26,7 @@ import type { BotContext } from "../src/bot.ts";
 import { WORKSPACE_DIR } from "../src/store.ts";
 
 const USAGE =
-  "usage: node scripts/agent-smoke.ts [--model m] [--resume id] [--steer-after seconds text] [--stop-after seconds] [--no-subagents] <prompt>";
+  "usage: node scripts/agent-smoke.ts [--model m] [--resume id] [--steer-after seconds text] [--stop-after seconds] [--no-subagents] [--skills] <prompt>";
 
 const args = process.argv.slice(2);
 let model = DEFAULT_MODEL;
@@ -32,6 +34,7 @@ let resume: string | undefined;
 let steer: { afterMs: number; text: string } | undefined;
 let stopAfterMs: number | undefined;
 let subagents = true;
+let listSkills = false;
 const words: string[] = [];
 for (let i = 0; i < args.length; i++) {
   const arg = args[i] ?? "";
@@ -47,6 +50,7 @@ for (let i = 0; i < args.length; i++) {
     if (!(seconds >= 0)) throw new Error(USAGE);
     stopAfterMs = seconds * 1000;
   } else if (arg === "--no-subagents") subagents = false;
+  else if (arg === "--skills") listSkills = true;
   else words.push(arg);
 }
 const prompt = words.join(" ");
@@ -75,16 +79,28 @@ const stopTimer = stopAfterMs !== undefined && setTimeout(() => {
 }, stopAfterMs);
 
 let results = 0;
+let firstRequest = true;
 let modelUsage: Record<string, { costUSD: number }> = {};
 const options = agentOptions({ ctx, userId: "smoke", model, resume, abortController: abort, subagents, run });
+const q = query({ prompt: input, options });
 try {
-  for await (const m of query({ prompt: input, options })) {
+  for await (const m of q) {
     tracker.observe(m);
     if (m.type === "system" && m.subtype === "init") {
       if (results === 0) console.log(`[init] ${elapsed()} session=${m.session_id} model=${m.model} tools=${m.tools.join(",")}`);
+      if (results === 0 && listSkills) {
+        const skills = (await q.getContextUsage()).skills;
+        console.log(`[skills] ${skills?.skillFrontmatter.map((s) => `${s.name} (${s.source}, ${s.tokens} tokens)`).join(", ") || "none"}`);
+      }
     } else if (m.type === "system" && m.subtype.startsWith("task_")) {
       console.log(`[${m.subtype}] ${elapsed()} ${JSON.stringify(m).slice(0, 200)}`);
     } else if (m.type === "assistant") {
+      if (firstRequest && !m.parent_tool_use_id) {
+        firstRequest = false;
+        const u = m.message.usage;
+        const total = u.input_tokens + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0);
+        console.log(`[first-request] input=${total} (uncached ${u.input_tokens}, cache write ${u.cache_creation_input_tokens ?? 0}, cache read ${u.cache_read_input_tokens ?? 0})`);
+      }
       const where = m.parent_tool_use_id ? `[sub ${m.parent_tool_use_id.slice(-6)}] ` : "";
       const agent = m.parent_tool_use_id ? tracker.roleOf(m.parent_tool_use_id) : undefined;
       for (const block of m.message.content) {

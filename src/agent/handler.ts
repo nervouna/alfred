@@ -57,6 +57,7 @@ import { MemoryLock, capIndex, loadMemories, syncMemoryIndex } from "./memory.ts
 import { RULES_FILE, RulesTracker, rulesChangeNotice, rulesDisclosure, seedRules, snapshotRules } from "./rules.ts";
 import { NO_SESSION, accountModels, accountRun, resumePrevious, retire, rotationDueAt, shouldRotate } from "./session.ts";
 import type { RetireReason } from "./session.ts";
+import { SKILLS_DIR, prepareWorkspacePlugin, skillPlugins } from "./skills.ts";
 import { AgentStateStore } from "./state.ts";
 import type { AgentUserState, RunRef } from "./state.ts";
 import { SubagentTracker, agentFailureHook, subagentGuard } from "./subagents.ts";
@@ -70,7 +71,7 @@ const SHUTDOWN_STOP_MS = 10_000;
 const RUN_TITLE_CHARS = 60;
 /** Built-in tools whose file_path a run creates or changes. */
 const FILE_WRITE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
-const WORKSPACE_SUBDIRS = ["inbox", "reports", "notes", "images", "memory", ".trash"];
+const WORKSPACE_SUBDIRS = ["inbox", "reports", "notes", "images", "memory", SKILLS_DIR, ".trash"];
 /** Memories listed in the /memory reply; the full index is in memory/MEMORY.md. */
 const MEMORY_REPLY_LINES = 50;
 
@@ -82,6 +83,7 @@ const TOOL_LABELS: Record<string, string> = {
   Edit: "改文件",
   Glob: "找文件",
   Grep: "查内容",
+  Skill: "用技能",
   Agent: "派子任务",
 };
 
@@ -266,17 +268,18 @@ export function buildPrompt(
   return sections.join("\n\n");
 }
 
-/** Create the workspace layout and seed the root ALFRED.md; shared with scripts/agent-smoke.ts. */
+/** Create the workspace layout and the workspace skills plugin, and seed the root ALFRED.md; shared with scripts/agent-smoke.ts. */
 export function prepareWorkspace(): void {
   for (const dir of WORKSPACE_SUBDIRS) fs.mkdirSync(path.join(WORKSPACE_DIR, dir), { recursive: true });
   if (seedRules(WORKSPACE_DIR)) log.info(`seeded ${path.join(WORKSPACE_DIR, RULES_FILE)}`);
+  prepareWorkspacePlugin(WORKSPACE_DIR);
 }
 
-/** Reply listing the ALFRED.md files a run created, changed or removed, so rule changes never go unnoticed. */
+/** Reply listing the ALFRED.md files and skills a run created, changed or removed, so such changes never go unnoticed. */
 async function notifyRuleChanges(ctx: BotContext, userId: string, before: Map<string, string>): Promise<void> {
   const notice = rulesChangeNotice(before, snapshotRules(WORKSPACE_DIR));
   if (!notice) return;
-  log.info(`workspace rules changed: ${notice.replace(/\n/g, "; ")}`);
+  log.info(`workspace rules or skills changed: ${notice.replace(/\n/g, "; ")}`);
   await reply(ctx, userId, notice).catch((err) => log.warn(`rules notice failed: ${describeError(err)}`));
 }
 
@@ -318,6 +321,8 @@ export function agentOptions(params: {
     systemPrompt: systemPrompt(new Date(), { rootRules: rules.loadRoot(), memory, subagents }),
     tools,
     allowedTools: [...tools, ...ALFRED_TOOL_NAMES],
+    plugins: skillPlugins(),
+    skills: "all",
     agents: subagents ? subagentDefinitions() : undefined,
     permissionMode: "dontAsk",
     mcpServers: { alfred: createAlfredTools(params.ctx, params.userId, params.abortController?.signal, params.run) },

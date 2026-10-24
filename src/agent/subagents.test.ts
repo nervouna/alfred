@@ -6,11 +6,12 @@ import { after, test } from "node:test";
 
 import type { HookInput, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 
-import { SubagentTracker, checkAgentCall, checkSubagentWrite, subagentGuard } from "./subagents.ts";
+import { SubagentTracker, checkAgentCall, checkSubagentTool, checkSubagentWrite, subagentGuard } from "./subagents.ts";
 
 const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "alfred-subagents-")));
 fs.mkdirSync(path.join(root, "memory"));
 fs.mkdirSync(path.join(root, "reports"));
+fs.mkdirSync(path.join(root, "skills"));
 after(() => fs.rmSync(root, { recursive: true, force: true }));
 
 test("checkAgentCall keeps the brief and the role, drops model and effort, and runs in the background by default", () => {
@@ -38,7 +39,7 @@ test("checkAgentCall denies calls without a role or with a built-in agent type",
   }
 });
 
-test("checkSubagentWrite refuses memory/ and every ALFRED.md, and allows other workspace paths", () => {
+test("checkSubagentWrite refuses memory/, skills/ and every ALFRED.md, and allows other workspace paths", () => {
   const denied: [string, Record<string, unknown>][] = [
     ["Write", { file_path: "memory/user.md" }],
     ["Edit", { file_path: path.join(root, "memory", "MEMORY.md") }],
@@ -49,12 +50,16 @@ test("checkSubagentWrite refuses memory/ and every ALFRED.md, and allows other w
     ["mcp__alfred__move_file", { from: "notes/a.md", to: "memory/a.md" }],
     ["mcp__alfred__render_pdf", { source: "reports/a.md", output: "memory/a.pdf" }],
     ["mcp__alfred__generate_image", { prompt: "x", output: "memory/x.jpg" }],
+    ["Write", { file_path: "skills/weekly/SKILL.md" }],
+    ["Edit", { file_path: path.join(root, "skills", "weekly", "template.html") }],
+    ["mcp__alfred__move_file", { from: "skills/weekly", to: ".trash/weekly" }],
   ];
   for (const [tool, input] of denied) {
     assert.match(checkSubagentWrite(root, tool, input) ?? "", /only Alfred changes/, `${tool} ${JSON.stringify(input)}`);
   }
   assert.equal(checkSubagentWrite(root, "Write", { file_path: "reports/2026-10-25/vps.md" }), undefined);
   assert.equal(checkSubagentWrite(root, "Write", { file_path: "notes/memory.md" }), undefined);
+  assert.equal(checkSubagentWrite(root, "Write", { file_path: "notes/skills/SKILL.md" }), undefined);
   assert.equal(checkSubagentWrite(root, "Read", { file_path: "memory/user.md" }), undefined, "reading memory is fine");
 });
 
@@ -84,6 +89,29 @@ test("subagentGuard denies a subagent's memory write and lets the main thread ma
   assert.equal(sub && "permissionDecision" in sub ? sub.permissionDecision : undefined, "deny");
   assert.equal(await decide(preToolUse("Write", write)), undefined);
   assert.equal(await decide(preToolUse("Write", { file_path: "reports/a.md" }, { id: "agent-1", type: "writer" })), undefined);
+});
+
+test("checkSubagentTool refuses only the tools that are Alfred's alone", () => {
+  for (const tool of ["mcp__alfred__send_file", "Agent", "TaskStop"]) assert.match(checkSubagentTool(tool) ?? "", /only Alfred/, tool);
+  for (const tool of ["Read", "Write", "Skill", "WebFetch", "mcp__alfred__render_pdf"]) assert.equal(checkSubagentTool(tool), undefined, tool);
+});
+
+test("subagentGuard denies Alfred's own tools to every subagent, built-in types and forked skills included", async () => {
+  const calls: [string, Record<string, unknown>][] = [
+    ["mcp__alfred__send_file", { path: "reports/a.pdf" }],
+    ["Agent", { description: "d", prompt: "p", subagent_type: "researcher" }],
+    ["TaskStop", { task_id: "t" }],
+  ];
+  for (const type of ["researcher", "general-purpose", "alfred:scout"]) {
+    for (const [tool, input] of calls) {
+      const out = await decide(preToolUse(tool, input, { id: "agent-1", type }));
+      assert.equal(out && "permissionDecision" in out ? out.permissionDecision : undefined, "deny", `${type} ${tool}`);
+    }
+    const skillWrite = await decide(preToolUse("Write", { file_path: "skills/x/SKILL.md", content: "x" }, { id: "agent-1", type }));
+    assert.equal(skillWrite && "permissionDecision" in skillWrite ? skillWrite.permissionDecision : undefined, "deny", `${type} skills/`);
+  }
+  assert.equal(await decide(preToolUse("mcp__alfred__send_file", { path: "reports/a.pdf" })), undefined, "the main thread sends files");
+  assert.equal(await decide(preToolUse("Write", { file_path: "skills/x/SKILL.md", content: "x" })), undefined, "the main thread writes skills");
 });
 
 test("subagentGuard rewrites Agent calls from the main thread and denies unknown roles", async () => {

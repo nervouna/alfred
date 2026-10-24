@@ -223,3 +223,32 @@ test("snapshotRules and rulesChangeNotice report created, changed and removed ru
   fs.renameSync(path.join(root, "notes/ALFRED.md"), path.join(root, ".trash/notes-ALFRED.md"));
   assert.equal(rulesChangeNotice(before, snapshotRules(root)), "已移除 notes/ALFRED.md\n已新建 notes/p/ALFRED.md\n已更新 reports/ALFRED.md");
 });
+
+test("snapshotRules and rulesChangeNotice cover every file under skills/", () => {
+  const root = workspace({
+    "skills/weekly/SKILL.md": "w",
+    "skills/weekly/template.md": "t",
+    "skills/old/SKILL.md": "o",
+    "notes/skills/SKILL.md": "not a skill",
+  });
+  fs.symlinkSync(path.join(root, "notes"), path.join(root, "skills", "linked"));
+  const before = snapshotRules(root);
+  assert.deepEqual([...before.keys()].sort(), ["skills/old/SKILL.md", "skills/weekly/SKILL.md", "skills/weekly/template.md"]);
+
+  fs.writeFileSync(path.join(root, "skills/weekly/template.md"), "t2");
+  fs.mkdirSync(path.join(root, "skills/brief"));
+  fs.writeFileSync(path.join(root, "skills/brief/SKILL.md"), "b");
+  fs.rmSync(path.join(root, "skills/old"), { recursive: true });
+  assert.equal(
+    rulesChangeNotice(before, snapshotRules(root)),
+    "已新建 skills/brief/SKILL.md\n已移除 skills/old/SKILL.md\n已更新 skills/weekly/template.md",
+  );
+});
+
+test("the system prompt applies the explicit-request rule to skills and ranks ALFRED.md above them", () => {
+  const prompt = systemPrompt(new Date());
+  assert.match(prompt, /skills\/<name>\/SKILL\.md holds the user's own skills/);
+  assert.match(prompt, /only when the user explicitly asks in this conversation/);
+  assert.match(prompt, /the request and ALFRED\.md win/);
+  assert.match(DEFAULT_RULES, /^- skills\/<name>\/SKILL\.md /m);
+});
