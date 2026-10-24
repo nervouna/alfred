@@ -99,8 +99,20 @@ install -Dm644 deploy/alfred.container ~/.config/containers/systemd/alfred.conta
 systemctl --user daemon-reload && systemctl --user start alfred
 ```
 
-- Without `generate_image`, skip the mmx secret and delete its `Secret=` line from the Quadlet.
-- Set `TZ` in the Quadlet to your time zone.
+- Keep the installed `alfred.container` identical to the repo's: `deploy/update.sh` compares the two on every update and stops when they differ. Settings for your host go in a Quadlet drop-in, which podman merges into the unit:
+
+  ```bash
+  mkdir -p ~/.config/containers/systemd/alfred.container.d
+  cat > ~/.config/containers/systemd/alfred.container.d/host.conf <<'EOF'
+  [Container]
+  # Your time zone: a drop-in's TZ replaces the Quadlet's default.
+  Environment=TZ=Europe/Berlin
+  EOF
+  systemctl --user daemon-reload
+  ```
+
+  Restart Alfred afterwards (`deploy/update.sh --restart`) so the container gets the new settings.
+- Without `generate_image`, create the mmx secret from an empty config (`echo '{}' | podman secret create alfred_mmx_config -`) rather than removing the `Secret=` line; `generate_image` then returns the mmx error.
 - The container restarts 30 s after any exit and starts at boot.
 - `journalctl --user` needs a persistent journal. If `/var/log/journal` does not exist, create it as root, run `systemd-tmpfiles --create --prefix /var/log/journal`, restart `systemd-journald` and run `journalctl --rotate`. Until then, root can read the logs with `journalctl CONTAINER_NAME=alfred`.
 - Podman stores secrets unencrypted, readable only by that user. They stay out of the image, the unit file and the repo.
@@ -140,7 +152,7 @@ systemctl --user daemon-reload && systemctl --user start workbench-pod
 ```
 
 - The workbench container mounts only what it shows, read-only: `account.json`, the context tokens and the rest of the state dir are not mounted. Its root filesystem is read-only too, and the socket directory is its one writable path.
-- Set `Environment=ALFRED_WORKBENCH=on` in `alfred.container` once the workbench is up. Add `Environment=ALFRED_WORKBENCH_URL=https://<hostname>` when WeChat opens the link and gets through the Access sign-in; leave it unset if it does not, and replies carry the run id only.
+- Once the workbench is up, set `Environment=ALFRED_WORKBENCH=on` for Alfred in a drop-in such as `~/.config/containers/systemd/alfred.container.d/workbench.conf` (under `[Container]`, as above), not in `alfred.container` itself, then `systemctl --user daemon-reload` and `deploy/update.sh --restart`. Add `Environment=ALFRED_WORKBENCH_URL=https://<hostname>` there when WeChat opens the link and gets through the Access sign-in; leave it unset if it does not, and replies carry the run id only.
 
 ### In WeChat
 
