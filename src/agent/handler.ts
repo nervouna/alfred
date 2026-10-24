@@ -20,6 +20,7 @@ import { parseMessage } from "../ilink/inbound.ts";
 import { describeError, log } from "../log.ts";
 import { WORKSPACE_DIR } from "../store.ts";
 import {
+  AGENT_SETTINGS,
   BUILTIN_TOOLS,
   MAX_BUDGET_USD,
   MAX_TURNS,
@@ -174,6 +175,7 @@ export function agentOptions(params: {
     cwd: WORKSPACE_DIR,
     env: agentEnv(),
     settingSources: [],
+    settings: AGENT_SETTINGS,
     systemPrompt: systemPrompt(new Date(), { rootRules: rules.loadRoot(), memory }),
     tools: BUILTIN_TOOLS,
     allowedTools: [...BUILTIN_TOOLS, ...ALFRED_TOOL_NAMES],

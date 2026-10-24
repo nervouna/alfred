@@ -1,5 +1,7 @@
 import path from "node:path";
 
+import type { Settings } from "@anthropic-ai/claude-agent-sdk";
+
 import { STATE_DIR } from "../store.ts";
 import { rulesPromptSection } from "./rules.ts";
 import type { RulesFile } from "./rules.ts";
@@ -80,6 +82,14 @@ export function agentEnv(): Record<string, string> {
     CLAUDE_AGENT_SDK_CLIENT_APP: "alfred/0.1.0",
   };
 }
+
+/**
+ * Settings for every Claude Code subprocess. Claude Code's own auto memory is on
+ * by default even with `settingSources: []`, and it loads its MEMORY.md as
+ * instructions that override default behavior. Alfred keeps long-term memory in
+ * the workspace and presents it as data, so the built-in one stays off.
+ */
+export const AGENT_SETTINGS: Settings = { autoMemoryEnabled: false };
 
 // Where memory ends and workspace rules begin; rulesPromptSection states the other side.
 const MEMORY_BOUNDARY =
