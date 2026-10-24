@@ -94,6 +94,7 @@ try {
       }
     } else if (m.type === "system" && m.subtype.startsWith("task_")) {
       console.log(`[${m.subtype}] ${elapsed()} ${JSON.stringify(m).slice(0, 200)}`);
+      console.log(`[subagents] ${elapsed()} running=${tracker.running.map((r) => `${r.role}:${r.description}`).join(", ") || "none"}`);
     } else if (m.type === "assistant") {
       if (firstRequest && !m.parent_tool_use_id) {
         firstRequest = false;

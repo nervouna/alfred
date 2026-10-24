@@ -9,6 +9,9 @@
 //   undelivered  replies fail as after the 24-hour window, then the next message
 //                gets the note naming the run
 //   stop         two background collectors, then /stop <run id> for one of them
+//   nested       a foreground general-purpose subagent starts three background
+//                collectors: nested calls share the slot cap
+//   prompt <text>  one message on the default model, then the spend per model
 
 import { createAgentHandler } from "../src/agent/handler.ts";
 import type { BotContext } from "../src/bot.ts";
@@ -130,8 +133,27 @@ if (scenario === "background") {
   await send(handler, "/status");
   await idle();
   summary();
+} else if (scenario === "nested") {
+  const handler = createAgentHandler();
+  await send(handler, "/model haiku");
+  await send(
+    handler,
+    "这是测试。用 Agent 工具启动一个 general-purpose 子代理，前台运行（run_in_background: false）。给它的 brief：用 Agent 工具在后台（run_in_background: true）派出三个 collector 子代理，分别读 https://en.wikipedia.org/wiki/Rome 、https://en.wikipedia.org/wiki/Paris 、https://en.wikipedia.org/wiki/London ，每页写三行历史摘要到 notes/rome.md、notes/paris.md、notes/london.md；三个都派出后就结束，报告每个调用的结果。它结束后回我一句。",
+  );
+  await sleep(20_000);
+  await send(handler, "/status");
+  await idle();
+  summary();
+} else if (scenario === "prompt" && process.argv[3]) {
+  const handler = createAgentHandler();
+  await send(handler, process.argv[3]);
+  await idle();
+  summary();
+  for (const f of listRunFiles().filter((r) => r.kind === "task")) {
+    console.log(`[models] ${f.id} ${Object.entries(f.modelCostUsd ?? {}).map(([m, c]) => `${m} $${c.toFixed(4)}`).join(", ")}`);
+  }
 } else {
-  console.error("usage: node scripts/handler-smoke.ts background|restart|undelivered|stop");
+  console.error("usage: node scripts/handler-smoke.ts background|restart|undelivered|stop|nested|prompt <text>");
   process.exit(2);
 }
 process.exit(0);

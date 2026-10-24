@@ -146,3 +146,23 @@ test("endAll ends every live and queued run, keeping the status of ones that alr
   for (const r of lost) assert.equal(readRunFile(r.id)?.status, "lost");
   assert.equal(bg.idle, true);
 });
+
+test("any agent type runs in the background, with the model its call asks for, and its slot counts toward the cap", () => {
+  const { bg, released } = setup();
+  const call = (n: number, extra: { role: string; model?: string }) => ({ toolUseId: `tu${n}`, description: `job ${n}`, prompt: `brief ${n}`, background: true, ...extra });
+  assert.equal(bg.admit(call(1, { role: "general-purpose", model: "opus" })), undefined);
+  assert.equal(bg.admit(call(2, { role: "general-purpose" })), undefined);
+  const [first, second] = bg.running.map((r) => r.recorder.record);
+  assert.equal(first?.model, "claude-opus-5-5");
+  assert.equal(first?.role, "general-purpose");
+  assert.equal(second?.model, undefined, "a built-in type's model is learned from its first message");
+
+  bg.started("tu2", "agent-2", "Explore");
+  assert.equal(bg.recorderOf("agent-2")?.record.role, "Explore", "the type task_started reports wins");
+
+  assert.match(bg.admit(call(3, { role: "researcher", model: "haiku" })) ?? "", /queued/, "a third call, nested or not, waits for a slot");
+  bg.started("tu1", "agent-1");
+  bg.notified("agent-1", "completed");
+  assert.equal(released[0]?.role, "researcher");
+  assert.equal(released[0]?.model, "haiku", "the handed-back brief keeps the model it asked for");
+});

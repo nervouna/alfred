@@ -1,8 +1,9 @@
-// Subagent guard rails and tracking. Roles are defined in config.ts; this
-// module keeps the role the only lever on an Agent call, lets the task admit or
-// queue background calls (background.ts), keeps every subagent (roles, built-in
-// agent types, forked skills) away from memory, skills, workspace rules and the
-// user, and follows which foreground subagents are running.
+// Subagent guard rails and tracking. Which agent type or model an Agent call
+// uses follows the SDK; this module enforces the boundaries on every call
+// instead: the task admits or queues background calls (background.ts), nested
+// ones included, and every subagent (roles, built-in agent types, plugin agents,
+// forked skills) gets the shared rules and stays away from memory, skills,
+// workspace rules and the user. It also follows which foreground subagents run.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -10,34 +11,31 @@ import path from "node:path";
 import type { HookCallbackMatcher, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 
 import { log } from "../log.ts";
-import { SUBAGENT_DISALLOWED_TOOLS, SUBAGENT_ROLES, isSubagentRole } from "./config.ts";
-import type { SubagentRoleName } from "./config.ts";
+import { SUBAGENT_RULES } from "./config.ts";
 import { resolveInside } from "./guard.ts";
 import { RULES_FILE } from "./rules.ts";
 import { SKILLS_DIR } from "./skills.ts";
 
 const AGENT_TOOL = "Agent";
+const SEND_FILE_TOOL = "mcp__alfred__send_file";
+/** The agent type the SDK uses for an Agent call that names none. */
+export const DEFAULT_AGENT_TYPE = "general-purpose";
 
 /**
- * The input an Agent call runs with, or a denial reason. The call must name a
- * role. Everything that would override the role (model, effort) or reach past
- * the task (names other agents could message, worktrees) is dropped. Calls run
- * in the background unless they ask for the foreground, as the SDK's default.
+ * The input an Agent call runs with: as the agent wrote it, with the background
+ * made explicit (the SDK's default), so admission knows which calls take a slot.
  */
-export function checkAgentCall(input: Record<string, unknown>): { deny: string } | { input: Record<string, unknown> } {
-  const role = input.subagent_type;
-  if (!isSubagentRole(role)) {
-    return { deny: `subagent_type must be one of ${Object.keys(SUBAGENT_ROLES).join(", ")}; got ${JSON.stringify(role ?? null)}.` };
-  }
-  return {
-    input: { description: input.description, prompt: input.prompt, subagent_type: role, run_in_background: input.run_in_background !== false },
-  };
+export function checkAgentCall(input: Record<string, unknown>): Record<string, unknown> {
+  return { ...input, run_in_background: input.run_in_background !== false };
 }
 
-/** An Agent call the main thread makes, after checkAgentCall. */
+/** An Agent call from the main thread or a subagent, after checkAgentCall. */
 export interface AgentCall {
   toolUseId: string;
-  role: SubagentRoleName;
+  /** The agent type: a role, a built-in type or a plugin's. */
+  role: string;
+  /** The model the call asks for, overriding its type's default. */
+  model?: string;
   description: string;
   prompt: string;
   background: boolean;
@@ -85,16 +83,16 @@ function deny(reason: string) {
 }
 
 /**
- * Returns a denial reason when a subagent calls a tool only Alfred may use. A
- * role's disallowedTools already hide them, but built-in agent types and forked
- * skills get every tool the main thread has.
+ * Returns a denial reason when a subagent calls send_file: only Alfred talks to
+ * the user. A role's disallowedTools already hide it, but built-in agent types
+ * and forked skills get every tool the main thread has.
  */
 export function checkSubagentTool(toolName: string): string | undefined {
-  if (!SUBAGENT_DISALLOWED_TOOLS.includes(toolName)) return undefined;
-  return `Subagents may not call ${toolName}: only Alfred sends files to the user and starts or stops subagents. Say what you need in your final message instead.`;
+  if (toolName !== SEND_FILE_TOOL) return undefined;
+  return "Subagents may not send files: only Alfred talks to the user. Name the file in your final message instead.";
 }
 
-/** PreToolUse hook: rewrites, admits or denies Agent calls, and denies subagents Alfred's own tools and writes to memory, skills and rules. */
+/** PreToolUse hook: admits or queues Agent calls from any thread, and denies subagents send_file and writes to memory, skills and rules. */
 export function subagentGuard(root: string, admission?: AgentAdmission): HookCallbackMatcher {
   return {
     hooks: [
@@ -103,20 +101,17 @@ export function subagentGuard(root: string, admission?: AgentAdmission): HookCal
         const toolInput = (input.tool_input ?? {}) as Record<string, unknown>;
         if (input.agent_id) {
           const reason = checkSubagentTool(input.tool_name) ?? checkSubagentWrite(root, input.tool_name, toolInput);
-          if (!reason) return {};
-          log.warn(`denied ${input.tool_name} in subagent ${input.agent_type ?? input.agent_id}: ${reason}`);
-          return deny(reason);
+          if (reason) {
+            log.warn(`denied ${input.tool_name} in subagent ${input.agent_type ?? input.agent_id}: ${reason}`);
+            return deny(reason);
+          }
         }
         if (input.tool_name !== AGENT_TOOL) return {};
-        const checked = checkAgentCall(toolInput);
-        if ("deny" in checked) {
-          log.warn(`denied Agent call: ${checked.deny}`);
-          return deny(checked.deny);
-        }
-        const call = checked.input;
+        const call = checkAgentCall(toolInput);
         const refused = admission?.admit({
           toolUseId: input.tool_use_id,
-          role: call.subagent_type as SubagentRoleName,
+          role: typeof call.subagent_type === "string" && call.subagent_type ? call.subagent_type : DEFAULT_AGENT_TYPE,
+          model: typeof call.model === "string" && call.model ? call.model : undefined,
           description: String(call.description ?? ""),
           prompt: String(call.prompt ?? ""),
           background: call.run_in_background === true,
@@ -136,10 +131,22 @@ export function agentFailureHook(admission: AgentAdmission): HookCallbackMatcher
   return {
     hooks: [
       async (input) => {
-        if (input.hook_event_name === "PostToolUseFailure" && input.tool_name === AGENT_TOOL && !input.agent_id) {
+        if (input.hook_event_name === "PostToolUseFailure" && input.tool_name === AGENT_TOOL) {
           admission.failedToStart(input.tool_use_id, input.error);
         }
         return {};
+      },
+    ],
+  };
+}
+
+/** SubagentStart hook: every subagent, whatever its type or however it started, gets the shared subagent rules. */
+export function subagentRulesHook(): HookCallbackMatcher {
+  return {
+    hooks: [
+      async (input) => {
+        if (input.hook_event_name !== "SubagentStart") return {};
+        return { hookSpecificOutput: { hookEventName: "SubagentStart", additionalContext: SUBAGENT_RULES } };
       },
     ],
   };
@@ -149,26 +156,28 @@ export interface LiveSubagent {
   role: string;
   description: string;
   startedAt: number;
+  /** The tool call that started it: an Agent call, or the Skill call of a forked skill. */
+  toolUseId?: string;
 }
 
-/** Follows a query's messages to know which subagents run: an Agent call in the main thread starts one, its tool result ends it. */
+/**
+ * Follows the SDK's task messages to know which foreground subagents run,
+ * forked skills included. Background ones are BackgroundRuns' business.
+ */
 export class SubagentTracker {
   private readonly live = new Map<string, LiveSubagent>();
 
   observe(m: SDKMessage, now = Date.now()): void {
     if (m.type === "result") {
-      // Subagents run in the foreground, so none outlives the turn; a turn cut short (spend cap, max turns) leaves no result for its Agent call.
+      // Foreground subagents never outlive the turn; a turn cut short (spend cap, max turns) may leave no notification.
       this.live.clear();
-    } else if (m.type === "assistant" && m.parent_tool_use_id === null) {
-      for (const block of m.message.content) {
-        if (block.type !== "tool_use" || block.name !== AGENT_TOOL) continue;
-        const input = (block.input ?? {}) as Record<string, unknown>;
-        this.live.set(block.id, { role: String(input.subagent_type ?? "?"), description: String(input.description ?? ""), startedAt: now });
-      }
-    } else if (m.type === "user" && m.parent_tool_use_id === null && Array.isArray(m.message.content)) {
-      for (const block of m.message.content) {
-        if (block.type === "tool_result") this.live.delete(block.tool_use_id);
-      }
+    } else if (m.type === "system" && m.subtype === "task_started") {
+      if (m.is_backgrounded || (m.task_type !== undefined && m.task_type !== "local_agent")) return;
+      this.live.set(m.task_id, { role: m.subagent_type ?? DEFAULT_AGENT_TYPE, description: m.description, startedAt: now, toolUseId: m.tool_use_id });
+    } else if (m.type === "system" && m.subtype === "task_updated") {
+      if (m.patch.is_backgrounded) this.live.delete(m.task_id);
+    } else if (m.type === "system" && m.subtype === "task_notification") {
+      this.live.delete(m.task_id);
     }
   }
 
@@ -176,8 +185,9 @@ export class SubagentTracker {
     return [...this.live.values()];
   }
 
-  /** Role of the subagent started by the Agent call `toolUseId`, while it runs. */
+  /** Type of the foreground subagent started by the tool call `toolUseId`, while it runs. */
   roleOf(toolUseId: string): string | undefined {
-    return this.live.get(toolUseId)?.role;
+    for (const s of this.live.values()) if (s.toolUseId === toolUseId) return s.role;
+    return undefined;
   }
 }

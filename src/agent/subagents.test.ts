@@ -6,7 +6,8 @@ import { after, test } from "node:test";
 
 import type { HookInput, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 
-import { SubagentTracker, checkAgentCall, checkSubagentTool, checkSubagentWrite, subagentGuard } from "./subagents.ts";
+import { SUBAGENT_RULES } from "./config.ts";
+import { SubagentTracker, checkAgentCall, checkSubagentTool, checkSubagentWrite, subagentGuard, subagentRulesHook } from "./subagents.ts";
 
 const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "alfred-subagents-")));
 fs.mkdirSync(path.join(root, "memory"));
@@ -14,29 +15,20 @@ fs.mkdirSync(path.join(root, "reports"));
 fs.mkdirSync(path.join(root, "skills"));
 after(() => fs.rmSync(root, { recursive: true, force: true }));
 
-test("checkAgentCall keeps the brief and the role, drops model and effort, and runs in the background by default", () => {
-  const checked = checkAgentCall({
+test("checkAgentCall passes any agent type, model and option through and runs in the background by default", () => {
+  const call = {
     description: "VPS 价格对比",
     prompt: "Compare ...",
-    subagent_type: "researcher",
+    subagent_type: "general-purpose",
     model: "opus",
     effort: "max",
     name: "vps",
     isolation: "worktree",
-  });
-  assert.deepEqual(checked, {
-    input: { description: "VPS 价格对比", prompt: "Compare ...", subagent_type: "researcher", run_in_background: true },
-  });
+  };
+  assert.deepEqual(checkAgentCall(call), { ...call, run_in_background: true });
+  assert.deepEqual(checkAgentCall({ description: "d", prompt: "p" }), { description: "d", prompt: "p", run_in_background: true }, "no type named");
   const fg = checkAgentCall({ description: "d", prompt: "p", subagent_type: "collector", run_in_background: false });
-  assert.ok("input" in fg && fg.input.run_in_background === false, "the foreground when asked for");
-});
-
-test("checkAgentCall denies calls without a role or with a built-in agent type", () => {
-  for (const subagent_type of [undefined, "general-purpose", "Explore", "fork", "toString"]) {
-    const checked = checkAgentCall({ description: "x", prompt: "y", subagent_type });
-    assert.ok("deny" in checked, String(subagent_type));
-    assert.match(checked.deny, /collector, researcher, writer/);
-  }
+  assert.equal(fg.run_in_background, false, "the foreground when asked for");
 });
 
 test("checkSubagentWrite refuses memory/, skills/ and every ALFRED.md, and allows other workspace paths", () => {
@@ -91,78 +83,82 @@ test("subagentGuard denies a subagent's memory write and lets the main thread ma
   assert.equal(await decide(preToolUse("Write", { file_path: "reports/a.md" }, { id: "agent-1", type: "writer" })), undefined);
 });
 
-test("checkSubagentTool refuses only the tools that are Alfred's alone", () => {
-  for (const tool of ["mcp__alfred__send_file", "Agent", "TaskStop"]) assert.match(checkSubagentTool(tool) ?? "", /only Alfred/, tool);
-  for (const tool of ["Read", "Write", "Skill", "WebFetch", "mcp__alfred__render_pdf"]) assert.equal(checkSubagentTool(tool), undefined, tool);
+test("checkSubagentTool refuses only send_file", () => {
+  assert.match(checkSubagentTool("mcp__alfred__send_file") ?? "", /only Alfred talks to the user/);
+  for (const tool of ["Agent", "TaskStop", "Read", "Write", "Skill", "WebFetch", "mcp__alfred__render_pdf"]) assert.equal(checkSubagentTool(tool), undefined, tool);
 });
 
-test("subagentGuard denies Alfred's own tools to every subagent, built-in types and forked skills included", async () => {
-  const calls: [string, Record<string, unknown>][] = [
-    ["mcp__alfred__send_file", { path: "reports/a.pdf" }],
-    ["Agent", { description: "d", prompt: "p", subagent_type: "researcher" }],
-    ["TaskStop", { task_id: "t" }],
-  ];
+test("subagentGuard denies send_file and skill writes to every subagent, built-in types and forked skills included", async () => {
   for (const type of ["researcher", "general-purpose", "alfred:scout"]) {
-    for (const [tool, input] of calls) {
-      const out = await decide(preToolUse(tool, input, { id: "agent-1", type }));
-      assert.equal(out && "permissionDecision" in out ? out.permissionDecision : undefined, "deny", `${type} ${tool}`);
-    }
+    const send = await decide(preToolUse("mcp__alfred__send_file", { path: "reports/a.pdf" }, { id: "agent-1", type }));
+    assert.equal(send && "permissionDecision" in send ? send.permissionDecision : undefined, "deny", `${type} send_file`);
     const skillWrite = await decide(preToolUse("Write", { file_path: "skills/x/SKILL.md", content: "x" }, { id: "agent-1", type }));
     assert.equal(skillWrite && "permissionDecision" in skillWrite ? skillWrite.permissionDecision : undefined, "deny", `${type} skills/`);
+    assert.equal(await decide(preToolUse("TaskStop", { task_id: "t" }, { id: "agent-1", type })), undefined, `${type} TaskStop`);
   }
   assert.equal(await decide(preToolUse("mcp__alfred__send_file", { path: "reports/a.pdf" })), undefined, "the main thread sends files");
   assert.equal(await decide(preToolUse("Write", { file_path: "skills/x/SKILL.md", content: "x" })), undefined, "the main thread writes skills");
 });
 
-test("subagentGuard rewrites Agent calls from the main thread and denies unknown roles", async () => {
-  const ok = await decide(preToolUse("Agent", { description: "d", prompt: "p", subagent_type: "collector", model: "opus" }));
-  assert.ok(ok && "updatedInput" in ok);
-  assert.equal(ok.permissionDecision, "allow");
-  assert.deepEqual(ok.updatedInput, { description: "d", prompt: "p", subagent_type: "collector", run_in_background: true });
-
-  const bad = await decide(preToolUse("Agent", { description: "d", prompt: "p", subagent_type: "general-purpose" }));
-  assert.equal(bad && "permissionDecision" in bad ? bad.permissionDecision : undefined, "deny");
+test("subagentGuard lets Agent calls of any type and model through, from the main thread and from subagents", async () => {
+  const call = { description: "d", prompt: "p", subagent_type: "Explore", model: "haiku", effort: "low" };
+  for (const agent of [undefined, { id: "agent-1", type: "general-purpose" }]) {
+    const out = await decide(preToolUse("Agent", call, agent));
+    assert.ok(out && "updatedInput" in out, String(agent?.type));
+    assert.equal(out.permissionDecision, "allow");
+    assert.deepEqual(out.updatedInput, { ...call, run_in_background: true });
+  }
 });
 
-test("SubagentTracker follows Agent calls in the main thread until their results arrive", () => {
+test("SubagentTracker follows foreground subagents through the SDK's task messages, forked skills included", () => {
   const tracker = new SubagentTracker();
-  const agentCall = (id: string, role: string, description: string) =>
-    ({
-      type: "assistant",
-      parent_tool_use_id: null,
-      message: { content: [{ type: "tool_use", id, name: "Agent", input: { subagent_type: role, description, prompt: "..." } }] },
-    }) as unknown as SDKMessage;
-  const result = (id: string, parent: string | null = null) =>
-    ({ type: "user", parent_tool_use_id: parent, message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, content: "done" }] } }) as unknown as SDKMessage;
+  const started = (task_id: string, extra: Record<string, unknown>) =>
+    ({ type: "system", subtype: "task_started", task_id, task_type: "local_agent", is_backgrounded: false, ...extra }) as unknown as SDKMessage;
+  const notified = (task_id: string) => ({ type: "system", subtype: "task_notification", task_id, status: "completed" }) as unknown as SDKMessage;
 
-  tracker.observe(agentCall("a", "researcher", "线程一"), 1000);
-  tracker.observe(agentCall("b", "collector", "线程二"), 2000);
+  tracker.observe(started("t1", { tool_use_id: "a", subagent_type: "researcher", description: "线程一" }), 1000);
+  tracker.observe(started("t2", { tool_use_id: "s", subagent_type: "general-purpose", description: "html-report" }), 2000);
+  tracker.observe(started("t3", { tool_use_id: "b", subagent_type: "collector", description: "后台", is_backgrounded: true }), 2000);
+  tracker.observe(started("t4", { tool_use_id: "c", description: "shell", task_type: "local_bash" }), 2000);
   assert.deepEqual(tracker.running, [
-    { role: "researcher", description: "线程一", startedAt: 1000 },
-    { role: "collector", description: "线程二", startedAt: 2000 },
+    { role: "researcher", description: "线程一", startedAt: 1000, toolUseId: "a" },
+    { role: "general-purpose", description: "html-report", startedAt: 2000, toolUseId: "s" },
   ]);
-  tracker.observe(result("a", "b"), 3000);
-  assert.equal(tracker.running.length, 2, "a tool result inside a subagent ends nothing");
-  tracker.observe(result("a"), 3000);
-  assert.deepEqual(tracker.running.map((s) => s.description), ["线程二"]);
-  tracker.observe(result("b"), 4000);
-  assert.deepEqual(tracker.running, []);
+  assert.equal(tracker.roleOf("s"), "general-purpose", "a forked skill's steps are attributed by its Skill call");
+  assert.equal(tracker.roleOf("b"), undefined, "background subagents are not tracked here");
 
-  tracker.observe(agentCall("c", "writer", "报告"), 5000);
+  tracker.observe(notified("t1"), 3000);
+  assert.deepEqual(tracker.running.map((s) => s.description), ["html-report"]);
+  tracker.observe({ type: "system", subtype: "task_updated", task_id: "t2", patch: { is_backgrounded: true } } as unknown as SDKMessage);
+  assert.deepEqual(tracker.running, [], "a subagent moved to the background leaves");
+
+  tracker.observe(started("t5", { tool_use_id: "w", subagent_type: "writer", description: "报告" }), 5000);
   tracker.observe({ type: "result", subtype: "error_max_budget_usd" } as unknown as SDKMessage, 6000);
-  assert.deepEqual(tracker.running, [], "a turn that ends without the Agent call's result ends its subagent");
+  assert.deepEqual(tracker.running, [], "a turn that ends without a notification ends its foreground subagents");
 });
 
-test("subagentGuard asks the task to admit each Agent call and relays a refusal", async () => {
+test("subagentRulesHook gives every subagent the shared rules", async () => {
+  const hook = subagentRulesHook().hooks[0];
+  assert.ok(hook);
+  const out = await hook(
+    { hook_event_name: "SubagentStart", session_id: "s", transcript_path: "/dev/null", cwd: root, agent_id: "a1", agent_type: "general-purpose" },
+    undefined,
+    { signal: new AbortController().signal },
+  );
+  assert.ok("hookSpecificOutput" in out && out.hookSpecificOutput?.hookEventName === "SubagentStart");
+  assert.equal(out.hookSpecificOutput.additionalContext, SUBAGENT_RULES);
+});
+
+test("subagentGuard asks the task to admit each Agent call, nested ones included, and relays a refusal", async () => {
   const calls: unknown[] = [];
   const admission = {
-    admit: (call: unknown) => (calls.push(call), calls.length > 1 ? "queued as run k7m2qa" : undefined),
+    admit: (call: unknown) => (calls.push(call), calls.length === 2 ? "queued as run k7m2qa" : undefined),
     failedToStart: () => {},
   };
   const hook = subagentGuard(root, admission).hooks[0];
   assert.ok(hook);
-  const run = async (input: Record<string, unknown>) => {
-    const out = await hook(preToolUse("Agent", input), "toolu_1", { signal: new AbortController().signal });
+  const run = async (input: Record<string, unknown>, agent?: { id: string; type: string }) => {
+    const out = await hook(preToolUse("Agent", input, agent), "toolu_1", { signal: new AbortController().signal });
     return "hookSpecificOutput" in out ? out.hookSpecificOutput : undefined;
   };
   const first = await run({ description: "a", prompt: "p", subagent_type: "researcher" });
@@ -170,8 +166,11 @@ test("subagentGuard asks the task to admit each Agent call and relays a refusal"
   const second = await run({ description: "b", prompt: "q", subagent_type: "collector", run_in_background: false });
   assert.equal(second && "permissionDecision" in second ? second.permissionDecision : undefined, "deny");
   assert.equal(second && "permissionDecisionReason" in second ? second.permissionDecisionReason : undefined, "queued as run k7m2qa");
+  const nested = await run({ description: "c", prompt: "r", model: "opus" }, { id: "agent-1", type: "general-purpose" });
+  assert.equal(nested && "permissionDecision" in nested ? nested.permissionDecision : undefined, "allow");
   assert.deepEqual(calls, [
-    { toolUseId: "toolu_1", role: "researcher", description: "a", prompt: "p", background: true },
-    { toolUseId: "toolu_1", role: "collector", description: "b", prompt: "q", background: false },
+    { toolUseId: "toolu_1", role: "researcher", model: undefined, description: "a", prompt: "p", background: true },
+    { toolUseId: "toolu_1", role: "collector", model: undefined, description: "b", prompt: "q", background: false },
+    { toolUseId: "toolu_1", role: "general-purpose", model: "opus", description: "c", prompt: "r", background: true },
   ]);
 });

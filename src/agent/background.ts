@@ -1,17 +1,17 @@
-// Background subagents of one task. A task's query stays open while they run;
-// this module decides which Agent calls may start one (a concurrency cap and the
-// daily budget), queues the rest and hands them back when a slot frees, and keeps
-// each subagent's run record for the workbench.
+// Background subagents of one task, nested ones included. A task's query stays
+// open while they run; this module decides which Agent calls may start one (a
+// concurrency cap and the daily budget), queues the rest and hands them back when
+// a slot frees, and keeps each subagent's run record for the workbench.
 
-import { MODELS, SUBAGENT_ROLES } from "./config.ts";
-import type { SubagentRoleName } from "./config.ts";
+import { MODELS, SUBAGENT_ROLES, isModelKey, isSubagentRole } from "./config.ts";
 import { RunRecorder } from "../runs.ts";
 import type { RunStatus } from "../runs.ts";
 import type { AgentAdmission, AgentCall } from "./subagents.ts";
 
 export interface BackgroundRun {
   recorder: RunRecorder;
-  role: SubagentRoleName;
+  /** The agent type: a role, a built-in type or a plugin's. */
+  role: string;
   description: string;
   toolUseId: string;
   agentId?: string;
@@ -20,7 +20,9 @@ export interface BackgroundRun {
 
 export interface QueuedBrief {
   recorder: RunRecorder;
-  role: SubagentRoleName;
+  role: string;
+  /** The model the call asked for, if any. */
+  model?: string;
   description: string;
   prompt: string;
 }
@@ -42,6 +44,16 @@ export function tokenRates(modelUsage: Record<string, { costUSD: number; inputTo
     if (tokens > 0) rates[model] = u.costUSD / tokens;
   }
   return rates;
+}
+
+/**
+ * The model a call's subagent runs on, as far as Alfred knows before it starts:
+ * the one the call asks for, else its role's. Other types (general-purpose,
+ * plugin agents) say theirs in their first message (see handler.ts).
+ */
+function expectedModel(call: AgentCall): string | undefined {
+  if (call.model) return isModelKey(call.model) ? MODELS[call.model] : call.model;
+  return isSubagentRole(call.role) ? MODELS[SUBAGENT_ROLES[call.role].model] : undefined;
 }
 
 const NOTIFICATION_STATUS: Record<string, Ended["status"]> = { completed: "done", failed: "failed", stopped: "stopped" };
@@ -85,12 +97,12 @@ export class BackgroundRuns implements AgentAdmission {
     return this.released ? [this.released, ...this.queue] : [...this.queue];
   }
 
-  private recorder(role: SubagentRoleName, description: string, queued: boolean): RunRecorder {
+  private recorder(call: AgentCall, queued: boolean): RunRecorder {
     return new RunRecorder({
       kind: "subagent",
-      title: description || role,
-      model: MODELS[SUBAGENT_ROLES[role].model],
-      role,
+      title: call.description || call.role,
+      model: expectedModel(call),
+      role: call.role,
       parentRunId: this.parentRunId,
       queued,
     });
@@ -100,28 +112,29 @@ export class BackgroundRuns implements AgentAdmission {
     if (!call.background) return undefined;
     if (this.overBudget()) return "The daily spend cap is reached, so no new subagent starts today. Tell the user, and do the work yourself only if it is small.";
     if (this.live.size + this.launching.size >= this.max) {
-      const recorder = this.recorder(call.role, call.description, true);
-      this.queue.push({ recorder, role: call.role, description: call.description, prompt: call.prompt });
+      const recorder = this.recorder(call, true);
+      this.queue.push({ recorder, role: call.role, model: call.model, description: call.description, prompt: call.prompt });
       return `${this.max} background subagents are already running, the most allowed. This one is queued as run ${recorder.id}, and its brief comes back to you when a slot frees. Tell the user it is queued.`;
     }
     const released = this.released;
     this.released = undefined;
-    const recorder = released?.recorder ?? this.recorder(call.role, call.description, false);
+    const recorder = released?.recorder ?? this.recorder(call, false);
     if (released) {
-      recorder.update({ title: call.description || released.description });
+      recorder.update({ title: call.description || released.description, role: call.role, model: expectedModel(call) });
       recorder.start();
     }
     this.launching.set(call.toolUseId, { recorder, role: call.role, description: call.description, toolUseId: call.toolUseId, startedAt: Date.now() });
     return undefined;
   }
 
-  /** The SDK started the subagent of an admitted call (task_started). Calls run in the foreground are not ours. */
-  started(toolUseId: string, agentId: string): void {
+  /** The SDK started the subagent of an admitted call (task_started), of `agentType` when it says. Calls run in the foreground are not ours. */
+  started(toolUseId: string, agentId: string, agentType?: string): void {
     const run = this.launching.get(toolUseId);
     if (!run) return;
     this.launching.delete(toolUseId);
     run.agentId = agentId;
-    run.recorder.update({ agentId });
+    if (agentType) run.role = agentType;
+    run.recorder.update({ agentId, role: run.role });
     this.live.set(agentId, run);
     this.dispatched.push(run.recorder);
   }
