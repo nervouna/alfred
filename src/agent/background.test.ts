@@ -9,13 +9,19 @@ const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "alfred-backgr
 process.env.ALFRED_STATE_DIR = path.join(tmp, "state");
 after(() => fs.rmSync(tmp, { recursive: true, force: true }));
 
-const { BackgroundRuns, tokenRates } = await import("./background.ts");
+const { BackgroundRuns } = await import("./background.ts");
 const { readRunFile, readRunLog } = await import("../runs.ts");
 type Brief = import("./background.ts").QueuedBrief;
 
 function setup(opts: { overBudget?: () => boolean } = {}) {
   const released: Brief[] = [];
-  const bg = new BackgroundRuns({ parentRunId: "k7m2qa", max: 2, overBudget: opts.overBudget ?? (() => false), release: (b) => released.push(b) });
+  const bg = new BackgroundRuns({
+    parentRunId: "k7m2qa",
+    max: 2,
+    overBudget: opts.overBudget ?? (() => false),
+    release: (b) => released.push(b),
+    transcriptOf: (agentId) => path.join(tmp, "transcripts", `agent-${agentId}.jsonl`),
+  });
   const call = (n: number, background = true) => ({ toolUseId: `tu${n}`, role: "collector" as const, description: `job ${n}`, prompt: `brief ${n}`, background });
   return { bg, released, call };
 }
@@ -35,7 +41,7 @@ test("two background subagents start; a third is queued and handed back when a s
   assert.equal(bg.running.length, 2);
   assert.equal(released.length, 0);
 
-  bg.notified("agent-1", "completed", 1000);
+  bg.notified("agent-1", "completed");
   assert.equal(released.length, 1, "the freed slot hands the queued brief back");
   assert.equal(released[0]?.prompt, "brief 3");
   assert.equal(bg.idle, false, "a handed-back brief keeps the task open");
@@ -64,28 +70,71 @@ test("over the daily budget, no background subagent starts", () => {
   assert.equal(bg.idle, true);
 });
 
-test("an ended subagent's record closes at the next result with a cost estimated from its tokens", () => {
+/** One response's transcript lines: a partial usage on its first block, the final one on its last. */
+function response(id: string, model: string, usage: { input: number; output: number; cacheRead: number; cacheWrite: number }): string {
+  const line = (output: number) =>
+    JSON.stringify({
+      type: "assistant",
+      isSidechain: true,
+      message: { id, model, usage: { input_tokens: usage.input, output_tokens: output, cache_read_input_tokens: usage.cacheRead, cache_creation_input_tokens: usage.cacheWrite } },
+    });
+  return `${line(3)}\n${line(usage.output)}\n`;
+}
+
+function modelUsage(model: string, costUSD: number, tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }) {
+  return {
+    [model]: {
+      inputTokens: tokens.input,
+      outputTokens: tokens.output,
+      cacheReadInputTokens: tokens.cacheRead,
+      cacheCreationInputTokens: tokens.cacheWrite,
+      webSearchRequests: 0,
+      costUSD,
+      contextWindow: 1_000_000,
+      maxOutputTokens: 128_000,
+    },
+  };
+}
+
+test("a subagent's cost comes from its transcript, live and once more when its record closes", () => {
   const { bg, call } = setup();
   bg.admit(call(1));
-  bg.started("tu1", "agent-1");
-  const id = bg.running[0]?.recorder.id ?? "";
-  bg.notified("agent-1", "completed", 2000);
-  assert.equal(bg.idle, true);
-  assert.equal(readRunFile(id)?.status, "running", "still open until the result brings the cost");
+  bg.started("tu1", "agent-cost");
+  const run = bg.running[0];
+  assert.ok(run);
+  const transcript = path.join(tmp, "transcripts", "agent-agent-cost.jsonl");
+  fs.mkdirSync(path.dirname(transcript), { recursive: true });
+  const model = "claude-cost-test";
+  fs.writeFileSync(transcript, response("msg_1", model, { input: 2, output: 1000, cacheRead: 0, cacheWrite: 10_000 }));
+
+  bg.progressed(run);
+  assert.equal(run.recorder.record.costUsd, 0, "no price for the model before a result reports it");
+
+  // $2 per million input tokens: 2 + 5×1000 + 1.25×10000 = 17502 input-token equivalents.
+  bg.settleEnded(modelUsage(model, 0.035004, { input: 2, output: 1000, cacheRead: 0, cacheWrite: 10_000 }));
+  assert.ok(Math.abs(run.recorder.record.costUsd - 0.035004) < 1e-9, "the result reprices a running subagent");
+
+  fs.appendFileSync(transcript, response("msg_2", model, { input: 2, output: 500, cacheRead: 11_000, cacheWrite: 600 }));
+  bg.progressed(run);
+  // 2 + 2500 + 1100 + 750 = 4352 more.
+  const live = 0.035004 + 0.008704;
+  assert.ok(Math.abs(run.recorder.record.costUsd - live) < 1e-9);
+  assert.equal(run.recorder.record.costEstimated, true);
+
+  bg.notified("agent-cost", "completed");
+  assert.equal(readRunFile(run.recorder.id)?.status, "running", "still open until the next result");
   const { dispatched, reported } = bg.takeForReply();
-  assert.deepEqual(dispatched.map((r) => r.id), [id]);
-  assert.deepEqual(reported.map((r) => r.id), [id]);
+  assert.deepEqual(dispatched.map((r) => r.id), [run.recorder.id]);
+  assert.deepEqual(reported.map((r) => r.id), [run.recorder.id]);
   assert.deepEqual(bg.takeForReply(), { dispatched: [], reported: [] });
 
-  const rates = tokenRates({
-    "claude-haiku-5-5": { costUSD: 0.01, inputTokens: 1000, outputTokens: 500, cacheReadInputTokens: 3000, cacheCreationInputTokens: 500 },
-  });
-  bg.settleEnded(rates);
-  const file = readRunFile(id);
+  fs.appendFileSync(transcript, response("msg_3", model, { input: 1, output: 100, cacheRead: 11_600, cacheWrite: 0 }));
+  bg.settleEnded({});
+  const file = readRunFile(run.recorder.id);
   assert.equal(file?.status, "done");
-  assert.equal(file?.costEstimated, true);
-  assert.ok(Math.abs((file?.costUsd ?? 0) - 0.004) < 1e-9);
-  assert.equal(readRunLog().find((r) => r.id === id)?.parentRunId, "k7m2qa");
+  // 1 + 500 + 1160 = 1661 more, at the price learned earlier.
+  assert.ok(Math.abs((file?.costUsd ?? 0) - (live + 0.003322)) < 1e-9);
+  assert.equal(readRunLog().find((r) => r.id === run.recorder.id)?.parentRunId, "k7m2qa");
 });
 
 test("stopped and failed notifications keep their status", () => {

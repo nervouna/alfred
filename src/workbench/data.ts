@@ -76,6 +76,11 @@ export function localDay(iso: string): string {
   return new Date(iso).toLocaleDateString("en-CA");
 }
 
+/** A subagent's cost is part of the cost its task reports, so totals leave subagent runs out. */
+export function countsForSpend(r: RunRecord): boolean {
+  return r.kind !== "subagent";
+}
+
 export interface DaySpend {
   day: string;
   costUsd: number;
@@ -86,7 +91,7 @@ export interface DaySpend {
 /** Spend per local day, newest first, from finished runs. */
 export function spendByDay(runs: RunRecord[]): DaySpend[] {
   const days = new Map<string, DaySpend>();
-  for (const r of runs) {
+  for (const r of runs.filter(countsForSpend)) {
     const day = localDay(r.startedAt);
     const d = days.get(day) ?? { day, costUsd: 0, runs: 0, byModel: {} };
     d.costUsd += r.costUsd || 0;
