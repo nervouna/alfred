@@ -150,18 +150,18 @@ Send a task as text or voice. Files and images can come first; they are saved to
 | --- | --- |
 | `/new` | start a new session (drops the conversation context; `/resume` brings it back) |
 | `/resume` | switch back to the previous session for the next task; send it again to switch back |
-| `/stop` | stop the current task and drop pending follow-ups and queued messages |
-| `/model [sonnet\|opus\|haiku]` | show or switch the model; default `sonnet` |
+| `/stop [run id]` | stop the current task, its background subagents and queued ones, and drop pending follow-ups and queued messages; with a run id, stop only that background subagent or take it out of the queue |
+| `/model [sonnet\|opus\|haiku]` | show or switch the model; default `sonnet`. During a task the switch applies from its next turn (subagent roles keep their models) |
 | `/memory` | list long-term memories |
-| `/status` | model, session age and idle time, when it rotates, spend, current task, pending follow-ups |
+| `/status` | model, session age and idle time, when it rotates, spend today against the daily cap, current task, background and queued subagents, pending follow-ups |
 | `/help` | command list |
 
 One task runs at a time, and you can steer it while it runs ("别查 X 了，重点看 Y"):
 
 - A message sent during a task is acknowledged (`收到，会在当前步骤结束后转给 Alfred。`) and handed to the running agent at the next step boundary, once the current model call and its tool calls finish. A tool call in flight is not interrupted. Files sent mid-task travel with the next text message, as before.
 - If the agent is still working through tool calls, the follow-up joins the current turn and one reply answers both. If it was already writing its final answer, the follow-up runs as its own turn right after, and each turn gets its own reply, sent as soon as it ends.
-- The typing indicator and the 3-minute progress notes (with the run id, see Workbench) cover the whole task, follow-up turns included. While subagents run, the progress note and `/status` list them with their role, brief title and age.
-- Once every message has been answered, the task ends. A message that arrives after that is queued and starts the next task, which resumes the same session.
+- The typing indicator shows while the agent works on a turn, and a turn that runs longer than 3 minutes gets a progress note every 3 minutes (with the run id, see Workbench). While foreground subagents run, the note and `/status` list them with their role, brief title and age. Background subagents show their progress on their workbench cards instead.
+- Once every message has been answered and no background subagent is running or queued, the task ends. A message that arrives after that is queued and starts the next task, which resumes the same session.
 
 ### Sessions and context
 
@@ -172,7 +172,8 @@ One task runs at a time, and you can steer it while it runs ("别查 X 了，重
 - Claude Code compacts the transcript on its own when it nears the context window. Alfred adds no compaction logic and does not log when compaction happens.
 - The system prompt is rebuilt for every task and carries the current date and the root `ALFRED.md`. No `CLAUDE.md`, settings, plugins or MCP servers are loaded (`settingSources: []`).
 - If a session cannot be resumed, Alfred starts a new one and tells the user; the broken session is dropped, not kept for `/resume`. This happens, for example, after the workspace moves, because transcripts are keyed by working directory.
-- Two kinds of state are held in memory only and lost on restart: follow-ups and queued messages not yet answered, and attachments that have not yet gone out with a text message.
+- Two kinds of state are held in memory only and lost on restart: follow-ups and queued messages not yet answered, and attachments that have not yet gone out with a text message. Runs a restart cuts short are recorded as lost (see Subagents).
+- `/new` and `/resume` are refused while a task runs, background subagents included.
 - Workspace files and long-term memory (below) survive a new session; the conversation itself does not.
 
 ### Long-term memory
@@ -220,11 +221,17 @@ Alfred can hand parts of a task to subagents through the SDK's `Agent` tool, for
 | `writer` | opus | file tools, `render_pdf`, `generate_image` | 30 | long reports from gathered material, PDF output |
 
 - **The role is the only lever.** A `PreToolUse` hook rewrites every `Agent` call to its description, brief and role, so a `model` or `effort` override is dropped. A call that names no role, or a built-in agent type such as `general-purpose`, is denied.
-- **Foreground only.** The same hook sets `run_in_background: false`. A task's input closes once every message is answered, and the SDK kills background tasks when that happens, so every subagent finishes inside the turn that started it.
+- **Background by default.** Long work runs in background subagents while Alfred keeps answering. A task's query stays open while any of them run or wait: its input closes only once every message is answered and no background subagent is live or queued, because the SDK kills background tasks when the input closes.
+  - **Dispatch.** The reply that starts subagents ends with one line per run id (`后台运行 k7m2qa：researcher「…」`). Each background subagent has a card of its own on the workbench, linked to the task that started it, with its own steps and files.
+  - **Reports.** When a subagent finishes, its report starts a turn of its own. Alfred reviews it (below) and replies, and the reply names the runs it covers (`来自运行 k7m2qa`). That turn answers no user message: its result carries no message uuid, and the live input knows to answer nothing with it.
+  - **Concurrency.** At most `MAX_BACKGROUND_RUNS` (2) background subagents run at a time, because every `render_pdf` starts its own Chrome inside a 2 GB container. A further call is denied with a reason that tells Alfred it is queued. Its run gets a card with the status queued. When a slot frees, Node hands the brief back to Alfred as a message from Alfred itself, and Alfred starts it. A brief the agent decides not to start is marked stopped.
+  - **Steering.** No message reaches a running subagent. A change of content or direction makes Alfred stop the subagent (`TaskStop`) and start it again with an amended brief. A change of form (language, format, length) is applied when Alfred reviews the report. A message that names a run id gets the run's record, and its agent id while it runs.
+  - **Foreground.** A call with `run_in_background: false` runs in the foreground, for quick work Alfred's next step needs.
 - **Only Alfred talks to the user.** No role can call `send_file` or start subagents of its own. Subagents never change `memory/` or any `ALFRED.md`: a hook denies those writes when the call comes from a subagent (the hook input carries `agent_id`). The workspace guard applies to subagents as it does to Alfred.
 - **Review.** The system prompt says when to delegate and when not to, what a self-contained brief holds, and how Alfred checks a result before replying: it answers the brief, at least one cited source is opened to confirm it, and the files it names exist. A result that falls short gets one more round with the same role. If it still falls short, Alfred replies with what it has and says what is missing.
-- **Spend.** `ALFRED_MAX_BUDGET_USD` covers subagent calls too, and the image cap of `generate_image` is per task across subagents. At the end of each task the log line `agent run done` breaks the spend down per model (`models=[...]`), from the SDK's `modelUsage`.
-- `/stop` ends the Claude Code process, and the subagents inside it with it.
+- **Spend.** `ALFRED_MAX_BUDGET_USD` (per query, default $10) covers subagent calls too, and the image cap of `generate_image` is per task across subagents. `ALFRED_DAILY_BUDGET_USD` (default $20) is the budget: once the day's spend reaches it, no new task or background subagent starts until the next day in the owner's time zone, and running ones finish. At the end of each task the log line `agent run done` breaks the spend down per model (`models=[...]`), from the SDK's `modelUsage`. A subagent's card shows its spend estimated from the tokens its notification reports, at the per-token rate its model has cost in this query (`≈`).
+- `/stop` ends the Claude Code process, and the subagents inside it with it. `/stop <run id>` stops one background subagent (`stopTask`, with `perTaskStopAffordance` so an interrupt never takes the others along) or drops it from the queue.
+- **Restarts.** On SIGTERM Alfred stops every task before it exits, so the container never waits for `StopTimeout`. The task's run and its live or queued subagents are recorded as lost. After a crash, runs still marked live are marked lost at startup. Either way, the owner's next message gets one line naming them (`Alfred 重启时中断了 2 个任务：…`).
 
 ### Agent sandbox
 
@@ -234,7 +241,7 @@ Alfred can hand parts of a task to subagents through the SDK's `Agent` tool, for
 - `generate_image` runs `mmx` without a shell, in its own process group, from the Alfred process rather than the agent's Claude Code subprocess. `/stop` or the 10-minute timeout kills the whole group. It uses the user's own Token Plan key. Output paths must resolve inside the workspace. Existing files and paths a running call will write are never overwritten; the default is `images/<date>/<slug>.jpg`. A task may request at most 4 images per call and 8 in total. Failed and timed-out calls count, because MiniMax bills them too, and the tool never retries. `mmx` errors, quota errors included, reach the agent verbatim, and every call is logged.
 - A `PreToolUse` hook confines every file path to the workspace, following symlinks. Permission mode is `dontAsk`, so anything not listed is denied.
 - The Claude Code subprocess gets a scrubbed environment and its own config dir, so it never loads the user's Claude Code settings, plugins or MCP servers. Claude Code's built-in auto memory is turned off (`autoMemoryEnabled: false`) for tasks and memory scans; long-term memory is Alfred's own (see above).
-- Spend is capped per task at `ALFRED_MAX_BUDGET_USD` (default $3), follow-up turns included; once it is reached, the task stops and any follow-up still waiting fails at once without spending. Model round-trips are capped at 60 per turn, so a follow-up that starts a turn of its own gets a fresh 60.
+- Spend is capped per query at `ALFRED_MAX_BUDGET_USD` (default $10), follow-up turns and background subagents included; once it is reached, the task stops and any follow-up still waiting fails at once without spending. The daily cap `ALFRED_DAILY_BUDGET_USD` (default $20) stops new work for the rest of the day. Model round-trips are capped at 60 per turn, so a follow-up that starts a turn of its own gets a fresh 60.
 - Residual risk: `WebFetch` can reach any URL, so a malicious page could try to make the agent leak workspace content through a request. Keep secrets out of the workspace.
 
 ### PoC echo bot
@@ -262,7 +269,8 @@ Verified WeChat behavior (2026-10-10):
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `ALFRED_LOG` | `info` | `debug` logs every request (credentials redacted) and the agent's stderr |
-| `ALFRED_MAX_BUDGET_USD` | `3` | per-task spend cap, follow-up turns included |
+| `ALFRED_MAX_BUDGET_USD` | `10` | spend cap per query, follow-up turns and background subagents included |
+| `ALFRED_DAILY_BUDGET_USD` | `20` | spend per day (owner's time zone) after which no new task or background subagent starts; must be a finite number > 0 |
 | `ALFRED_SESSION_IDLE_HOURS` | `4` | idle hours after which the next task starts a new session; `0` disables rotation, empty means the default, anything else that is not a finite number >= 0 fails at startup |
 | `ALFRED_ANTHROPIC_API_KEY` | none, required | Anthropic API key for tasks and memory scans; inherited `ANTHROPIC_*` variables are ignored |
 | `ALFRED_MMX_BIN` | `$CLAUDE_CONFIG_DIR/skills/mmx/bin/mmx` (`~/.claude/…` when unset) | `mmx` executable for `generate_image`; if it is missing, the tool returns an error |
@@ -298,6 +306,9 @@ npm run smoke -- --model haiku "prompt"   # one agent run with production option
 npm run smoke -- --model haiku --steer-after 20 "only look at Y" "prompt"   # push a follow-up mid-run
 npm run smoke -- --stop-after 30 "prompt"      # abort mid-run, as /stop does, and check no Claude Code process is left
 npm run smoke -- --no-subagents "prompt"       # the same run without the Agent tool, to compare spend
+node scripts/handler-smoke.ts background       # the real message handler with a fake WeChat client: three parallel collectors
+node scripts/handler-smoke.ts restart          # a shutdown while a subagent runs, then the lost-runs note
+node scripts/handler-smoke.ts undelivered      # replies fail as after the push window closes, then the note
 ```
 
 The smoke script marks lines from inside a subagent with `[sub <id>]`, prints the SDK's `task_*` messages and the subagents still running after each tool result, and ends with the spend per model.

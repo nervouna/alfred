@@ -28,7 +28,11 @@ export interface BotContext {
   startedAt: number;
 }
 
-export type MessageHandler = (ctx: BotContext, msg: WeixinMessage) => Promise<void>;
+export interface MessageHandler {
+  (ctx: BotContext, msg: WeixinMessage): Promise<void>;
+  /** Stop the work the handler started, before the process exits. */
+  shutdown?: () => Promise<void>;
+}
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
@@ -194,6 +198,8 @@ export async function runBot(handler: MessageHandler, signal: AbortSignal): Prom
   log.info("Shutting down...");
   clearInterval(heartbeatTimer);
   await drain(queues.values(), SHUTDOWN_DRAIN_MS);
+  // Running tasks would keep their Claude Code processes alive until the container is killed.
+  await handler.shutdown?.();
   heartbeat({ stoppedAt: new Date().toISOString() });
   try {
     await client.notifyStop();

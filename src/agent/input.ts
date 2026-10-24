@@ -4,10 +4,11 @@
 // fed to a single query() through this iterable. Claude Code folds a follow-up
 // into the running turn at the next tool-round boundary, or runs it as a turn
 // of its own after the current one. Each result names the messages it
-// answered, and the input closes once nothing is left unanswered so the query
-// can end. A push after that is refused and the caller starts the next task
-// with it: a message is either answered in this query or becomes the next
-// task, never lost in between.
+// answered, and the input closes once nothing is left unanswered and the
+// caller has nothing else to wait for (background subagents still running), so
+// the query can end. A push after that is refused and the caller starts the
+// next task with it: a message is either answered in this query or becomes
+// the next task, never lost in between.
 
 import { randomUUID } from "node:crypto";
 
@@ -16,6 +17,7 @@ import type { SDKResultMessage, SDKUserMessage } from "@anthropic-ai/claude-agen
 interface Entry {
   uuid: ReturnType<typeof randomUUID>;
   text: string;
+  /** Sent by the user while the task ran; system messages from Alfred are not. */
   followUp: boolean;
   delivered: boolean;
 }
@@ -32,8 +34,11 @@ export class TaskInput implements AsyncIterable<SDKUserMessage> {
   /** Bumped by rewind() to end the iteration in progress. */
   private generation = 0;
   private wake: (() => void) | undefined;
+  /** True while the caller still waits on work outside the input, which keeps it open with nothing pending. */
+  private readonly keepOpen: () => boolean;
 
-  constructor(prompt: string) {
+  constructor(prompt: string, opts: { keepOpen?: () => boolean } = {}) {
+    this.keepOpen = opts.keepOpen ?? (() => false);
     this.add(prompt, false);
   }
 
@@ -58,19 +63,35 @@ export class TaskInput implements AsyncIterable<SDKUserMessage> {
     return true;
   }
 
+  /** Hand the agent a message from Alfred itself, not a follow-up; returns its uuid, or undefined once closed. */
+  pushSystem(text: string): string | undefined {
+    return this.open ? this.add(text, false) : undefined;
+  }
+
+  isPending(uuid: string): boolean {
+    return this.entries.some((e) => e.uuid === uuid);
+  }
+
   /**
    * Record a result by the uuids of the messages it answered (see answeredBy).
-   * A result without uuids answers the oldest delivered message. Closes the
-   * input once nothing is pending and returns whether it is closed.
+   * A result without uuids answers the oldest delivered message, unless it
+   * ended a turn that a background task's notification started, which answers
+   * none. Closes the input once nothing is pending (see closeIfIdle) and
+   * returns whether it is closed.
    */
-  settle(uuids: readonly string[]): boolean {
+  settle(uuids: readonly string[], opts: { notification?: boolean } = {}): boolean {
     if (uuids.length) {
       this.entries = this.entries.filter((e) => !uuids.includes(e.uuid));
-    } else {
+    } else if (!opts.notification) {
       const oldest = this.entries.findIndex((e) => e.delivered);
       if (oldest >= 0) this.entries.splice(oldest, 1);
     }
-    if (!this.entries.length) this.close();
+    return this.closeIfIdle();
+  }
+
+  /** Close once nothing is pending and the caller waits on nothing else; returns whether it is closed. */
+  closeIfIdle(): boolean {
+    if (this.open && !this.entries.length && !this.keepOpen()) this.close();
     return !this.open;
   }
 
@@ -100,9 +121,11 @@ export class TaskInput implements AsyncIterable<SDKUserMessage> {
     }
   }
 
-  private add(text: string, followUp: boolean): void {
-    this.entries.push({ uuid: randomUUID(), text, followUp, delivered: false });
+  private add(text: string, followUp: boolean): string {
+    const uuid = randomUUID();
+    this.entries.push({ uuid, text, followUp, delivered: false });
     this.notify();
+    return uuid;
   }
 
   private notify(): void {

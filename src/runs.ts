@@ -25,9 +25,10 @@ const WRITE_INTERVAL_MS = 2_000;
 const MAX_STEPS = 400;
 const DAY_MS = 86_400_000;
 
-export type RunKind = "task" | "scan";
-/** `lost`: the process ended while the run was live, e.g. a restart. */
-export type RunStatus = "running" | "done" | "stopped" | "failed" | "lost";
+/** A subagent run is a background subagent a task started; it has a card of its own. */
+export type RunKind = "task" | "scan" | "subagent";
+/** `queued`: a subagent waiting for a background slot. `lost`: the process ended while the run was live, e.g. a restart. */
+export type RunStatus = "queued" | "running" | "done" | "stopped" | "failed" | "lost";
 
 export interface RunFileChange {
   /** Workspace-relative path. */
@@ -54,6 +55,12 @@ export interface RunRecord {
   status: RunStatus;
   model?: string;
   sessionId?: string;
+  /** For a subagent run: the run that started it, its role, and its SDK task id while it runs. */
+  parentRunId?: string;
+  role?: string;
+  agentId?: string;
+  /** True when costUsd is estimated from tokens rather than reported. */
+  costEstimated?: boolean;
   startedAt: string;
   endedAt?: string;
   costUsd: number;
@@ -213,15 +220,26 @@ export class RunRecorder {
   private lastWrite = 0;
   private finished = false;
 
-  constructor(init: { kind: RunKind; title: string; model?: string; id?: string; startedAt?: string }) {
+  constructor(init: {
+    kind: RunKind;
+    title: string;
+    model?: string;
+    id?: string;
+    startedAt?: string;
+    queued?: boolean;
+    parentRunId?: string;
+    role?: string;
+  }) {
     this.id = init.id ?? newRunId();
     const now = new Date().toISOString();
     this.file = {
       id: this.id,
       kind: init.kind,
       title: init.title,
-      status: "running",
+      status: init.queued ? "queued" : "running",
       model: init.model,
+      ...(init.parentRunId ? { parentRunId: init.parentRunId } : {}),
+      ...(init.role ? { role: init.role } : {}),
       startedAt: init.startedAt ?? now,
       updatedAt: now,
       costUsd: 0,
@@ -267,9 +285,17 @@ export class RunRecorder {
     this.schedule();
   }
 
-  update(patch: Partial<Pick<RunRecord, "title" | "model" | "sessionId" | "costUsd" | "modelCostUsd">>): void {
+  update(patch: Partial<Pick<RunRecord, "title" | "model" | "sessionId" | "costUsd" | "modelCostUsd" | "agentId" | "costEstimated">>): void {
     Object.assign(this.file, patch);
     this.schedule();
+  }
+
+  /** A queued run gets its slot: it runs from now. */
+  start(): void {
+    if (this.file.status !== "queued") return;
+    this.file.status = "running";
+    this.file.startedAt = new Date().toISOString();
+    this.write();
   }
 
   /** Final state: the run file is written at once and the record appended to runs.jsonl. */
@@ -354,7 +380,7 @@ export function listRunFiles(dir = RUN_FILES_DIR): RunFile[] {
 export function markLostRuns(dir = RUN_FILES_DIR, logFile = RUNS_LOG): RunRecord[] {
   const lost: RunRecord[] = [];
   for (const f of listRunFiles(dir)) {
-    if (f.status !== "running") continue;
+    if (f.status !== "running" && f.status !== "queued") continue;
     f.status = "lost";
     f.endedAt = f.updatedAt;
     f.error = "Alfred stopped while this run was live";
@@ -374,7 +400,7 @@ export function pruneRunFiles(now = Date.now(), dir = RUN_FILES_DIR): number {
   let pruned = 0;
   for (const f of listRunFiles(dir)) {
     const ended = Date.parse(f.endedAt ?? "");
-    if (f.status === "running" || Number.isNaN(ended) || now - ended < RUN_FILE_DAYS * DAY_MS) continue;
+    if (f.status === "running" || f.status === "queued" || Number.isNaN(ended) || now - ended < RUN_FILE_DAYS * DAY_MS) continue;
     try {
       fs.rmSync(path.join(dir, `${f.id}.json`), { force: true });
       pruned++;

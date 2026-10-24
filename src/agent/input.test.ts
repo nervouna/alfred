@@ -117,3 +117,37 @@ test("rewind ends the current iteration and redelivers unanswered messages to th
   assert.equal(await nextOrNull(it), null, "waits for more input");
   assert.equal(input.settle([a.uuid as string, b.uuid as string]), true);
 });
+
+test("a result without uuids from a subagent's report answers no message", async () => {
+  const input = new TaskInput("task");
+  const it = input[Symbol.asyncIterator]();
+  const first = (await it.next()).value as SDKUserMessage;
+  assert.equal(input.settle([], { notification: true }), false);
+  assert.equal(input.pending, 1, "the task prompt is still unanswered");
+  assert.equal(input.settle([first.uuid as string]), true);
+});
+
+test("keepOpen holds the input open with nothing pending until closeIfIdle sees it released", async () => {
+  let waiting = true;
+  const input = new TaskInput("task", { keepOpen: () => waiting });
+  const it = input[Symbol.asyncIterator]();
+  const first = (await it.next()).value as SDKUserMessage;
+  assert.equal(input.settle([first.uuid as string]), false, "background work keeps it open");
+  assert.equal(input.push("quick question"), true);
+  const second = (await it.next()).value as SDKUserMessage;
+  assert.equal(input.settle([second.uuid as string]), false);
+  waiting = false;
+  assert.equal(input.closeIfIdle(), true);
+  assert.equal(input.push("late"), false);
+});
+
+test("system messages from Alfred are pending but not follow-ups", async () => {
+  const input = new TaskInput("task");
+  const uuid = input.pushSystem("[Alfred] a slot is free");
+  assert.ok(uuid);
+  assert.equal(input.isPending(uuid), true);
+  assert.equal(input.followUps, 0);
+  assert.equal(input.pending, 2);
+  input.close();
+  assert.equal(input.pushSystem("late"), undefined);
+});

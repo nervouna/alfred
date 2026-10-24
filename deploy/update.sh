@@ -8,6 +8,8 @@
 #   deploy/update.sh --stop        stop Alfred, e.g. for a new QR login
 #
 #   --wait SECONDS       how long to wait for a running task (default 900)
+#   --force              restart without waiting; live runs are lost and named
+#                        in the owner's next message
 #   --install-quadlet    replace installed Quadlets that differ from deploy/
 #   --keep-quadlet       keep installed Quadlets that differ from the repo's
 #
@@ -26,6 +28,7 @@ previous=localhost/alfred:previous
 
 mode=update
 wait_s=900
+force=
 quadlet_choice=
 while [ $# -gt 0 ]; do
   case $1 in
@@ -33,9 +36,10 @@ while [ $# -gt 0 ]; do
     --rollback) mode=rollback ;;
     --stop) mode=stop ;;
     --wait) wait_s=${2:?--wait needs a number of seconds}; shift ;;
+    --force) force=1 ;;
     --install-quadlet) quadlet_choice=install ;;
     --keep-quadlet) quadlet_choice=keep ;;
-    -h | --help) sed -n '2,15p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,17p' "$0"; exit 0 ;;
     *) echo "update.sh: unknown option $1" >&2; exit 2 ;;
   esac
   shift
@@ -73,8 +77,22 @@ lock_state() {
   if [ "$(date -d "$since" +%s)" -ge "$started" ]; then echo busy; else echo stale; fi
 }
 
+# Runs Alfred is working on, one "id title" per line, from the workbench's run files.
+live_runs() {
+  local f
+  for f in "$state_dir"/workbench/runs/*.json; do
+    [ -f "$f" ] || continue
+    grep -qE '"status": "(running|queued)"' "$f" || continue
+    printf '  %s %s\n' "$(basename "$f" .json)" "$(sed -n 's/^  "title": "\(.*\)",$/\1/p' "$f" | head -1)"
+  done
+}
+
 wait_until_idle() {
   local deadline=$((SECONDS + wait_s)) told=
+  if [ -n "$force" ]; then
+    [ "$(lock_state)" = free ] || say "Not waiting (--force); these runs will be lost:"$'\n'"$(live_runs)"
+    return
+  fi
   while :; do
     case $(lock_state) in
       free) return ;;
@@ -83,8 +101,10 @@ wait_until_idle() {
         rm -f "$state_dir/memory.lock"
         return ;;
     esac
-    [ "$SECONDS" -lt "$deadline" ] ||
-      die "still busy after ${wait_s}s ($(cat "$state_dir/memory.lock")); nothing was restarted, run again later"
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      say "Still busy after ${wait_s}s ($(cat "$state_dir/memory.lock")). Live runs:"$'\n'"$(live_runs)" >&2
+      die "nothing was restarted; run again later, or with --force to restart anyway"
+    fi
     [ -n "$told" ] || say "Waiting for the running task or memory scan to finish: $(cat "$state_dir/memory.lock")"
     told=1
     sleep 10

@@ -107,6 +107,6 @@ test("buildPrompt attaches the records of runs a message names", () => {
 });
 
 test("undeliveredNote names the runs whose results did not reach WeChat", () => {
-  assert.equal(undeliveredNote([{ id: "k7m2qa", title: "VPS 对比" }]), "「VPS 对比」（k7m2qa） 的结果没送到微信，需要的话让我重发。");
+  assert.equal(undeliveredNote([{ id: "k7m2qa", title: "VPS 对比" }]), "「VPS 对比」（k7m2qa）的结果没送到微信，需要的话让我重发。");
   assert.match(undeliveredNote([{ id: "k7m2qa", title: "a" }, { id: "p3x9za", title: "b" }]), /^有 2 个任务的结果没送到微信：「a」（k7m2qa）、「b」（p3x9za）。/);
 });

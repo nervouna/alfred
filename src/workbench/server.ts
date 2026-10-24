@@ -213,9 +213,11 @@ async function route(url: URL, workspace: string): Promise<Response> {
   }
   const runMatch = /^\/runs\/([2-9a-hjkmnp-z]{6})$/.exec(p);
   if (runMatch?.[1]) {
-    const detail = runDetail(runMatch[1]);
+    const id = runMatch[1];
+    const detail = runDetail(id);
     if (!detail) throw new HttpError(404, "没有这个运行。");
-    return htmlResponse(runPage({ ...detail, live: alfredStatus(now).up, now, nonce }), pageCsp(nonce));
+    const children = allRuns().filter((r) => r.parentRunId === id).reverse();
+    return htmlResponse(runPage({ ...detail, children, live: alfredStatus(now).up, now, nonce }), pageCsp(nonce));
   }
   if (p === "/spend") return htmlResponse(spendPage({ days: spendByDay(allRuns()) }), pageCsp(nonce));
   if (p === "/files") {

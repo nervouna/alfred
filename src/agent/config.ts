@@ -20,8 +20,25 @@ export function isModelKey(value: string): value is ModelKey {
 }
 
 export const MAX_TURNS = 60;
-/** Per-task spend cap; the SDK stops the task with error_max_budget_usd when exceeded. */
-export const MAX_BUDGET_USD = Number(process.env.ALFRED_MAX_BUDGET_USD ?? "3");
+/**
+ * Spend cap per query, background subagents included; the SDK stops the query
+ * with error_max_budget_usd when exceeded. A query stays open while background
+ * subagents run, so this is a brake on a runaway query; the daily cap below is
+ * the budget.
+ */
+export const MAX_BUDGET_USD = Number(process.env.ALFRED_MAX_BUDGET_USD ?? "10");
+const DAILY_BUDGET_SETTING = process.env.ALFRED_DAILY_BUDGET_USD?.trim() || "20";
+/** Spend per day in the owner's time zone; once reached, no new task or subagent starts that day. */
+export const DAILY_BUDGET_USD = Number(DAILY_BUDGET_SETTING);
+/** Background subagents that may run at once; more are queued until a slot frees. */
+export const MAX_BACKGROUND_RUNS = 2;
+
+/** Fail at startup on a daily cap that would never or always stop work. */
+export function checkDailyBudget(): void {
+  if (!Number.isFinite(DAILY_BUDGET_USD) || DAILY_BUDGET_USD <= 0) {
+    throw new Error(`ALFRED_DAILY_BUDGET_USD must be a finite number of USD > 0, got "${DAILY_BUDGET_SETTING}"`);
+  }
+}
 const IDLE_HOURS_SETTING = process.env.ALFRED_SESSION_IDLE_HOURS?.trim() || "4";
 /** A task that starts after this many idle hours gets a new session; 0 disables rotation. */
 export const SESSION_IDLE_HOURS = Number(IDLE_HOURS_SETTING);
@@ -82,7 +99,8 @@ export const AGENT_CONFIG_DIR = path.join(STATE_DIR, "claude");
 
 const FILE_TOOLS = ["Read", "Write", "Edit", "Glob", "Grep"];
 const WEB_TOOLS = ["WebSearch", "WebFetch"];
-export const BUILTIN_TOOLS = [...FILE_TOOLS, ...WEB_TOOLS, "Agent"];
+/** Agent starts subagents; TaskStop stops a background one, to restart it with an amended brief. */
+export const BUILTIN_TOOLS = [...FILE_TOOLS, ...WEB_TOOLS, "Agent", "TaskStop"];
 
 /** A kind of subagent. Alfred picks the role; the role fixes the model, tools and turn budget. */
 export interface SubagentRole {
@@ -131,7 +149,7 @@ export function isSubagentRole(value: unknown): value is SubagentRoleName {
 }
 
 /** Alfred's tools no subagent may call, whatever its role lists: only Alfred talks to the user and starts subagents. */
-export const SUBAGENT_DISALLOWED_TOOLS = ["mcp__alfred__send_file", "Agent"];
+export const SUBAGENT_DISALLOWED_TOOLS = ["mcp__alfred__send_file", "Agent", "TaskStop"];
 
 const SUBAGENT_RULES = `You are a subagent of Alfred, a personal research assistant. Alfred gave you a brief. Your final message goes back to Alfred, never to the user, so write it for Alfred: what you found or did, in the shape the brief asks for.
 
@@ -238,13 +256,23 @@ ${roles.join("\n")}
 
 When to delegate: several independent sources or threads (start one subagent per thread in the same turn, so they run in parallel), bulk reading that would flood your context, or a long write-up. When not to: quick answers, a single lookup, or anything you can finish in a few tool calls yourself.
 
-Each brief is self-contained, because a subagent sees nothing of this conversation: the question, what is already known, what to return and in what shape, and the workspace paths to write files to (following the workspace rules). Subagents never talk to the user and cannot send files; only you reply.
+Background or foreground:
+- Long work runs in the background, the default. Reply at once with what you started (Alfred adds each subagent's run id to your reply) and keep answering the user while it runs.
+- At most ${MAX_BACKGROUND_RUNS} background subagents run at a time. A further one is queued, and its brief is handed back to you when a slot frees; tell the user it is queued, and start it when it comes back.
+- Use the foreground (run_in_background: false) only for quick work whose result your very next step needs.
 
-Review every result before you reply:
+Each brief is self-contained, because a subagent sees nothing of this conversation: the question, what is already known, what to return and in what shape, and the workspace paths to write files to (following the workspace rules). Give parallel subagents different output paths. Subagents never talk to the user and cannot send files; only you reply.
+
+When a background subagent finishes, its report arrives as a notification and you get a turn for it. Review every result before you reply:
 - It answers what the brief asked.
 - Cited sources exist and support the claims: open at least one yourself to check.
 - Files it names exist and hold what it says.
-If a result falls short, start the same role once more with a brief that says what to fix. If it still falls short, reply with what you have and say what is missing.`;
+If a result falls short, start the same role once more with a brief that says what to fix. If it still falls short, reply with what you have and say what is missing. Your reply after a review is what the user gets: the findings, not the review.
+
+No message reaches a running subagent. When the user changes its work while it runs:
+- A change of content or direction (what to find, where to look): stop it with TaskStop, using the agentId the Agent call returned, and start the same role again with an amended brief. Say that you restarted it.
+- A change of form only (language, format, length): let it finish and apply the change when you review its report. Say that the change will be applied then.
+If a message could be about more than one running subagent, ask which one.`;
 }
 
 const WORKBENCH_SECTION = `# Workbench
