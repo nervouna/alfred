@@ -39,8 +39,8 @@ test("tasks and memory scans turn off Claude Code's own auto memory, bundled ski
   }
 });
 
-test("tasks offer the subagent roles with fixed models, and no role can send files or start subagents", async () => {
-  const { MODELS, SUBAGENT_ROLES } = await import("./config.ts");
+test("tasks offer the subagent roles with their default models, and no role can send files or start subagents", async () => {
+  const { MODELS, SUBAGENT_ROLES, SUBAGENT_RULES } = await import("./config.ts");
   prepareWorkspace();
   const options = agentOptions({ ctx: {} as BotContext, userId: "owner", model: "sonnet" });
   assert.ok(options.tools && Array.isArray(options.tools) && options.tools.includes("Agent"));
@@ -56,7 +56,10 @@ test("tasks offer the subagent roles with fixed models, and no role can send fil
     assert.ok(!agent.tools?.includes("Agent"), `${name} lists Agent`);
     assert.ok(agent.disallowedTools?.includes("mcp__alfred__send_file"), `${name} does not disallow send_file`);
     assert.ok(agent.disallowedTools?.includes("Agent"), `${name} does not disallow Agent`);
+    assert.equal(agent.prompt, role.focus, `${name}: the shared rules come from the SubagentStart hook`);
   }
+  assert.ok(!Object.values(agents).some((a) => a.prompt.includes(SUBAGENT_RULES)));
+  assert.equal(options.hooks?.SubagentStart?.length, 1, "every subagent gets the shared rules");
   assert.match(String(options.systemPrompt), /# Delegating to subagents/);
 });
 

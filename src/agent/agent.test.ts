@@ -6,7 +6,7 @@ import { after, test } from "node:test";
 
 import { agentEnv, runIdNote, systemPrompt } from "./config.ts";
 import { checkToolInput, resolveInside } from "./guard.ts";
-import { buildPrompt, runTitle, undeliveredNote } from "./handler.ts";
+import { buildPrompt, releaseMessage, runTitle, undeliveredNote } from "./handler.ts";
 
 const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "alfred-guard-")));
 const root = path.join(tmp, "workspace");
@@ -132,4 +132,22 @@ test("the system prompt is the same for every run of a day, so the prompt cache 
   const ctx = { workbench: true, workbenchUrl: "https://alfred.example.com" };
   assert.equal(systemPrompt(now, ctx), systemPrompt(later, ctx));
   assert.equal(runIdNote("k7m2qa"), "[Alfred] This task is run k7m2qa on the workbench.");
+});
+
+test("a handed-back brief names its agent type, and its model when the call asked for one", () => {
+  const recorder = { id: "k7m2qa" } as never;
+  const plain = releaseMessage({ recorder, role: "researcher", description: "线程一", prompt: "Find X." });
+  assert.match(plain, /subagent_type "researcher", description "线程一"/);
+  assert.doesNotMatch(plain, /model/);
+  assert.match(plain, /\n\nFind X\.$/);
+  const withModel = releaseMessage({ recorder, role: "general-purpose", model: "opus", description: "d", prompt: "p" });
+  assert.match(withModel, /subagent_type "general-purpose", model "opus", description "d"/);
+});
+
+test("the delegation rules recommend the roles and no longer forbid other types or a model", () => {
+  const prompt = systemPrompt(new Date());
+  assert.match(prompt, /prefer them:\n- collector:/);
+  assert.match(prompt, /general-purpose, Explore, Plan/);
+  assert.match(prompt, /Pass model only when/);
+  assert.doesNotMatch(prompt, /never pass a model/);
 });

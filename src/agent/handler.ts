@@ -60,7 +60,7 @@ import type { RetireReason } from "./session.ts";
 import { SKILLS_DIR, prepareWorkspacePlugin, skillPlugins } from "./skills.ts";
 import { AgentStateStore } from "./state.ts";
 import type { AgentUserState, RunRef } from "./state.ts";
-import { SubagentTracker, agentFailureHook, subagentGuard } from "./subagents.ts";
+import { SubagentTracker, agentFailureHook, subagentGuard, subagentRulesHook } from "./subagents.ts";
 import type { AgentAdmission, LiveSubagent } from "./subagents.ts";
 import { ALFRED_TOOL_NAMES, createAlfredTools } from "./tools.ts";
 
@@ -205,7 +205,8 @@ export function lostNote(runs: RunRef[]): string {
 
 /** The text that hands a queued brief back to the agent when a background slot frees. */
 export function releaseMessage(brief: QueuedBrief): string {
-  return `[Alfred] A background slot is free. Start queued run ${brief.recorder.id} now with the Agent tool, in the background: subagent_type "${brief.role}", description ${JSON.stringify(brief.description)}, and the brief below. If the conversation since has made it unnecessary, do not start it and say so in one line.
+  const model = brief.model ? `, model "${brief.model}"` : "";
+  return `[Alfred] A background slot is free. Start queued run ${brief.recorder.id} now with the Agent tool, in the background: subagent_type "${brief.role}"${model}, description ${JSON.stringify(brief.description)}, and the brief below. If the conversation since has made it unnecessary, do not start it and say so in one line.
 
 ${brief.prompt}`;
 }
@@ -330,6 +331,7 @@ export function agentOptions(params: {
       PreToolUse: [workspaceGuard(WORKSPACE_DIR), subagentGuard(WORKSPACE_DIR, params.admission)],
       PostToolUse: postToolUse,
       PostToolUseFailure: postToolUseFailure,
+      SubagentStart: [subagentRulesHook()],
     },
     // An interrupt stops only the current turn; background subagents are stopped one by one (/stop <id>).
     perTaskStopAffordance: true,
@@ -502,7 +504,7 @@ export function createAgentHandler(): MessageHandler {
             store.update(userId, { ...NO_SESSION, sessionId, sessionStartedAt: new Date().toISOString() });
           }
         } else if (m.type === "system" && m.subtype === "task_started") {
-          if (m.tool_use_id) run.background.started(m.tool_use_id, m.task_id);
+          if (m.tool_use_id) run.background.started(m.tool_use_id, m.task_id, m.subagent_type);
         } else if (m.type === "system" && m.subtype === "task_notification") {
           run.background.notified(m.task_id, m.status, m.usage?.total_tokens);
         } else if (m.type === "system" && m.subtype === "background_tasks_changed") {
@@ -511,6 +513,10 @@ export function createAgentHandler(): MessageHandler {
           // A background subagent's steps go on its own card; a foreground one's on the task's, with its role.
           const background = m.parent_tool_use_id ? run.background.byToolUse(m.parent_tool_use_id) : undefined;
           const agent = m.parent_tool_use_id && !background ? run.subagents.roleOf(m.parent_tool_use_id) : undefined;
+          // Only a subagent's own messages tell which model a built-in or plugin agent type runs on.
+          if (background && m.message.model && background.recorder.record.model !== m.message.model) {
+            background.recorder.update({ model: m.message.model });
+          }
           for (const block of m.message.content) {
             if (block.type !== "tool_use") continue;
             const input = (block.input ?? {}) as Record<string, unknown>;

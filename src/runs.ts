@@ -288,7 +288,7 @@ export class RunRecorder {
     this.schedule();
   }
 
-  update(patch: Partial<Pick<RunRecord, "title" | "model" | "sessionId" | "costUsd" | "modelCostUsd" | "agentId" | "costEstimated">>): void {
+  update(patch: Partial<Pick<RunRecord, "title" | "model" | "role" | "sessionId" | "costUsd" | "modelCostUsd" | "agentId" | "costEstimated">>): void {
     Object.assign(this.file, patch);
     this.schedule();
   }
