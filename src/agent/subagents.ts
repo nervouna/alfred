@@ -1,6 +1,7 @@
 // Subagent guard rails and tracking. Roles are defined in config.ts; this
-// module keeps the role the only lever on an Agent call, keeps subagents away
-// from memory and workspace rules, and follows which subagents are running.
+// module keeps the role the only lever on an Agent call, lets the task admit or
+// queue background calls (background.ts), keeps subagents away from memory and
+// workspace rules, and follows which foreground subagents are running.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -9,6 +10,7 @@ import type { HookCallbackMatcher, SDKMessage } from "@anthropic-ai/claude-agent
 
 import { log } from "../log.ts";
 import { SUBAGENT_ROLES, isSubagentRole } from "./config.ts";
+import type { SubagentRoleName } from "./config.ts";
 import { resolveInside } from "./guard.ts";
 import { RULES_FILE } from "./rules.ts";
 
@@ -16,15 +18,33 @@ const AGENT_TOOL = "Agent";
 
 /**
  * The input an Agent call runs with, or a denial reason. The call must name a
- * role. Everything that would override the role (model, effort) or outlive the
- * task (background runs, names other agents could message) is dropped.
+ * role. Everything that would override the role (model, effort) or reach past
+ * the task (names other agents could message, worktrees) is dropped. Calls run
+ * in the background unless they ask for the foreground, as the SDK's default.
  */
 export function checkAgentCall(input: Record<string, unknown>): { deny: string } | { input: Record<string, unknown> } {
   const role = input.subagent_type;
   if (!isSubagentRole(role)) {
     return { deny: `subagent_type must be one of ${Object.keys(SUBAGENT_ROLES).join(", ")}; got ${JSON.stringify(role ?? null)}.` };
   }
-  return { input: { description: input.description, prompt: input.prompt, subagent_type: role, run_in_background: false } };
+  return {
+    input: { description: input.description, prompt: input.prompt, subagent_type: role, run_in_background: input.run_in_background !== false },
+  };
+}
+
+/** An Agent call the main thread makes, after checkAgentCall. */
+export interface AgentCall {
+  toolUseId: string;
+  role: SubagentRoleName;
+  description: string;
+  prompt: string;
+  background: boolean;
+}
+
+/** The task's say on Agent calls: undefined lets one start, a reason denies it (and is relayed to the agent). */
+export interface AgentAdmission {
+  admit(call: AgentCall): string | undefined;
+  failedToStart(toolUseId: string, error: string): void;
 }
 
 /** Input fields that name a path a tool call writes to. */
@@ -59,8 +79,8 @@ function deny(reason: string) {
   return { hookSpecificOutput: { hookEventName: "PreToolUse" as const, permissionDecision: "deny" as const, permissionDecisionReason: reason } };
 }
 
-/** PreToolUse hook: rewrites or denies Agent calls, and denies subagent writes to memory and rules. */
-export function subagentGuard(root: string): HookCallbackMatcher {
+/** PreToolUse hook: rewrites, admits or denies Agent calls, and denies subagent writes to memory and rules. */
+export function subagentGuard(root: string, admission?: AgentAdmission): HookCallbackMatcher {
   return {
     hooks: [
       async (input) => {
@@ -78,7 +98,33 @@ export function subagentGuard(root: string): HookCallbackMatcher {
           log.warn(`denied Agent call: ${checked.deny}`);
           return deny(checked.deny);
         }
-        return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", updatedInput: checked.input } };
+        const call = checked.input;
+        const refused = admission?.admit({
+          toolUseId: input.tool_use_id,
+          role: call.subagent_type as SubagentRoleName,
+          description: String(call.description ?? ""),
+          prompt: String(call.prompt ?? ""),
+          background: call.run_in_background === true,
+        });
+        if (refused) {
+          log.info(`Agent call not started: ${refused}`);
+          return deny(refused);
+        }
+        return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", updatedInput: call } };
+      },
+    ],
+  };
+}
+
+/** PostToolUseFailure hook: an admitted Agent call that failed frees what admit() reserved. */
+export function agentFailureHook(admission: AgentAdmission): HookCallbackMatcher {
+  return {
+    hooks: [
+      async (input) => {
+        if (input.hook_event_name === "PostToolUseFailure" && input.tool_name === AGENT_TOOL && !input.agent_id) {
+          admission.failedToStart(input.tool_use_id, input.error);
+        }
+        return {};
       },
     ],
   };

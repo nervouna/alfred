@@ -37,6 +37,11 @@ export interface AgentUserState {
   previousSession?: SessionSnapshot;
   /** Runs with a reply or file that WeChat did not take; the user's next message gets a note naming them. */
   undeliveredRuns?: RunRef[];
+  /** Runs a restart ended while they were live or queued; the user's next message gets a note naming them. */
+  lostRuns?: RunRef[];
+  /** Spend on `spendDay` (YYYY-MM-DD in the owner's time zone), for the daily cap. */
+  spendDay?: string;
+  spendDayUsd?: number;
 }
 
 /** Per-user agent state, persisted so sessions and settings survive restarts. */

@@ -20,7 +20,7 @@ ssh $HOST alfred/deploy/update.sh
 ```
 
 - It pulls, builds, and restarts only when the image or the Quadlet changed. A docs-only merge ends with "Alfred already runs this build".
-- Before restarting it waits, up to 15 minutes, for a running task or memory scan to finish. A restart kills a running task and the user never gets the reply, so never restart with `systemctl` or `podman` directly to save time. Run the script in the background or with a long timeout. If it gives up, nothing was restarted. Run it again later.
+- Before restarting it waits, up to 15 minutes, for a running task or memory scan to finish. A task's query stays open while its background subagents run, so the wait can run out. If it gives up, nothing was restarted, and it lists the live runs: tell the user which ones, and run it again later. `--force` restarts anyway. Alfred stops its tasks cleanly on the way down, records them as lost, and names them in the owner's next message, so use it only when the user agrees to lose those runs. Never restart with `systemctl` or `podman` directly to save time. Run the script in the background or with a long timeout.
 - If `deploy/alfred.container` changed, the script stops and prints the diff against the installed Quadlet. The installed copy may carry host edits such as `TZ`. Read the diff, then rerun with `--install-quadlet` to replace it or `--keep-quadlet` to keep it, editing the installed file by hand if it needs the new lines.
 - `--restart` restarts the current build, e.g. after changing a secret. `--rollback` goes back to the image that ran before the last update.
 

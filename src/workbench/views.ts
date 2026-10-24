@@ -8,6 +8,7 @@ import type { AlfredStatus, DaySpend, SessionInfo, TranscriptEntry } from "./dat
 import { Html, html, page, query } from "./html.ts";
 
 const STATUS_LABELS: Record<RunStatus, string> = {
+  queued: "排队中",
   running: "进行中",
   done: "完成",
   stopped: "已停止",
@@ -48,9 +49,13 @@ function shortModel(model: string | undefined): string {
   return model ? model.replace(/^claude-/, "") : "";
 }
 
+function isLive(status: RunStatus): boolean {
+  return status === "running" || status === "queued";
+}
+
 function statusBadge(status: RunStatus, live: boolean): Html {
-  const shown = status === "running" && !live ? "可能已中断" : STATUS_LABELS[status] ?? status;
-  const cls = status === "running" && !live ? "s-lost" : `s-${status}`;
+  const shown = isLive(status) && !live ? "可能已中断" : STATUS_LABELS[status] ?? status;
+  const cls = isLive(status) && !live ? "s-lost" : status === "queued" ? "s-running" : `s-${status}`;
   return html`<span class="status ${cls}">${shown}</span>`;
 }
 
@@ -61,10 +66,10 @@ function fileLink(rel: string): Html {
 export function runCard(r: RunRecord, opts: { live: boolean; now: number; latest?: string; link?: boolean }): Html {
   const end = r.endedAt ? Date.parse(r.endedAt) : opts.now;
   const meta = [
-    r.kind === "scan" ? "记忆扫描" : shortModel(r.model),
+    r.kind === "scan" ? "记忆扫描" : r.kind === "subagent" ? `${r.role ?? "子任务"} · ${shortModel(r.model)}` : shortModel(r.model),
     fmtTime(r.startedAt),
-    fmtAge(end - Date.parse(r.startedAt)),
-    fmtUsd(r.costUsd),
+    r.status === "queued" ? "" : fmtAge(end - Date.parse(r.startedAt)),
+    `${r.costEstimated ? "≈" : ""}${fmtUsd(r.costUsd)}`,
     `工具 ${r.toolCalls} 次`,
   ].filter(Boolean);
   const undelivered = r.undelivered?.length
@@ -73,7 +78,7 @@ export function runCard(r: RunRecord, opts: { live: boolean; now: number; latest
   return html`<div class="card">
 <div class="top"><span class="id">${r.id}</span><button class="copy" type="button" data-copy="${r.id}">复制</button>${statusBadge(r.status, opts.live)}</div>
 <div class="title">${opts.link === false ? r.title : html`<a href="/runs/${r.id}">${r.title}</a>`}</div>
-<div class="meta">${meta.join(" · ")}</div>
+<div class="meta">${meta.join(" · ")}${r.parentRunId ? html` · 来自 <a href="/runs/${r.parentRunId}">${r.parentRunId}</a>` : ""}</div>
 ${r.status === "running" && opts.latest ? html`<div class="meta">最新：${opts.latest}</div>` : ""}
 ${r.error ? html`<div class="warn">${r.error}</div>` : ""}
 ${undelivered}
@@ -90,7 +95,7 @@ function latestStep(f: RunRecord): string | undefined {
 export function overviewPage(params: { status: AlfredStatus; runs: RunRecord[]; now: number; nonce: string }): string {
   const { status, runs, now } = params;
   const beat = status.beat;
-  const running = runs.filter((r) => r.status === "running");
+  const running = runs.filter((r) => isLive(r.status));
   const today = new Date(now).toLocaleDateString("en-CA");
   const weekAgo = now - 7 * 86_400_000;
   const spendToday = runs.filter((r) => new Date(r.startedAt).toLocaleDateString("en-CA") === today).reduce((a, r) => a + (r.costUsd || 0), 0);
@@ -122,7 +127,7 @@ export function overviewPage(params: { status: AlfredStatus; runs: RunRecord[]; 
 </div>
 ${running.length ? html`<h2>进行中</h2>${running.map((r) => runCard(r, { live: status.up, now, latest: latestStep(r) }))}` : ""}
 <h2>最近</h2>
-${runs.filter((r) => r.status !== "running").slice(0, 8).map((r) => runCard(r, { live: status.up, now }))}
+${runs.filter((r) => !isLive(r.status)).slice(0, 8).map((r) => runCard(r, { live: status.up, now }))}
 <p><a href="/runs">全部运行 →</a></p>`;
   return page({ title: "概览", section: "/", nonce: params.nonce, refresh: running.length ? 5 : 30 }, body);
 }
@@ -136,10 +141,10 @@ export function runsPage(params: { runs: RunRecord[]; offset: number; live: bool
   const body = html`<h1>运行</h1>
 ${shown.length ? shown.map((r) => runCard(r, { live: params.live, now: params.now, latest: latestStep(r) })) : html`<p class="meta">还没有运行记录。</p>`}
 <p>${offset > 0 ? html`<a href="/runs${query({ offset: Math.max(0, offset - RUNS_PER_PAGE) })}">← 较新</a> ` : ""}${more ? html`<a href="/runs${query({ offset: offset + RUNS_PER_PAGE })}">更早 →</a>` : ""}</p>`;
-  return page({ title: "运行", section: "/runs", nonce: params.nonce, refresh: shown.some((r) => r.status === "running") ? 5 : undefined }, body);
+  return page({ title: "运行", section: "/runs", nonce: params.nonce, refresh: shown.some((r) => isLive(r.status)) ? 5 : undefined }, body);
 }
 
-export function runPage(params: { record: RunRecord; file?: RunFile; live: boolean; now: number; nonce: string }): string {
+export function runPage(params: { record: RunRecord; file?: RunFile; children: RunRecord[]; live: boolean; now: number; nonce: string }): string {
   const { record, file, now } = params;
   const steps = file?.steps ?? [];
   const body = html`<p class="crumbs"><a href="/runs">← 运行</a></p>
@@ -151,13 +156,15 @@ ${runCard(record, { live: params.live, now, latest: latestStep(record), link: fa
 <dt>会话</dt><dd>${record.sessionId ? html`<a href="/sessions/${record.sessionId}">${record.sessionId.slice(0, 8)}</a>` : "—"}</dd>
 ${record.modelCostUsd && Object.keys(record.modelCostUsd).length ? html`<dt>按模型</dt><dd>${Object.entries(record.modelCostUsd).sort((a, b) => b[1] - a[1]).map(([m, c]) => `${shortModel(m)} ${fmtUsd(c)}`).join(" · ")}</dd>` : ""}
 </dl></div>
+${params.children.length ? html`<h2>子任务（${params.children.length}）</h2>${params.children.map((c) => runCard(c, { live: params.live, now, latest: latestStep(c) }))}` : ""}
 <h2>步骤${steps.length ? `（${steps.length}）` : ""}</h2>
 ${file
     ? steps.length
       ? html`<div class="card"><ul class="steps">${[...steps].reverse().map((s) => html`<li><span class="meta">${fmtTime(s.at).slice(6)}</span> ${s.agent ? html`<span class="id">${s.agent}</span> ` : ""}<b>${s.tool}</b> ${s.detail}</li>`)}</ul></div>`
       : html`<p class="meta">还没有步骤。</p>`
     : html`<p class="meta">步骤明细已过保留期，只剩上面的记录。</p>`}`;
-  return page({ title: record.title, section: "/runs", nonce: params.nonce, refresh: record.status === "running" && params.live ? 5 : undefined }, body);
+  const refresh = params.live && (isLive(record.status) || params.children.some((c) => isLive(c.status)));
+  return page({ title: record.title, section: "/runs", nonce: params.nonce, refresh: refresh ? 5 : undefined }, body);
 }
 
 export function spendPage(params: { days: DaySpend[] }): string {
