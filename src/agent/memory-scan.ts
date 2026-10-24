@@ -36,7 +36,7 @@ export const MEMORY_LOCK_FILE = path.join(STATE_DIR, "memory.lock");
 
 /** A scan is aborted after this long; tasks wait at most a little longer for it. */
 export const SCAN_TIMEOUT_MS = 3 * 60_000;
-const EXTRACT_MODEL = MODELS.haiku;
+export const EXTRACT_MODEL = MODELS.haiku;
 /** Input caps per scan; anything beyond is left for the next scan. */
 const MAX_CONVERSATION_CHARS = 60_000;
 const MAX_USER_CHARS = 4_000;

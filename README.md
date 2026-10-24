@@ -111,6 +111,37 @@ journalctl --user -u alfred -f                                                  
 cd ~/alfred && git pull && podman build -t localhost/alfred:latest . && systemctl --user restart alfred   # update
 ```
 
+### Workbench
+
+A read-only web page for following Alfred's work: one card per run with live progress and the files it wrote, the workspace with Markdown, image and PDF preview, HTML reports, spend, session transcripts, memory and logs. You still talk to Alfred only in WeChat. The workbench never sends anything to Alfred, and Alfred never reads from it.
+
+- **Runs.** Every task (and every memory scan that called the model) is a run with a short id such as `k7m2qa`.
+  - The id shows on its card, with a button that copies it, in the 3-minute progress notes, in `/status` and in the logs.
+  - A reply from a run that wrote files ends with the id, or with a link to the card when `ALFRED_WORKBENCH_URL` is set.
+  - Paste an id into a WeChat message ("把 k7m2qa 的报告改成英文") and the run's title, status and file list are added to the prompt.
+- **HTML reports** open in a sandboxed frame. Inline scripts, styles and SVG run, so charts draw, but the frame has an opaque origin and a policy that blocks every request, so a report can neither read the workbench nor send anything out. Workspace images are inlined as `data:` URIs. With `ALFRED_WORKBENCH=on` (or a URL), the agent is told that HTML reports can be read here and need a PDF only when you want one.
+- **Delivery is best effort.** A reply or `send_file` that WeChat refuses (for example `ret=-2` once the 24-hour push window has closed) is sent once, logged, and marked on the run's card as not delivered; nothing is retried or queued. Your next WeChat message first gets one line naming those runs.
+- **Read-only.** Every endpoint answers only `GET`. The workbench reads `$ALFRED_STATE_DIR/workbench/` (`runs.jsonl` for good, `runs/<id>.json` with the step timeline for 30 days, `status.json` as the heartbeat, `alfred.log`), the transcripts under `claude/projects/`, and the workspace. All output is escaped, Markdown renders without raw HTML, paths are confined to the workspace, and HTML and SVG files download instead of opening outside the report viewer.
+- **Two listeners.** TCP (`ALFRED_WORKBENCH_LISTEN`, default `127.0.0.1:8787`) is for a Cloudflare tunnel. Every request there needs a valid `Cf-Access-Jwt-Assertion`: an RS256 signature from the team's keys, the application's AUD tag, the team's issuer, a token that has not expired, and the owner's email. A Unix socket (`ALFRED_WORKBENCH_SOCKET`, created 0600) needs no token, for an SSH tunnel: `ssh -N -L 8787:/home/<user>/data/workbench-socket/workbench.sock <host>`, then open `http://localhost:8787`.
+- `node src/cli.ts workbench --dev` serves on loopback without the Access check, for local testing.
+
+On the host, the workbench and a dedicated `cloudflared` run in their own pod (`deploy/workbench.pod`, `workbench.container`, `workbench-tunnel.container`). They use the Alfred image, so `deploy/update.sh` restarts the workbench after an update. In the Cloudflare dashboard, create a remotely managed tunnel whose public hostname points at `http://localhost:8787`, and an Access application on that hostname that allows only your email. Then:
+
+```bash
+mkdir -p ~/data/state/workbench ~/data/state/claude/projects ~/data/workbench-socket ~/.config/alfred
+read -rs TOKEN && printf %s "$TOKEN" | podman secret create workbench_tunnel_token - && unset TOKEN   # the tunnel token
+cat > ~/.config/alfred/workbench.env <<'ENV'
+CF_ACCESS_TEAM_DOMAIN=<team>.cloudflareaccess.com
+CF_ACCESS_AUD=<the Access application's AUD tag>
+ALFRED_WORKBENCH_OWNER_EMAIL=<your email>
+ENV
+install -m644 deploy/workbench.pod deploy/workbench.container deploy/workbench-tunnel.container ~/.config/containers/systemd/
+systemctl --user daemon-reload && systemctl --user start workbench-pod
+```
+
+- The workbench container mounts only what it shows, read-only: `account.json`, the context tokens and the rest of the state dir are not mounted. Its root filesystem is read-only too, and the socket directory is its one writable path.
+- Set `Environment=ALFRED_WORKBENCH=on` in `alfred.container` once the workbench is up. Add `Environment=ALFRED_WORKBENCH_URL=https://<hostname>` when WeChat opens the link and gets through the Access sign-in; leave it unset if it does not, and replies carry the run id only.
+
 ### In WeChat
 
 Send a task as text or voice. Files and images can come first; they are saved to `~/Alfred/inbox/<date>/` and attached to your next text message. The assistant shows "typing…" while it works, posts a progress note every 3 minutes on long tasks, delivers long results as Markdown files, turns formal reports into PDFs, and generates images on request.
@@ -129,7 +160,7 @@ One task runs at a time, and you can steer it while it runs ("别查 X 了，重
 
 - A message sent during a task is acknowledged (`收到，会在当前步骤结束后转给 Alfred。`) and handed to the running agent at the next step boundary, once the current model call and its tool calls finish. A tool call in flight is not interrupted. Files sent mid-task travel with the next text message, as before.
 - If the agent is still working through tool calls, the follow-up joins the current turn and one reply answers both. If it was already writing its final answer, the follow-up runs as its own turn right after, and each turn gets its own reply, sent as soon as it ends.
-- The typing indicator and the 3-minute progress notes cover the whole task, follow-up turns included. While subagents run, the progress note and `/status` list them with their role, brief title and age.
+- The typing indicator and the 3-minute progress notes (with the run id, see Workbench) cover the whole task, follow-up turns included. While subagents run, the progress note and `/status` list them with their role, brief title and age.
 - Once every message has been answered, the task ends. A message that arrives after that is queued and starts the next task, which resumes the same session.
 
 ### Sessions and context
@@ -224,6 +255,7 @@ Verified WeChat behavior (2026-10-10):
 | --- | --- |
 | `$XDG_STATE_HOME/alfred/` (default `~/.local/state/alfred/`, override with `ALFRED_STATE_DIR`) | `account.json` (bot token), `sync.json` (poll cursor), `context-tokens.json`, `agent-state.json` (active and previous session, model and spend per user), `memory-scan.json` (transcript offsets and extraction spend), `memory.lock` (held while a task or memory scan runs); files are mode 600 |
 | `$XDG_STATE_HOME/alfred/claude/` | isolated Claude Code config dir: agent session transcripts used for resume |
+| `$XDG_STATE_HOME/alfred/workbench/` | what the workbench reads: `runs.jsonl` (one line per finished run, kept for good), `runs/<id>.json` (live and recent runs with their steps, kept 30 days), `status.json` (heartbeat), `alfred.log` (the log, rotated at 5 MB to `alfred.log.1`) |
 | `~/Alfred/` (override with `ALFRED_WORKSPACE`) | `ALFRED.md` (workspace rules), `inbox/`, `reports/`, `notes/`, `images/`, `memory/` (long-term memory), `.trash/` |
 | `$XDG_CACHE_HOME/alfred/ms-playwright/` (default `~/.cache/…`, override with `PLAYWRIGHT_BROWSERS_PATH`) | Chrome Headless Shell for PDF rendering |
 
@@ -236,6 +268,11 @@ Verified WeChat behavior (2026-10-10):
 | `ALFRED_MMX_BIN` | `$CLAUDE_CONFIG_DIR/skills/mmx/bin/mmx` (`~/.claude/…` when unset) | `mmx` executable for `generate_image`; if it is missing, the tool returns an error |
 | `ALFRED_MEMORY_SCAN_MINUTES` | `60` | interval between background memory scans; `0` turns automatic scans off (`npm run memory-scan` still works); empty means the default, anything else that is not a finite number of minutes from 0 to 35791 fails at startup |
 | `ALFRED_MEMORY_SCAN_BUDGET_USD` | `0.1` | spend cap for one memory scan; must be a finite number > 0 |
+| `ALFRED_WORKBENCH` | off | `on` when a workbench is deployed: the agent is told HTML reports can be read there |
+| `ALFRED_WORKBENCH_URL` | none | the workbench's https base URL, for card links in WeChat replies; implies `ALFRED_WORKBENCH=on` |
+| `ALFRED_WORKBENCH_LISTEN` | `127.0.0.1:8787` | the workbench's TCP listener (`host:port`, or `off`); needs the three Access variables below unless `--dev` |
+| `ALFRED_WORKBENCH_SOCKET` | none | the workbench's Unix socket for the SSH-tunnel fallback |
+| `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUD`, `ALFRED_WORKBENCH_OWNER_EMAIL` | none | the Access team domain, the application's AUD tag and the one email allowed in |
 
 ## Layout
 
@@ -246,7 +283,9 @@ src/agent/          Agent SDK handler, live task input, options, workspace guard
 src/echo.ts         PoC handler and protocol test commands
 src/files.ts        inbound media storage and file helpers
 src/pdf.ts          Markdown/HTML to PDF rendering
-src/cli.ts          login | run | push | status | setup-pdf | pdf | memory-scan
+src/runs.ts         run ids and records, the heartbeat: what the workbench reads
+src/workbench/      the read-only workbench: server, Access check, pages, safe Markdown
+src/cli.ts          login | run | push | status | setup-pdf | pdf | memory-scan | workbench
 scripts/agent-smoke.ts  local agent run without WeChat
 ```
 

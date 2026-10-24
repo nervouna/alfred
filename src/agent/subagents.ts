@@ -114,4 +114,9 @@ export class SubagentTracker {
   get running(): LiveSubagent[] {
     return [...this.live.values()];
   }
+
+  /** Role of the subagent started by the Agent call `toolUseId`, while it runs. */
+  roleOf(toolUseId: string): string | undefined {
+    return this.live.get(toolUseId)?.role;
+  }
 }

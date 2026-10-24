@@ -1,0 +1,16 @@
+# Pod for Alfred's read-only workbench and the Cloudflare tunnel in front of it.
+# Install it with workbench.container and workbench-tunnel.container into
+# ~/.config/containers/systemd/ for the user that runs Alfred, then
+# `systemctl --user daemon-reload && systemctl --user start workbench-pod`.
+# The two containers share the pod's network: cloudflared reaches the
+# workbench on localhost, and nothing is published on the host.
+[Unit]
+Description=Alfred workbench pod
+
+[Pod]
+PodName=workbench
+# The host user becomes the image's `node` user, as in alfred.container.
+UserNS=keep-id:uid=1000,gid=1000
+
+[Install]
+WantedBy=default.target

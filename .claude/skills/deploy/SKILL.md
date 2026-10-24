@@ -53,6 +53,18 @@ Podman reads secrets when the container starts, so run `update.sh --restart` aft
 
   To check it, run `ssh $HOST podman exec alfred mmx quota show`. Ignore `mmx auth status`: it reports "Not authenticated" even when calls work.
 
+## Workbench
+
+The read-only workbench and its `cloudflared` run in the `workbench` pod, set up as in the README's "Workbench" section. The tunnel hostname, the Access team domain, AUD tag and owner email belong in project memory and `~/.config/alfred/workbench.env` on the host, never in this repo.
+
+- `update.sh` restarts the workbench after an update. It does not wait for a task, because the workbench only reads. If the installed workbench Quadlets differ from `deploy/`, the same `--install-quadlet` and `--keep-quadlet` choice applies.
+- Health and logs: `ssh $HOST 'systemctl --user is-active workbench workbench-tunnel; journalctl --user -u workbench -n 40 --no-pager -o cat'`. `workbench refused … : <reason>` lines are requests without a valid Access token.
+- When the tunnel or Access is down, use the socket: `ssh -N -L 8787:/home/<user>/data/workbench-socket/workbench.sock $HOST`, then open `http://localhost:8787`.
+- On the first deploy, check:
+  - a request without Access gets 403;
+  - writing inside the container fails: `podman exec workbench sh -c 'touch /x /tmp/x /data/state/workbench/x /workspace/x'`;
+  - WeChat opens a card link and gets through the Access sign-in. Only then set `ALFRED_WORKBENCH_URL` in `alfred.container`.
+
 ## WeChat login
 
 A new login is needed when iLink rejects the bot token or the owner changes. The scanner becomes the owner of a newly bound bot. The login shows a QR code and may ask for a number shown on the phone, so run it in a terminal tab the user can see:

@@ -2,6 +2,8 @@ import { describeError, log, mask } from "./log.ts";
 import { DEFAULT_CDN_BASE_URL, IlinkApiError, IlinkClient, STALE_TOKEN_ERRCODE } from "./ilink/client.ts";
 import { sendText } from "./ilink/send.ts";
 import { MessageType, TypingStatus } from "./ilink/types.ts";
+import { memoryUsage, writeHeartbeat } from "./runs.ts";
+import type { Heartbeat } from "./runs.ts";
 import type { WeixinMessage } from "./ilink/types.ts";
 import { ContextTokenStore, WORKSPACE_DIR, loadCursor, requireAccount, saveCursor } from "./store.ts";
 import type { Account } from "./store.ts";
@@ -14,6 +16,8 @@ const STALE_TOKEN_PAUSE_MS = 60 * 60_000;
 const TYPING_KEEPALIVE_MS = 5_000;
 const TYPING_TICKET_TTL_MS = 12 * 60 * 60_000;
 const SHUTDOWN_DRAIN_MS = 10_000;
+/** The workbench shows Alfred as down when the heartbeat is older than 90 s. */
+const HEARTBEAT_MS = 30_000;
 
 export interface BotContext {
   client: IlinkClient;
@@ -112,6 +116,19 @@ export async function runBot(handler: MessageHandler, signal: AbortSignal): Prom
   };
   const queues = new Map<string, Promise<void>>();
 
+  const beat: Heartbeat = { pid: process.pid, startedAt: new Date(ctx.startedAt).toISOString(), updatedAt: "", memory: memoryUsage() };
+  const heartbeat = (patch: Partial<Heartbeat> = {}) => {
+    Object.assign(beat, patch, {
+      updatedAt: new Date().toISOString(),
+      memory: memoryUsage(),
+      ownerLastInboundAt: tokens.get(account.ownerUserId)?.updatedAt,
+    });
+    writeHeartbeat(beat);
+  };
+  heartbeat();
+  const heartbeatTimer = setInterval(heartbeat, HEARTBEAT_MS);
+  heartbeatTimer.unref();
+
   const dispatch = (msg: WeixinMessage) => {
     const from = msg.from_user_id ?? "";
     const types = msg.item_list?.map((i) => i.type).join(",") ?? "none";
@@ -157,6 +174,7 @@ export async function runBot(handler: MessageHandler, signal: AbortSignal): Prom
         throw new IlinkApiError("getUpdates", resp);
       }
       failures = 0;
+      heartbeat({ lastPollAt: new Date().toISOString(), lastPollOk: true });
       if (resp.get_updates_buf) {
         cursor = resp.get_updates_buf;
         saveCursor(cursor);
@@ -164,6 +182,7 @@ export async function runBot(handler: MessageHandler, signal: AbortSignal): Prom
       for (const msg of resp.msgs ?? []) dispatch(msg);
     } catch (err) {
       if (signal.aborted) break;
+      heartbeat({ lastPollAt: new Date().toISOString(), lastPollOk: false });
       failures++;
       const backoff = failures >= MAX_CONSECUTIVE_FAILURES ? BACKOFF_DELAY_MS : RETRY_DELAY_MS;
       log.error(`getUpdates error (${failures}/${MAX_CONSECUTIVE_FAILURES}): ${describeError(err)}; retry in ${backoff / 1000}s`);
@@ -173,7 +192,9 @@ export async function runBot(handler: MessageHandler, signal: AbortSignal): Prom
   }
 
   log.info("Shutting down...");
+  clearInterval(heartbeatTimer);
   await drain(queues.values(), SHUTDOWN_DRAIN_MS);
+  heartbeat({ stoppedAt: new Date().toISOString() });
   try {
     await client.notifyStop();
   } catch (err) {

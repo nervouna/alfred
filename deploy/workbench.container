@@ -1,0 +1,38 @@
+# Alfred's read-only workbench (node src/cli.ts workbench), in workbench.pod.
+# Host-specific values go in ~/.config/alfred/workbench.env, never in the repo:
+#   CF_ACCESS_TEAM_DOMAIN=<team>.cloudflareaccess.com
+#   CF_ACCESS_AUD=<the Access application's AUD tag>
+#   ALFRED_WORKBENCH_OWNER_EMAIL=<the one email allowed in>
+[Unit]
+Description=Alfred workbench
+
+[Container]
+Image=localhost/alfred:latest
+ContainerName=workbench
+Pod=workbench.pod
+Exec=node src/cli.ts workbench
+LogDriver=journald
+# Only what the workbench shows, read-only: run records and the heartbeat,
+# session transcripts, and the workspace. account.json, the context tokens
+# and the rest of the state dir are not mounted at all.
+Volume=%h/data/state/workbench:/data/state/workbench:ro
+Volume=%h/data/state/claude/projects:/data/state/claude/projects:ro
+Volume=%h/data/workspace:/workspace:ro
+# The 0600 socket for the SSH-tunnel fallback: the one writable path.
+Volume=%h/data/workbench-socket:/run/workbench
+ReadOnly=true
+ReadOnlyTmpfs=false
+Environment=TZ=Asia/Taipei
+Environment=ALFRED_WORKBENCH_LISTEN=127.0.0.1:8787
+Environment=ALFRED_WORKBENCH_SOCKET=/run/workbench/workbench.sock
+EnvironmentFile=%h/.config/alfred/workbench.env
+NoNewPrivileges=true
+DropCapability=all
+PodmanArgs=--memory=256m --pids-limit=64
+
+[Service]
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

@@ -12,8 +12,11 @@ import { echoHandler } from "./echo.ts";
 import { DEFAULT_CDN_BASE_URL, IlinkClient } from "./ilink/client.ts";
 import { login } from "./ilink/login.ts";
 import { sendMedia, sendText } from "./ilink/send.ts";
-import { describeError, log, mask } from "./log.ts";
+import { describeError, log, logToFile, mask } from "./log.ts";
 import { BROWSERS_PATH, renderPdf } from "./pdf.ts";
+import { LOG_FILE } from "./runs.ts";
+import { AccessVerifier } from "./workbench/access.ts";
+import { startWorkbench } from "./workbench/server.ts";
 import { ContextTokenStore, STATE_DIR, WORKSPACE_DIR, loadAccount, loadCursor, requireAccount, saveAccount } from "./store.ts";
 
 const USAGE = `usage: node src/cli.ts <command>
@@ -25,7 +28,8 @@ const USAGE = `usage: node src/cli.ts <command>
   status                     show local account and session state
   setup-pdf                  download the headless Chrome used for PDF rendering
   pdf <source> [output]      render a Markdown or HTML file to PDF
-  memory-scan                extract long-term memories from new transcript entries now`;
+  memory-scan                extract long-term memories from new transcript entries now
+  workbench [--dev]          serve the read-only workbench (--dev: no Access check, loopback only)`;
 
 function ageOf(epochMs: number): string {
   return `${((Date.now() - epochMs) / 3_600_000).toFixed(2)}h`;
@@ -43,6 +47,7 @@ async function cmdLogin(): Promise<void> {
 }
 
 async function cmdRun(args: string[]): Promise<void> {
+  logToFile(LOG_FILE);
   const handler = args.includes("--echo") ? echoHandler : createAgentHandler();
   const controller = new AbortController();
   const stop = (sig: string) => {
@@ -125,6 +130,44 @@ async function cmdMemoryScan(): Promise<void> {
   }
 }
 
+/** Host and port from ALFRED_WORKBENCH_LISTEN ("host:port", default 127.0.0.1:8787), or undefined for "off". */
+function workbenchListen(): { host: string; port: number } | undefined {
+  const setting = process.env.ALFRED_WORKBENCH_LISTEN?.trim() || "127.0.0.1:8787";
+  if (setting === "off") return undefined;
+  const m = /^(.+):(\d+)$/.exec(setting);
+  const port = Number(m?.[2]);
+  if (!m?.[1] || !(port > 0 && port < 65536)) throw new Error(`ALFRED_WORKBENCH_LISTEN must be host:port or off, got "${setting}"`);
+  return { host: m[1], port };
+}
+
+async function cmdWorkbench(args: string[]): Promise<void> {
+  const dev = args.includes("--dev");
+  const listen = workbenchListen();
+  const socket = process.env.ALFRED_WORKBENCH_SOCKET?.trim() || undefined;
+  let access: AccessVerifier | undefined;
+  if (listen && !dev) {
+    const teamDomain = process.env.CF_ACCESS_TEAM_DOMAIN?.trim();
+    const aud = process.env.CF_ACCESS_AUD?.trim();
+    const ownerEmail = process.env.ALFRED_WORKBENCH_OWNER_EMAIL?.trim();
+    if (!teamDomain || !aud || !ownerEmail) {
+      throw new Error(
+        "the TCP listener needs CF_ACCESS_TEAM_DOMAIN, CF_ACCESS_AUD and ALFRED_WORKBENCH_OWNER_EMAIL; set ALFRED_WORKBENCH_LISTEN=off to serve the socket only",
+      );
+    }
+    access = new AccessVerifier({ teamDomain, aud, ownerEmail });
+  }
+  if (listen && dev && !["127.0.0.1", "localhost", "::1"].includes(listen.host)) {
+    throw new Error(`--dev serves without an Access check, so it listens on loopback only, not ${listen.host}`);
+  }
+  const close = await startWorkbench({ workspace: WORKSPACE_DIR, tcp: listen && { ...listen, access }, socket });
+  await new Promise<void>((resolve) => {
+    process.once("SIGINT", resolve);
+    process.once("SIGTERM", resolve);
+  });
+  log.info("workbench stopping");
+  await close();
+}
+
 function cmdStatus(): void {
   const account = loadAccount();
   console.log(`state dir: ${STATE_DIR}\nworkspace: ${WORKSPACE_DIR}`);
@@ -168,6 +211,9 @@ try {
       break;
     case "memory-scan":
       await cmdMemoryScan();
+      break;
+    case "workbench":
+      await cmdWorkbench(args);
       break;
     default:
       console.log(USAGE);

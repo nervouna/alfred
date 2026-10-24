@@ -6,6 +6,12 @@ import type { ModelKey } from "./config.ts";
 
 const AGENT_STATE_FILE = path.join(STATE_DIR, "agent-state.json");
 
+/** A run named in a notice to the user. */
+export interface RunRef {
+  id: string;
+  title: string;
+}
+
 /** A retired session, kept so /resume can switch back to it. */
 export interface SessionSnapshot {
   sessionId: string;
@@ -29,6 +35,8 @@ export interface AgentUserState {
   lastRunAt?: string;
   /** The session retired last; /resume switches back to it. */
   previousSession?: SessionSnapshot;
+  /** Runs with a reply or file that WeChat did not take; the user's next message gets a note naming them. */
+  undeliveredRuns?: RunRef[];
 }
 
 /** Per-user agent state, persisted so sessions and settings survive restarts. */

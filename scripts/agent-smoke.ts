@@ -7,17 +7,19 @@
 // and the roles, for comparing a run against one that delegates. Lines from inside a
 // subagent are marked with its Agent call's id.
 // The alfred tools are wired to a stub, so send_file fails instead of messaging anyone.
-// Like the bot, it seeds the workspace and prints the ALFRED.md change notice after the run.
+// Like the bot, it seeds the workspace, records the run for the workbench under
+// $ALFRED_STATE_DIR/workbench, and prints the ALFRED.md change notice after the run.
 
 import { execFileSync } from "node:child_process";
 
 import { query } from "@anthropic-ai/claude-agent-sdk";
 
-import { agentOptions, prepareWorkspace } from "../src/agent/handler.ts";
-import { DEFAULT_MODEL, isModelKey } from "../src/agent/config.ts";
+import { agentOptions, prepareWorkspace, runTitle } from "../src/agent/handler.ts";
+import { DEFAULT_MODEL, MODELS, isModelKey } from "../src/agent/config.ts";
 import { TaskInput, answeredBy } from "../src/agent/input.ts";
 import { rulesChangeNotice, snapshotRules } from "../src/agent/rules.ts";
 import { SubagentTracker } from "../src/agent/subagents.ts";
+import { RunRecorder, stepDetail } from "../src/runs.ts";
 import type { BotContext } from "../src/bot.ts";
 import { WORKSPACE_DIR } from "../src/store.ts";
 
@@ -72,7 +74,9 @@ const stopTimer = stopAfterMs !== undefined && setTimeout(() => {
 
 let results = 0;
 let modelUsage: Record<string, { costUSD: number }> = {};
-const options = agentOptions({ ctx, userId: "smoke", model, resume, abortController: abort, subagents });
+const run = new RunRecorder({ kind: "task", title: runTitle(prompt), model: MODELS[model] });
+console.log(`[run] ${run.id}`);
+const options = agentOptions({ ctx, userId: "smoke", model, resume, abortController: abort, subagents, run });
 try {
   for await (const m of query({ prompt: input, options })) {
     tracker.observe(m);
@@ -82,8 +86,11 @@ try {
       console.log(`[${m.subtype}] ${elapsed()} ${JSON.stringify(m).slice(0, 200)}`);
     } else if (m.type === "assistant") {
       const where = m.parent_tool_use_id ? `[sub ${m.parent_tool_use_id.slice(-6)}] ` : "";
+      const agent = m.parent_tool_use_id ? tracker.roleOf(m.parent_tool_use_id) : undefined;
       for (const block of m.message.content) {
-        if (block.type === "tool_use") console.log(`[tool] ${elapsed()} ${where}${block.name} ${JSON.stringify(block.input).slice(0, 160)}`);
+        if (block.type !== "tool_use") continue;
+        console.log(`[tool] ${elapsed()} ${where}${block.name} ${JSON.stringify(block.input).slice(0, 160)}`);
+        run.step(block.name, stepDetail(block.name, (block.input ?? {}) as Record<string, unknown>, WORKSPACE_DIR), agent);
       }
     } else if (m.type === "user" && !m.parent_tool_use_id && Array.isArray(m.message.content)) {
       for (const block of m.message.content) {
@@ -95,6 +102,11 @@ try {
       console.log(`[subagents] ${elapsed()} running=${tracker.running.map((r) => `${r.role}:${r.description}`).join(", ") || "none"}`);
     } else if (m.type === "result") {
       modelUsage = m.modelUsage ?? {};
+      run.update({
+        sessionId: m.session_id,
+        costUsd: m.total_cost_usd,
+        modelCostUsd: Object.fromEntries(Object.entries(modelUsage).map(([k, u]) => [k, u.costUSD])),
+      });
       results++;
       const answered = answeredBy(m).length;
       input.settle(answeredBy(m));
@@ -115,6 +127,7 @@ try {
   if (stopTimer) clearTimeout(stopTimer);
   input.close();
 }
+run.finish(abort.signal.aborted ? "stopped" : results > 0 ? "done" : "failed");
 for (const [m, u] of Object.entries(modelUsage).sort((a, b) => b[1].costUSD - a[1].costUSD)) {
   console.log(`[model] ${m} $${u.costUSD.toFixed(4)}`);
 }

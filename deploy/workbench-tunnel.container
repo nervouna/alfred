@@ -1,0 +1,26 @@
+# The workbench's own Cloudflare tunnel, in workbench.pod. It is a
+# remotely managed tunnel: its public hostname points at
+# http://localhost:8787, behind a Cloudflare Access application that lets in
+# only the owner's email. The token is a podman secret:
+#   printf %s "$TOKEN" | podman secret create workbench_tunnel_token -
+[Unit]
+Description=Cloudflare tunnel for the Alfred workbench
+
+[Container]
+Image=docker.io/cloudflare/cloudflared:2026.10.0
+ContainerName=workbench-tunnel
+Pod=workbench.pod
+Exec=tunnel --no-autoupdate run
+Secret=workbench_tunnel_token,type=env,target=TUNNEL_TOKEN
+LogDriver=journald
+ReadOnly=true
+NoNewPrivileges=true
+DropCapability=all
+PodmanArgs=--memory=128m --pids-limit=64
+
+[Service]
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
