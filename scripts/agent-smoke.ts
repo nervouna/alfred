@@ -15,7 +15,7 @@ import { execFileSync } from "node:child_process";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 
 import { agentOptions, prepareWorkspace, runTitle } from "../src/agent/handler.ts";
-import { DEFAULT_MODEL, MODELS, isModelKey } from "../src/agent/config.ts";
+import { DEFAULT_MODEL, MODELS, WORKBENCH_ON, isModelKey, runIdNote } from "../src/agent/config.ts";
 import { TaskInput, answeredBy } from "../src/agent/input.ts";
 import { rulesChangeNotice, snapshotRules } from "../src/agent/rules.ts";
 import { SubagentTracker } from "../src/agent/subagents.ts";
@@ -57,9 +57,11 @@ const ctx = stub as BotContext;
 
 prepareWorkspace();
 const rulesBefore = snapshotRules(WORKSPACE_DIR);
+const run = new RunRecorder({ kind: "task", title: runTitle(prompt), model: MODELS[model] });
+console.log(`[run] ${run.id}`);
 const startedAt = Date.now();
 const elapsed = () => `+${((Date.now() - startedAt) / 1000).toFixed(1)}s`;
-const input = new TaskInput(prompt);
+const input = new TaskInput(WORKBENCH_ON ? `${runIdNote(run.id)}\n\n${prompt}` : prompt);
 const steerTimer = steer && setTimeout(() => {
   if (input.push(steer.text)) console.log(`[steer] ${elapsed()} pushed: ${steer.text}`);
   else console.log(`[steer] ${elapsed()} not pushed: the task already finished`);
@@ -74,8 +76,6 @@ const stopTimer = stopAfterMs !== undefined && setTimeout(() => {
 
 let results = 0;
 let modelUsage: Record<string, { costUSD: number }> = {};
-const run = new RunRecorder({ kind: "task", title: runTitle(prompt), model: MODELS[model] });
-console.log(`[run] ${run.id}`);
 const options = agentOptions({ ctx, userId: "smoke", model, resume, abortController: abort, subagents, run });
 try {
   for await (const m of query({ prompt: input, options })) {
