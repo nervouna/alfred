@@ -10,13 +10,13 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import type { SDKResultMessage } from "@anthropic-ai/claude-agent-sdk";
+import type { Options, SDKResultMessage } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 
 import { localDate, uniquePath } from "../files.ts";
 import { describeError, log } from "../log.ts";
 import { STATE_DIR, readJson, writeJson } from "../store.ts";
-import { AGENT_CONFIG_DIR, MEMORY_SCAN_BUDGET_USD, MODELS, agentEnv } from "./config.ts";
+import { AGENT_CONFIG_DIR, AGENT_SETTINGS, MEMORY_SCAN_BUDGET_USD, MODELS, agentEnv } from "./config.ts";
 import {
   MEMORY_DIR,
   MEMORY_FILE_RE,
@@ -354,33 +354,36 @@ export function extractionPrompt(memories: Memory[], messages: TranscriptMessage
   return `Today is ${today}.\n\n${existingMemoriesBlock(memories)}\n\n${conversationBlock(messages)}`;
 }
 
+/** SDK options for one extraction call. */
+export function extractionOptions(budgetUsd: number, abortController: AbortController): Options {
+  return {
+    model: EXTRACT_MODEL,
+    // Not the workspace: the extractor has no tools and must not share the scanned project dir.
+    cwd: STATE_DIR,
+    env: agentEnv(),
+    settingSources: [],
+    settings: AGENT_SETTINGS,
+    systemPrompt: EXTRACTION_SYSTEM_PROMPT,
+    tools: [],
+    allowedTools: [],
+    permissionMode: "dontAsk",
+    // The structured answer is delivered through a tool call, which takes a second turn.
+    maxTurns: 3,
+    maxBudgetUsd: budgetUsd,
+    outputFormat: { type: "json_schema", schema: EXTRACTION_JSON_SCHEMA },
+    // Keep the extractor's own transcript out of the directory it scans.
+    persistSession: false,
+    abortController,
+    stderr: (data) => log.debug(`memory-scan claude: ${data.trimEnd()}`),
+  };
+}
+
 async function extract(prompt: string, budgetUsd: number, signal: AbortSignal): Promise<{ candidates: Candidate[]; costUsd: number }> {
   const abortController = new AbortController();
   if (signal.aborted) abortController.abort();
   else signal.addEventListener("abort", () => abortController.abort(), { once: true });
   let result: SDKResultMessage | undefined;
-  for await (const m of query({
-    prompt,
-    options: {
-      model: EXTRACT_MODEL,
-      // Not the workspace: the extractor has no tools and must not share the scanned project dir.
-      cwd: STATE_DIR,
-      env: agentEnv(),
-      settingSources: [],
-      systemPrompt: EXTRACTION_SYSTEM_PROMPT,
-      tools: [],
-      allowedTools: [],
-      permissionMode: "dontAsk",
-      // The structured answer is delivered through a tool call, which takes a second turn.
-      maxTurns: 3,
-      maxBudgetUsd: budgetUsd,
-      outputFormat: { type: "json_schema", schema: EXTRACTION_JSON_SCHEMA },
-      // Keep the extractor's own transcript out of the directory it scans.
-      persistSession: false,
-      abortController,
-      stderr: (data) => log.debug(`memory-scan claude: ${data.trimEnd()}`),
-    },
-  })) {
+  for await (const m of query({ prompt, options: extractionOptions(budgetUsd, abortController) })) {
     if (m.type === "result") result = m;
   }
   if (!result) throw new Error("extraction ended without a result");
