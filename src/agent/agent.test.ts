@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
 
-import { agentEnv } from "./config.ts";
+import { agentEnv, systemPrompt } from "./config.ts";
 import { checkToolInput, resolveInside } from "./guard.ts";
 import { buildPrompt, runTitle, undeliveredNote } from "./handler.ts";
 
@@ -109,4 +109,19 @@ test("buildPrompt attaches the records of runs a message names", () => {
 test("undeliveredNote names the runs whose results did not reach WeChat", () => {
   assert.equal(undeliveredNote([{ id: "k7m2qa", title: "VPS 对比" }]), "「VPS 对比」（k7m2qa）的结果没送到微信，需要的话让我重发。");
   assert.match(undeliveredNote([{ id: "k7m2qa", title: "a" }, { id: "p3x9za", title: "b" }]), /^有 2 个任务的结果没送到微信：「a」（k7m2qa）、「b」（p3x9za）。/);
+});
+
+test("the workbench section gives the agent the workbench and card links when a URL is set", () => {
+  const now = new Date("2026-10-25T00:00:00Z");
+  const withUrl = systemPrompt(now, { workbench: true, workbenchUrl: "https://alfred.example.com", runId: "k7m2qa" });
+  assert.match(withUrl, /# Workbench/);
+  assert.match(withUrl, /this one is k7m2qa/);
+  assert.match(withUrl, /The workbench is at https:\/\/alfred\.example\.com, and a run's card at https:\/\/alfred\.example\.com\/runs\/<run id>/);
+  assert.match(withUrl, /no search/);
+
+  const withoutUrl = systemPrompt(now, { workbench: true, workbenchUrl: "", runId: "k7m2qa" });
+  assert.match(withoutUrl, /You do not know the workbench's address/);
+  assert.doesNotMatch(withoutUrl, /https:\/\//);
+
+  assert.doesNotMatch(systemPrompt(now, { workbench: false }), /# Workbench/);
 });
