@@ -3,7 +3,7 @@
 
 import type { Memory } from "../agent/memory.ts";
 import type { RunFile, RunRecord, RunStatus } from "../runs.ts";
-import { PUSH_WINDOW_MS } from "./data.ts";
+import { PUSH_WINDOW_MS, countsForSpend } from "./data.ts";
 import type { AlfredStatus, DaySpend, SessionInfo, TranscriptEntry } from "./data.ts";
 import { Html, html, page, query } from "./html.ts";
 
@@ -98,8 +98,9 @@ export function overviewPage(params: { status: AlfredStatus; runs: RunRecord[]; 
   const running = runs.filter((r) => isLive(r.status));
   const today = new Date(now).toLocaleDateString("en-CA");
   const weekAgo = now - 7 * 86_400_000;
-  const spendToday = runs.filter((r) => new Date(r.startedAt).toLocaleDateString("en-CA") === today).reduce((a, r) => a + (r.costUsd || 0), 0);
-  const spendWeek = runs.filter((r) => Date.parse(r.startedAt) >= weekAgo).reduce((a, r) => a + (r.costUsd || 0), 0);
+  const spent = runs.filter(countsForSpend);
+  const spendToday = spent.filter((r) => new Date(r.startedAt).toLocaleDateString("en-CA") === today).reduce((a, r) => a + (r.costUsd || 0), 0);
+  const spendWeek = spent.filter((r) => Date.parse(r.startedAt) >= weekAgo).reduce((a, r) => a + (r.costUsd || 0), 0);
 
   let window = "—";
   if (beat?.ownerLastInboundAt) {

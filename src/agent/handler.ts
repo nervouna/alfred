@@ -24,6 +24,7 @@ import { RunRecorder, findRun, markLostRuns, pruneRunFiles, runIdCandidates, ste
 import type { RunRecord, RunStatus } from "../runs.ts";
 import { WORKSPACE_DIR, loadAccount } from "../store.ts";
 import {
+  AGENT_CONFIG_DIR,
   AGENT_SETTINGS,
   BUILTIN_TOOLS,
   DAILY_BUDGET_USD,
@@ -47,11 +48,12 @@ import {
   systemPrompt,
 } from "./config.ts";
 import type { ModelKey } from "./config.ts";
-import { BackgroundRuns, tokenRates } from "./background.ts";
+import { BackgroundRuns } from "./background.ts";
 import type { QueuedBrief } from "./background.ts";
+import { subagentTranscript } from "./cost.ts";
 import { resolveInside, workspaceGuard } from "./guard.ts";
 import { TaskInput, answeredBy } from "./input.ts";
-import { EXTRACT_MODEL, MEMORY_LOCK_FILE, MemoryScanScheduler, SCAN_TIMEOUT_MS, scanTranscripts } from "./memory-scan.ts";
+import { EXTRACT_MODEL, MEMORY_LOCK_FILE, MemoryScanScheduler, SCAN_TIMEOUT_MS, scanTranscripts, transcriptDirs } from "./memory-scan.ts";
 import type { ScanReport } from "./memory-scan.ts";
 import { MemoryLock, capIndex, loadMemories, syncMemoryIndex } from "./memory.ts";
 import { RULES_FILE, RulesTracker, rulesChangeNotice, rulesDisclosure, seedRules, snapshotRules } from "./rules.ts";
@@ -506,7 +508,7 @@ export function createAgentHandler(): MessageHandler {
         } else if (m.type === "system" && m.subtype === "task_started") {
           if (m.tool_use_id) run.background.started(m.tool_use_id, m.task_id, m.subagent_type);
         } else if (m.type === "system" && m.subtype === "task_notification") {
-          run.background.notified(m.task_id, m.status, m.usage?.total_tokens);
+          run.background.notified(m.task_id, m.status);
         } else if (m.type === "system" && m.subtype === "background_tasks_changed") {
           run.input.closeIfIdle();
         } else if (m.type === "assistant") {
@@ -517,6 +519,7 @@ export function createAgentHandler(): MessageHandler {
           if (background && m.message.model && background.recorder.record.model !== m.message.model) {
             background.recorder.update({ model: m.message.model });
           }
+          if (background) run.background.progressed(background);
           for (const block of m.message.content) {
             if (block.type !== "tool_use") continue;
             const input = (block.input ?? {}) as Record<string, unknown>;
@@ -537,7 +540,7 @@ export function createAgentHandler(): MessageHandler {
           // A turn a subagent's report started answers no message; it carries no uuids.
           const uuids = answeredBy(m);
           const notification = !uuids.length && m.subtype === "success";
-          run.background.settleEnded(tokenRates(m.modelUsage ?? {}));
+          run.background.settleEnded(m.modelUsage ?? {});
           if (run.releaseUuid && !run.input.isPending(run.releaseUuid)) {
             // Answered without starting the handed-back brief: the agent dropped it.
             run.releaseUuid = undefined;
@@ -592,6 +595,11 @@ export function createAgentHandler(): MessageHandler {
       release: (brief) => {
         run.releaseUuid = run.input.pushSystem(releaseMessage(brief));
         log.info(`run ${brief.recorder.id} handed back to the agent: a background slot is free`);
+      },
+      transcriptOf: (agentId) => {
+        const sessionId = recorder.record.sessionId;
+        const dir = transcriptDirs(AGENT_CONFIG_DIR, WORKSPACE_DIR)[0];
+        return sessionId && dir ? subagentTranscript(dir, sessionId, agentId) : undefined;
       },
     });
     const run: Run = {

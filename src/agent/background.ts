@@ -1,8 +1,12 @@
 // Background subagents of one task, nested ones included. A task's query stays
 // open while they run; this module decides which Agent calls may start one (a
 // concurrency cap and the daily budget), queues the rest and hands them back when
-// a slot frees, and keeps each subagent's run record for the workbench.
+// a slot frees, and keeps each subagent's run record for the workbench, with its
+// cost so far.
 
+import type { ModelUsage } from "@anthropic-ai/claude-agent-sdk";
+
+import { TranscriptUsage, unitPrices } from "./cost.ts";
 import { MODELS, SUBAGENT_ROLES, isModelKey, isSubagentRole } from "./config.ts";
 import { RunRecorder } from "../runs.ts";
 import type { RunStatus } from "../runs.ts";
@@ -16,6 +20,7 @@ export interface BackgroundRun {
   toolUseId: string;
   agentId?: string;
   startedAt: number;
+  usage?: TranscriptUsage;
 }
 
 export interface QueuedBrief {
@@ -30,21 +35,13 @@ export interface QueuedBrief {
 interface Ended {
   run: BackgroundRun;
   status: Exclude<RunStatus, "running" | "queued">;
-  tokens?: number;
 }
 
-/** USD per token of a model so far in this query, from the SDK's modelUsage. */
-export type TokenRates = Record<string, number>;
-
-/** Per-token cost of each model, from a result's modelUsage: total cost over all tokens it counted. */
-export function tokenRates(modelUsage: Record<string, { costUSD: number; inputTokens: number; outputTokens: number; cacheReadInputTokens: number; cacheCreationInputTokens: number }>): TokenRates {
-  const rates: TokenRates = {};
-  for (const [model, u] of Object.entries(modelUsage)) {
-    const tokens = u.inputTokens + u.outputTokens + u.cacheReadInputTokens + u.cacheCreationInputTokens;
-    if (tokens > 0) rates[model] = u.costUSD / tokens;
-  }
-  return rates;
-}
+/**
+ * Model prices learned from every result in this process, so a subagent on a
+ * model its own query has not reported yet is priced from an earlier query's.
+ */
+const prices: Record<string, number> = {};
 
 /**
  * The model a call's subagent runs on, as far as Alfred knows before it starts:
@@ -63,6 +60,7 @@ export class BackgroundRuns implements AgentAdmission {
   private readonly max: number;
   private readonly overBudget: () => boolean;
   private readonly release: (brief: QueuedBrief) => void;
+  private readonly transcriptOf: (agentId: string) => string | undefined;
   /** Admitted Agent calls whose subagent has not started yet, by tool_use id. */
   private readonly launching = new Map<string, BackgroundRun>();
   /** Running subagents, by the SDK's agent (task) id. */
@@ -70,18 +68,26 @@ export class BackgroundRuns implements AgentAdmission {
   private readonly queue: QueuedBrief[] = [];
   /** A queued brief handed back to the agent, waiting for its Agent call. */
   private released?: QueuedBrief;
-  /** Ended subagents whose records wait for the next result, which brings the cost to estimate theirs. */
+  /** Ended subagents whose records wait for the next result, which brings the prices of their models. */
   private ended: Ended[] = [];
   /** Subagents started since the last reply, which names them. */
   private dispatched: RunRecorder[] = [];
   /** Subagents ended since the last reply; a notification turn's reply is about them. */
   private reported: RunRecorder[] = [];
 
-  constructor(opts: { parentRunId: string; max: number; overBudget: () => boolean; release: (brief: QueuedBrief) => void }) {
+  constructor(opts: {
+    parentRunId: string;
+    max: number;
+    overBudget: () => boolean;
+    release: (brief: QueuedBrief) => void;
+    /** A subagent's transcript, once its session is known. */
+    transcriptOf: (agentId: string) => string | undefined;
+  }) {
     this.parentRunId = opts.parentRunId;
     this.max = opts.max;
     this.overBudget = opts.overBudget;
     this.release = opts.release;
+    this.transcriptOf = opts.transcriptOf;
   }
 
   /** Nothing running, starting, queued or handed back: the task's query may end. */
@@ -171,22 +177,38 @@ export class BackgroundRuns implements AgentAdmission {
   }
 
   /** A subagent ended (task_notification). Its slot frees at once; its record closes at the next result. */
-  notified(agentId: string, status: string, tokens?: number): void {
+  notified(agentId: string, status: string): void {
     const run = this.live.get(agentId);
     if (!run) return;
     this.live.delete(agentId);
-    this.ended.push({ run, status: NOTIFICATION_STATUS[status] ?? "failed", tokens });
+    this.ended.push({ run, status: NOTIFICATION_STATUS[status] ?? "failed" });
     this.reported.push(run.recorder);
     this.releaseNext();
   }
 
-  /** Close the records of ended subagents, with a cost estimated from their tokens and this query's rates. */
-  settleEnded(rates: TokenRates): void {
-    for (const { run, status, tokens } of this.ended.splice(0)) {
-      const rate = rates[run.recorder.record.model ?? ""];
-      if (tokens !== undefined && rate !== undefined) run.recorder.update({ costUsd: tokens * rate, costEstimated: true });
+  /** A background subagent sent a message: its cost so far goes on its card. */
+  progressed(run: BackgroundRun): void {
+    this.price(run);
+  }
+
+  /** A result came with the query's modelUsage: learn its prices, reprice the running subagents and close the records of ended ones. */
+  settleEnded(modelUsage: Record<string, ModelUsage>): void {
+    Object.assign(prices, unitPrices(modelUsage));
+    for (const run of this.live.values()) this.price(run);
+    for (const { run, status } of this.ended.splice(0)) {
+      this.price(run);
       run.recorder.finish(status);
     }
+  }
+
+  /** Prices what the subagent's transcript holds so far; the cost stays as it is while a model it used has no price yet. */
+  private price(run: BackgroundRun): void {
+    const file = run.agentId && this.transcriptOf(run.agentId);
+    if (!file) return;
+    run.usage ??= new TranscriptUsage(file);
+    run.usage.read();
+    const usd = run.usage.cost(prices);
+    if (usd !== undefined && usd !== run.recorder.record.costUsd) run.recorder.update({ costUsd: usd, costEstimated: true });
   }
 
   /** Drop a queued brief (by run id) before it starts. */
@@ -230,6 +252,7 @@ export class BackgroundRuns implements AgentAdmission {
       ...[...this.live.values()].map((r) => r.recorder),
       ...this.queued.map((b) => b.recorder),
     ];
+    for (const r of [...this.ended.map((e) => e.run), ...this.live.values()]) this.price(r);
     // Ended ones keep the status their notification gave.
     for (const { run, status: own } of this.ended.splice(0)) run.recorder.finish(own);
     this.launching.clear();
