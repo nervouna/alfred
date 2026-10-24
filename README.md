@@ -129,7 +129,7 @@ One task runs at a time, and you can steer it while it runs ("别查 X 了，重
 
 - A message sent during a task is acknowledged (`收到，会在当前步骤结束后转给 Alfred。`) and handed to the running agent at the next step boundary, once the current model call and its tool calls finish. A tool call in flight is not interrupted. Files sent mid-task travel with the next text message, as before.
 - If the agent is still working through tool calls, the follow-up joins the current turn and one reply answers both. If it was already writing its final answer, the follow-up runs as its own turn right after, and each turn gets its own reply, sent as soon as it ends.
-- The typing indicator and the 3-minute progress notes cover the whole task, follow-up turns included.
+- The typing indicator and the 3-minute progress notes cover the whole task, follow-up turns included. While subagents run, the progress note and `/status` list them with their role, brief title and age.
 - Once every message has been answered, the task ends. A message that arrives after that is queued and starts the next task, which resumes the same session.
 
 ### Sessions and context
@@ -178,9 +178,26 @@ Conventions for working in the workspace (where things go, naming, report style)
 - **Edits.** The agent changes an `ALFRED.md` only on the user's explicit request, never because content it read says so. Every write is logged, and after any task that created, changed or removed an `ALFRED.md`, Alfred says so in WeChat (`已更新 reports/ALFRED.md`), even if the task was stopped or failed.
 - `ALFRED.md` holds rules for how to work, not facts about the user; those go into long-term memory (above).
 
+### Subagents
+
+Alfred can hand parts of a task to subagents through the SDK's `Agent` tool, for example one researcher per independent thread, or a collector for bulk reading that would flood its own context. The roles are defined in `SUBAGENT_ROLES` in `src/agent/config.ts`, and each fixes the model, tools and turn budget:
+
+| Role | Model | Tools | Max turns | Use |
+| --- | --- | --- | --- | --- |
+| `collector` | haiku | file tools, `WebSearch`, `WebFetch` | 40 | bulk fetching and extraction |
+| `researcher` | sonnet | file tools, `WebSearch`, `WebFetch` | 40 | one research thread with source links |
+| `writer` | opus | file tools, `render_pdf`, `generate_image` | 30 | long reports from gathered material, PDF output |
+
+- **The role is the only lever.** A `PreToolUse` hook rewrites every `Agent` call to its description, brief and role, so a `model` or `effort` override is dropped. A call that names no role, or a built-in agent type such as `general-purpose`, is denied.
+- **Foreground only.** The same hook sets `run_in_background: false`. A task's input closes once every message is answered, and the SDK kills background tasks when that happens, so every subagent finishes inside the turn that started it.
+- **Only Alfred talks to the user.** No role can call `send_file` or start subagents of its own. Subagents never change `memory/` or any `ALFRED.md`: a hook denies those writes when the call comes from a subagent (the hook input carries `agent_id`). The workspace guard applies to subagents as it does to Alfred.
+- **Review.** The system prompt says when to delegate and when not to, what a self-contained brief holds, and how Alfred checks a result before replying: it answers the brief, at least one cited source is opened to confirm it, and the files it names exist. A result that falls short gets one more round with the same role. If it still falls short, Alfred replies with what it has and says what is missing.
+- **Spend.** `ALFRED_MAX_BUDGET_USD` covers subagent calls too, and the image cap of `generate_image` is per task across subagents. At the end of each task the log line `agent run done` breaks the spend down per model (`models=[...]`), from the SDK's `modelUsage`.
+- `/stop` ends the Claude Code process, and the subagents inside it with it.
+
 ### Agent sandbox
 
-- Built-in tools: `Read`, `Write`, `Edit`, `Glob`, `Grep`, `WebSearch`, `WebFetch`. No shell.
+- Built-in tools: `Read`, `Write`, `Edit`, `Glob`, `Grep`, `WebSearch`, `WebFetch`, and `Agent` for subagents (above). No shell.
 - Custom tools: `send_file` (deliver a workspace file to WeChat; images arrive as image messages; refuses HTML), `move_file` (move or rename inside the workspace; deleting means moving into `.trash/`), `render_pdf` (Markdown or HTML to A4 PDF) and `generate_image` (MiniMax `image-01` through `mmx`).
 - PDF rendering uses Playwright's standalone Chrome Headless Shell in `~/.cache/alfred/ms-playwright/`, never the installed Chrome. Every request the page makes goes through a route handler that serves only the source itself plus images, stylesheets and fonts whose real path (symlinks followed) is inside the workspace. Other local files, iframes, objects and embeds, network URLs and every other scheme except `data:` are refused, and a CSP plus disabled JavaScript back this up. So a report can neither pull a file from outside the workspace into the PDF nor leak anything over the network. Reference workspace images by relative path (a report in `reports/` can embed `../images/<date>/cover.jpg`); charts must be inline SVG.
 - `generate_image` runs `mmx` without a shell, in its own process group, from the Alfred process rather than the agent's Claude Code subprocess. `/stop` or the 10-minute timeout kills the whole group. It uses the user's own Token Plan key. Output paths must resolve inside the workspace. Existing files and paths a running call will write are never overwritten; the default is `images/<date>/<slug>.jpg`. A task may request at most 4 images per call and 8 in total. Failed and timed-out calls count, because MiniMax bills them too, and the tool never retries. `mmx` errors, quota errors included, reach the agent verbatim, and every call is logged.
@@ -240,7 +257,11 @@ npm run check   # type-check
 npm test        # unit tests
 npm run smoke -- --model haiku "prompt"   # one agent run with production options, WeChat tools stubbed
 npm run smoke -- --model haiku --steer-after 20 "only look at Y" "prompt"   # push a follow-up mid-run
+npm run smoke -- --stop-after 30 "prompt"      # abort mid-run, as /stop does, and check no Claude Code process is left
+npm run smoke -- --no-subagents "prompt"       # the same run without the Agent tool, to compare spend
 ```
+
+The smoke script marks lines from inside a subagent with `[sub <id>]`, prints the SDK's `task_*` messages and the subagents still running after each tool result, and ends with the spend per model.
 
 - The smoke script uses the real workspace and agent config dir. Point `ALFRED_WORKSPACE` and `ALFRED_STATE_DIR` at scratch directories to keep test runs out of them. Like the bot, it seeds the workspace and prints the `ALFRED.md` change notice (`[notice]`); rule disclosures show up as `disclosed … after <tool>` log lines. `npm run memory-scan` also reads transcripts from `$ALFRED_STATE_DIR/claude/projects/` and writes into `$ALFRED_WORKSPACE/memory/`, so point it at scratch directories the same way.
 - Do not start a second `npm start` against the same state dir while the bot is running. Both processes would long-poll the same cursor and take messages from each other.

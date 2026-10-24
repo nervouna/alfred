@@ -84,7 +84,7 @@ export function workspaceGuard(root: string): HookCallbackMatcher {
         if (input.hook_event_name !== "PreToolUse") return {};
         const reason = checkToolInput(root, input.tool_name, (input.tool_input ?? {}) as Record<string, unknown>);
         if (!reason) return {};
-        log.warn(`denied ${input.tool_name}: ${reason}`);
+        log.warn(`denied ${input.tool_name}${input.agent_id ? ` in subagent ${input.agent_type ?? input.agent_id}` : ""}: ${reason}`);
         return {
           hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: reason },
         };

@@ -31,13 +31,18 @@ export function shouldRotate(state: AgentUserState, now: number, idleHours: numb
 }
 
 /** Fields that clear the active session; the next task starts a new one. */
-export const NO_SESSION = { sessionId: undefined, sessionCostUsd: 0, sessionStartedAt: undefined } as const;
+export const NO_SESSION = {
+  sessionId: undefined,
+  sessionCostUsd: 0,
+  sessionModelCostUsd: undefined,
+  sessionStartedAt: undefined,
+} as const;
 
 /** Patch that retires the active session and keeps it as the one /resume returns to. */
 export function retire(state: AgentUserState): Partial<AgentUserState> {
   if (!state.sessionId) return {};
-  const { sessionId, sessionCostUsd, sessionStartedAt } = state;
-  return { ...NO_SESSION, previousSession: { sessionId, sessionCostUsd, sessionStartedAt } };
+  const { sessionId, sessionCostUsd, sessionModelCostUsd, sessionStartedAt } = state;
+  return { ...NO_SESSION, previousSession: { sessionId, sessionCostUsd, sessionModelCostUsd, sessionStartedAt } };
 }
 
 /**
@@ -48,12 +53,13 @@ export function retire(state: AgentUserState): Partial<AgentUserState> {
 export function resumePrevious(state: AgentUserState, now: number): Partial<AgentUserState> | undefined {
   const prev = state.previousSession;
   if (!prev) return undefined;
-  const { sessionId, sessionCostUsd, sessionStartedAt } = state;
+  const { sessionId, sessionCostUsd, sessionModelCostUsd, sessionStartedAt } = state;
   return {
     sessionId: prev.sessionId,
     sessionCostUsd: prev.sessionCostUsd,
+    sessionModelCostUsd: prev.sessionModelCostUsd,
     sessionStartedAt: prev.sessionStartedAt,
-    previousSession: sessionId ? { sessionId, sessionCostUsd, sessionStartedAt } : undefined,
+    previousSession: sessionId ? { sessionId, sessionCostUsd, sessionModelCostUsd, sessionStartedAt } : undefined,
     lastRunAt: new Date(now).toISOString(),
   };
 }
@@ -70,4 +76,24 @@ export function accountRun(
 ): { sessionCostUsd: number; totalCostUsd: number; deltaUsd: number } {
   const deltaUsd = reportedUsd >= state.sessionCostUsd ? reportedUsd - state.sessionCostUsd : reportedUsd;
   return { sessionCostUsd: reportedUsd, totalCostUsd: state.totalCostUsd + deltaUsd, deltaUsd };
+}
+
+/**
+ * Per-model spend after a result whose modelUsage reported `reportedUsd` (model
+ * id to running total), accounted like accountRun: the totals cover the whole
+ * session, subagents included, so each model's increment since the last result
+ * is what this result added.
+ */
+export function accountModels(
+  state: AgentUserState,
+  reportedUsd: Record<string, number>,
+): { sessionModelCostUsd: Record<string, number>; deltaUsd: Record<string, number> } {
+  const before = state.sessionModelCostUsd ?? {};
+  const deltaUsd: Record<string, number> = {};
+  for (const [model, usd] of Object.entries(reportedUsd)) {
+    const prev = before[model] ?? 0;
+    const delta = usd >= prev ? usd - prev : usd;
+    if (delta > 0) deltaUsd[model] = delta;
+  }
+  return { sessionModelCostUsd: { ...reportedUsd }, deltaUsd };
 }

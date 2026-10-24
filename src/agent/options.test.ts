@@ -28,3 +28,33 @@ test("tasks and memory scans turn Claude Code's own auto memory off", () => {
     assert.deepEqual(options.settings, { autoMemoryEnabled: false }, kind);
   }
 });
+
+test("tasks offer the subagent roles with fixed models, and no role can send files or start subagents", async () => {
+  const { MODELS, SUBAGENT_ROLES } = await import("./config.ts");
+  prepareWorkspace();
+  const options = agentOptions({ ctx: {} as BotContext, userId: "owner", model: "sonnet" });
+  assert.ok(options.tools && Array.isArray(options.tools) && options.tools.includes("Agent"));
+  assert.ok(options.allowedTools?.includes("Agent"));
+  const agents = options.agents ?? {};
+  assert.deepEqual(Object.keys(agents).sort(), Object.keys(SUBAGENT_ROLES).sort());
+  for (const [name, role] of Object.entries(SUBAGENT_ROLES)) {
+    const agent = agents[name];
+    assert.ok(agent, name);
+    assert.equal(agent.model, MODELS[role.model], name);
+    assert.equal(agent.maxTurns, role.maxTurns, name);
+    assert.ok(!agent.tools?.includes("mcp__alfred__send_file"), `${name} lists send_file`);
+    assert.ok(!agent.tools?.includes("Agent"), `${name} lists Agent`);
+    assert.ok(agent.disallowedTools?.includes("mcp__alfred__send_file"), `${name} does not disallow send_file`);
+    assert.ok(agent.disallowedTools?.includes("Agent"), `${name} does not disallow Agent`);
+  }
+  assert.match(String(options.systemPrompt), /# Delegating to subagents/);
+});
+
+test("tasks without subagents drop the Agent tool, the roles and the delegation rules", () => {
+  prepareWorkspace();
+  const options = agentOptions({ ctx: {} as BotContext, userId: "owner", model: "sonnet", subagents: false });
+  assert.ok(Array.isArray(options.tools) && !options.tools.includes("Agent"));
+  assert.ok(!options.allowedTools?.includes("Agent"));
+  assert.equal(options.agents, undefined);
+  assert.doesNotMatch(String(options.systemPrompt), /# Delegating to subagents/);
+});
