@@ -148,7 +148,8 @@ const reserved = new Set<string>();
 /**
  * Image generator for one agent task. Every output path is confined to `root`,
  * existing files are never overwritten, and at most `maxPerTask` images are
- * requested over the generator's lifetime. Aborting `signal` kills a running call.
+ * requested over the generator's lifetime. Aborting `signal`, the task's, kills a running call, and so does
+ * aborting the signal of one call (given to generate).
  */
 export function createImageGenerator(opts: { root: string; bin?: string; run?: MmxRunner; maxPerTask?: number; signal?: AbortSignal }) {
   const { root, bin = MMX_BIN, run = runMmx, maxPerTask = MAX_IMAGES_PER_TASK, signal } = opts;
@@ -180,7 +181,9 @@ export function createImageGenerator(opts: { root: string; bin?: string; run?: M
     }
   }
 
-  return async function generate(req: ImageRequest): Promise<{ files: string[]; failed: number }> {
+  return async function generate(req: ImageRequest, callSignal?: AbortSignal): Promise<{ files: string[]; failed: number }> {
+    // The task's signal and the call's own: either one stops the call.
+    const stop = signal && callSignal ? AbortSignal.any([signal, callSignal]) : (signal ?? callSignal);
     const n = req.n ?? 1;
     if (!Number.isInteger(n) || n < 1 || n > MAX_IMAGES_PER_CALL) throw new Error(`n must be 1 to ${MAX_IMAGES_PER_CALL}.`);
     try {
@@ -191,7 +194,7 @@ export function createImageGenerator(opts: { root: string; bin?: string; run?: M
     if (used + n > maxPerTask) {
       throw new Error(`Image cap reached: this task has requested ${used} of ${maxPerTask} images, so ${n} more are not allowed.`);
     }
-    if (signal?.aborted) throw new Error("The task was stopped.");
+    if (stop?.aborted) throw new Error("The task was stopped.");
     // Everything from the cap check to the reservation is synchronous, so overlapping calls cannot interleave.
     const { base, files } = plan(req, n);
     for (const f of files) reserved.add(f);
@@ -204,7 +207,7 @@ export function createImageGenerator(opts: { root: string; bin?: string; run?: M
       const started = Date.now();
       let result: MmxResult;
       try {
-        result = await run(bin, buildMmxArgs({ prompt: req.prompt, aspectRatio: req.aspectRatio, n, base }), { timeoutMs: TIMEOUT_MS, signal });
+        result = await run(bin, buildMmxArgs({ prompt: req.prompt, aspectRatio: req.aspectRatio, n, base }), { timeoutMs: TIMEOUT_MS, signal: stop });
       } catch (err) {
         log.warn(`${summary}: mmx did not start`);
         throw new Error(`mmx could not start (${bin})`, { cause: err });
