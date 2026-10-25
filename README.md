@@ -438,6 +438,9 @@ node scripts/handler-smoke.ts stop             # two background collectors, then
 node scripts/handler-smoke.ts nested           # a general-purpose subagent starts three background collectors
 node scripts/handler-smoke.ts channels         # WeChat starts a run, the app steers it and starts the next; a pass or fail line per routing rule
 node scripts/handler-smoke.ts api              # the real handler behind the command API on a temp socket, driven over HTTP only; a pass or fail line per check
+node scripts/handler-smoke.ts stream           # replies stream as message.delta, a task is stopped by interrupting its turn, the next message resumes the session
+node scripts/handler-smoke.ts attach           # an upload into the inbox, then a message naming it; the reply must quote the file
+node scripts/handler-smoke.ts ask              # the agent asks a structured question; answered by question.answer, by a plain message, and cancelled by run.stop
 node scripts/handler-smoke.ts prompt "text"    # one message through the real handler, then the spend per model
 node scripts/app-dev.ts --port 8787            # a local Alfred for the app in the simulator: the handler behind the command API, the workbench on 127.0.0.1 with a paired device
 ```
