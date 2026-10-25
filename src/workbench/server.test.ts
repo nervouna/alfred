@@ -15,7 +15,7 @@ process.env.ALFRED_WORKSPACE = workspace;
 process.env.ALFRED_STATE_DIR = state;
 
 const { RunRecorder, writeHeartbeat } = await import("../runs.ts");
-const { ErrorResponseSchema } = await import("../api/schema.ts");
+const { ErrorResponseSchema, RunDetailSchema, RunListSchema } = await import("../api/schema.ts");
 const { AccessVerifier } = await import("./access.ts");
 const { DeviceStore } = await import("./devices.ts");
 const { REPORT_CSP, createHandler, inlineImages, startWorkbench } = await import("./server.ts");
@@ -310,7 +310,7 @@ test("under /api/ only GET and POST are allowed", async () => {
 });
 
 test("an unknown /api/ path answers a 404 JSON body", async () => {
-  for (const p of ["/api/", "/api/nothing", "/api/ping/", "/api/ping/x", "/api/runs", "/api/PING"]) {
+  for (const p of ["/api/", "/api/nothing", "/api/ping/", "/api/ping/x", "/api/runs/", "/api/PING"]) {
     await assertApiError(await fetch(`${open}${p}`, { headers: bearer(paired.token) }), 404, p);
   }
   // Without a device token the path is not revealed.
@@ -370,4 +370,104 @@ test("the Unix socket listener needs the device token for /api/ too, and nothing
   } finally {
     await close();
   }
+});
+
+// --- /api/runs and /api/files ----------------------------------------------
+
+test("GET /api/runs lists the 100 newest runs, newest first, with only the client's fields", async () => {
+  for (let i = 0; i < 101; i++) {
+    const run = new RunRecorder({ kind: "task", title: `bulk ${i}`, startedAt: new Date(Date.UTC(2030, 0, 1, 0, 0, i)).toISOString() });
+    run.finish("done");
+  }
+  const res = await fetch(`${open}/api/runs`, { headers: bearer(paired.token) });
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("content-type"), "application/json; charset=utf-8");
+  assert.equal(res.headers.get("cache-control"), "no-store");
+  const text = await res.text();
+  const list = RunListSchema.parse(JSON.parse(text));
+  assert.equal(list.runs.length, 100);
+  assert.equal(list.runs[0]?.title, "bulk 100");
+  const starts = list.runs.map((r) => r.startedAt);
+  assert.deepEqual(starts, [...starts].sort().reverse(), "newest first");
+  for (const field of ["toolCalls", "updatedAt", "steps"]) assert.ok(!text.includes(`"${field}"`), `${field} is not sent`);
+});
+
+test("GET /api/runs/<id> gives the run and its steps, and 404 for an unknown or malformed id", async () => {
+  const res = await fetch(`${open}/api/runs/${runId}`, { headers: bearer(paired.token) });
+  assert.equal(res.status, 200);
+  const detail = RunDetailSchema.parse(await res.json());
+  assert.equal(detail.run.id, runId);
+  assert.deepEqual(detail.steps.map((s) => s.tool), ["WebFetch"]);
+  for (const p of ["abcdef", "ABCDEF", "abc", `${runId}0`]) {
+    await assertApiError(await fetch(`${open}/api/runs/${p}`, { headers: bearer(paired.token) }), 404, p);
+  }
+});
+
+test("GET /api/runs/<id> has no steps for a run whose run file is gone", async () => {
+  const run = new RunRecorder({ kind: "task", title: "no file" });
+  run.step("WebSearch", "q");
+  run.finish("done");
+  fs.rmSync(path.join(state, "workbench", "runs", `${run.id}.json`));
+  const detail = RunDetailSchema.parse(await (await fetch(`${open}/api/runs/${run.id}`, { headers: bearer(paired.token) })).json());
+  assert.equal(detail.run.id, run.id);
+  assert.deepEqual(detail.steps, []);
+});
+
+test("GET /api/files/<path> serves a workspace file raw, with its type and the sandbox policy", async () => {
+  const get = (p: string) => fetch(`${open}/api/files/${p}`, { headers: bearer(paired.token) });
+  const md = await get("notes/a.md");
+  assert.equal(md.status, 200);
+  assert.equal(md.headers.get("content-type"), "text/plain; charset=utf-8");
+  assert.equal(md.headers.get("content-security-policy"), "sandbox");
+  assert.equal(md.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(await md.text(), fs.readFileSync(path.join(workspace, "notes", "a.md"), "utf8"));
+
+  const png = await get("images/p.png");
+  assert.equal(png.headers.get("content-type"), "image/png");
+  assert.deepEqual([...Buffer.from(await png.arrayBuffer())], [0x89, 0x50, 0x4e, 0x47]);
+
+  const html = await get("reports/r.html");
+  assert.equal(html.headers.get("content-type"), "text/plain; charset=utf-8", "HTML is never served as HTML");
+  assert.equal(html.headers.get("content-security-policy"), "sandbox");
+
+  const svg = await get("reports/c.svg");
+  assert.equal(svg.headers.get("content-type"), "image/svg+xml");
+  assert.equal(svg.headers.get("content-security-policy"), "sandbox");
+});
+
+test("GET /api/files/<path> answers 404 for a missing path, a directory, anything outside the workspace and a .. segment", async () => {
+  const paths = [
+    "",
+    "nope.txt",
+    "notes",
+    "escape/secret.txt",
+    "..%2Fstate%2Faccount.json",
+    "notes%2F..%2F..%2Foutside%2Fsecret.txt",
+    "%2Fetc%2Fpasswd",
+    "notes/../../outside/secret.txt",
+    "notes%2F%2e%2e%2F%2e%2e%2Foutside%2Fsecret.txt",
+    ".git/config",
+    "%00",
+    "%E0%A4%A",
+  ];
+  for (const p of paths) {
+    const res = await fetch(`${open}/api/files/${p}`, { headers: bearer(paired.token) });
+    const body = await res.text();
+    assert.equal(res.status, 404, p);
+    assert.ok(ErrorResponseSchema.safeParse(JSON.parse(body)).success, p);
+    assert.ok(!body.includes(SECRET), p);
+  }
+});
+
+test("the run and file routes need a device token, and refuse other methods with 405", async () => {
+  const routes = ["/api/runs", `/api/runs/${runId}`, "/api/files/notes/a.md"];
+  for (const p of routes) {
+    await assertApiError(await fetch(`${open}${p}`), 401, `${p} without a token`);
+    await assertApiError(await fetch(`${guarded}${p}`), 403, `${p} on the tunnel without Access`);
+    const wrong = await fetch(`${open}${p}`, { method: "POST", headers: bearer(paired.token), body: "{}" });
+    assert.equal(wrong.status, 405, `POST ${p}`);
+    assert.equal(wrong.headers.get("allow"), "GET", `POST ${p}`);
+  }
+  const ping = await fetch(`${open}/api/ping`, { method: "POST", headers: bearer(paired.token), body: "{}" });
+  assert.equal(ping.headers.get("allow"), "GET", "POST /api/ping");
 });

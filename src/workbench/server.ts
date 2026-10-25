@@ -6,7 +6,9 @@
 // /api/ is the native app's way in. It takes GET and POST, and on every listener
 // it wants a bearer token of a paired, unrevoked device (devices.ts). On the
 // tunnel the Access JWT comes first, and may be the owner's or the app's
-// service token's; the pages accept the owner's only.
+// service token's; the pages accept the owner's only. Its commands, event stream
+// and uploads are forwarded to Alfred's command socket (forward.ts); its runs and
+// workspace files are read here.
 
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -15,11 +17,14 @@ import path from "node:path";
 
 import { resolveInside } from "../agent/guard.ts";
 import { loadMemories } from "../agent/memory.ts";
-import type { ErrorResponse } from "../api/schema.ts";
+import { RunSchema, StepSchema } from "../api/schema.ts";
+import type { Run, RunDetail } from "../api/schema.ts";
+import { apiSocketPath } from "../api/server.ts";
 import { describeError, log } from "../log.ts";
 import type { AccessVerifier } from "./access.ts";
 import { allRuns, alfredStatus, listSessions, readTranscript, runDetail, spendByDay, tailLog } from "./data.ts";
 import { DeviceStore } from "./devices.ts";
+import { forwardCommand, forwardEvents, forwardUpload, jsonError, jsonReply } from "./forward.ts";
 import { html, trusted } from "./html.ts";
 import type { Html } from "./html.ts";
 import { renderMarkdown } from "./markdown.ts";
@@ -89,7 +94,10 @@ class HttpError extends Error {
 interface Response {
   status?: number;
   headers: Record<string, string>;
-  body: string | Buffer | fs.ReadStream;
+  /** A stream: a workspace file, or Alfred's event stream as it arrives. */
+  body: string | Buffer | fs.ReadStream | http.IncomingMessage;
+  /** The request body was not read to its end, so the connection closes once the response is sent. */
+  closeConnection?: boolean;
 }
 
 function htmlResponse(markup: string, csp: string, status = 200): Response {
@@ -171,29 +179,23 @@ function fileContent(ext: string, rel: string, real: string, stat: fs.Stats): Ht
   return html`<p class="meta">这种文件不能预览，请下载。</p>`;
 }
 
+/** The content type a raw file is served as, by extension. Markup goes out as text, so it never runs as a document of this origin. */
+function rawContentType(ext: string): string {
+  if (IMAGE_TYPES[ext]) return IMAGE_TYPES[ext];
+  if (ext === ".pdf") return "application/pdf";
+  if (ext === ".svg") return "image/svg+xml";
+  if (ext === ".html" || ext === ".htm" || TEXT_EXTS.has(ext)) return "text/plain; charset=utf-8";
+  return "application/octet-stream";
+}
+
 function serveRaw(real: string, rel: string, stat: fs.Stats, download: boolean): Response {
   const ext = path.extname(real).toLowerCase();
   const name = path.basename(real);
-  const headers: Record<string, string> = { "Content-Length": String(stat.size), "Content-Security-Policy": RAW_CSP };
-  if (IMAGE_TYPES[ext]) {
-    headers["Content-Type"] = IMAGE_TYPES[ext];
-  } else if (ext === ".pdf") {
-    headers["Content-Type"] = "application/pdf";
-    // A browser's PDF viewer does not run in a sandboxed document.
-    delete headers["Content-Security-Policy"];
-  } else if (ext === ".svg") {
-    // An <img> still shows it; opened directly, it downloads instead of running here.
-    headers["Content-Type"] = "image/svg+xml";
-    download = true;
-  } else if (ext === ".html" || ext === ".htm") {
-    headers["Content-Type"] = "text/plain; charset=utf-8";
-    download = true;
-  } else if (TEXT_EXTS.has(ext)) {
-    headers["Content-Type"] = "text/plain; charset=utf-8";
-  } else {
-    headers["Content-Type"] = "application/octet-stream";
-    download = true;
-  }
+  const headers: Record<string, string> = { "Content-Length": String(stat.size), "Content-Type": rawContentType(ext), "Content-Security-Policy": RAW_CSP };
+  // A browser's PDF viewer does not run in a sandboxed document.
+  if (ext === ".pdf") delete headers["Content-Security-Policy"];
+  // Only images, PDFs and text open here; SVG and HTML, and anything unknown, download. An <img> still shows SVG.
+  if (!IMAGE_TYPES[ext] && ext !== ".pdf" && !TEXT_EXTS.has(ext)) download = true;
   headers["Content-Disposition"] = disposition(download ? "attachment" : "inline", name);
   log.debug(`workbench raw ${rel}`);
   return { headers, body: fs.createReadStream(real) };
@@ -205,10 +207,16 @@ export interface HandlerOptions {
   access?: AccessVerifier;
   /** The paired devices /api/ authenticates against; the default store when omitted. */
   devices?: DeviceStore;
+  /** Alfred's command socket for /api/ to forward to; ALFRED_API_SOCKET when omitted. */
+  apiSocket?: string;
 }
 
 const API_PREFIX = "/api/";
 const BEARER = /^Bearer ([A-Za-z0-9_-]{1,256})$/i;
+const RUN_PATH = /^\/api\/runs\/([2-9a-hjkmnp-z]{6})$/;
+const FILE_PATH = "/api/files/";
+/** How many runs GET /api/runs lists, newest first. */
+const LISTED_RUNS = 100;
 
 /** The device token in an Authorization header, or why there is none. */
 function bearerToken(header: string | undefined): { token: string } | { reason: string } {
@@ -282,37 +290,114 @@ function accessToken(req: http.IncomingMessage): string | undefined {
   return Array.isArray(token) ? token[0] : token;
 }
 
-function jsonError(status: number, message: string, headers: Record<string, string> = {}): Response {
-  const body: ErrorResponse = { error: message };
-  return { status, headers: { "Content-Type": "application/json; charset=utf-8", ...headers }, body: JSON.stringify(body) };
+interface ApiContext {
+  access?: AccessVerifier;
+  devices: DeviceStore;
+  workspace: string;
+  /** Alfred's command socket; undefined when the API is off. */
+  alfred?: string;
+  /** Aborted when the client goes away. */
+  gone: AbortSignal;
+}
+
+/** GET /api/runs: the newest runs, each through RunSchema so that only the client's fields go out. A record that does not fit is left out and logged. */
+function runList(): Response {
+  const runs: Run[] = [];
+  let left = 0;
+  for (const record of allRuns()) {
+    if (runs.length === LISTED_RUNS) break;
+    const parsed = RunSchema.safeParse(record);
+    if (parsed.success) runs.push(parsed.data);
+    else left++;
+  }
+  if (left) log.warn(`workbench left out ${left} run record(s) that do not fit the client's schema`);
+  return jsonReply(200, { runs });
+}
+
+/** GET /api/runs/<id>: the run and its steps. An unknown run is 404; a record that does not fit fails the request, and is logged. */
+function runDetailReply(id: string): Response {
+  const detail = runDetail(id);
+  if (!detail) return jsonError(404, "There is no such run.");
+  const run = RunSchema.safeParse(detail.record);
+  if (!run.success) throw new Error(`run ${id} does not fit the client's schema: ${run.error.message}`);
+  const body: RunDetail = { run: run.data, steps: (detail.file?.steps ?? []).map((step) => StepSchema.parse(step)) };
+  return jsonReply(200, body);
+}
+
+/** GET /api/files/<path>: a workspace file's bytes, typed by extension as the pages type them, under the sandbox policy. */
+function fileReply(workspace: string, rest: string): Response {
+  const notFound = () => jsonError(404, "There is no such file.");
+  let rel: string;
+  try {
+    rel = decodeURIComponent(rest);
+  } catch {
+    return notFound();
+  }
+  if (rel.includes("\0")) return notFound();
+  let target: ReturnType<typeof workspacePath>;
+  try {
+    target = workspacePath(workspace, rel);
+  } catch (err) {
+    if (err instanceof HttpError) return notFound();
+    throw err;
+  }
+  if (!target.stat.isFile()) return notFound();
+  const type = rawContentType(path.extname(target.real).toLowerCase());
+  return { headers: { "Content-Type": type, "Content-Length": String(target.stat.size), "Content-Security-Policy": "sandbox" }, body: fs.createReadStream(target.real) };
 }
 
 /** The app's way in: the Access JWT (owner or service token) on the tunnel, then a paired device's bearer token everywhere. */
-async function apiRoute(req: http.IncomingMessage, url: URL, access: AccessVerifier | undefined, devices: DeviceStore): Promise<Response> {
+async function apiRoute(req: http.IncomingMessage, url: URL, ctx: ApiContext): Promise<Response> {
   const refuse = (status: number, reason: string, message: string, headers?: Record<string, string>) => {
     log.warn(`workbench refused ${req.method ?? ""} ${url.pathname}: ${reason}`);
     return jsonError(status, message, headers);
   };
-  if (access) {
-    const verdict = await access.verify(accessToken(req));
+  if (ctx.access) {
+    const verdict = await ctx.access.verify(accessToken(req));
     if ("error" in verdict) return refuse(403, verdict.error, "Cloudflare Access sign-in is required.");
   }
   const bearer = bearerToken(req.headers.authorization);
-  const device = "token" in bearer ? devices.authenticate(bearer.token) : undefined;
+  const device = "token" in bearer ? ctx.devices.authenticate(bearer.token) : undefined;
   if (!device) {
     return refuse(401, "token" in bearer ? "not a paired device" : bearer.reason, "A paired device's token is required.", { "WWW-Authenticate": "Bearer" });
   }
-  if (req.method !== "GET" && req.method !== "POST") return jsonError(405, "Only GET and POST are allowed.", { Allow: "GET, POST" });
-  if (req.method === "GET" && url.pathname === "/api/ping") return { status: 204, headers: {}, body: "" };
+  const method = req.method ?? "";
+  if (method !== "GET" && method !== "POST") return jsonError(405, "Only GET and POST are allowed.", { Allow: "GET, POST" });
+  // A route takes one method; any other gets 405 naming it.
+  const only = (want: "GET" | "POST", handle: () => Response | Promise<Response>) =>
+    method === want ? handle() : jsonError(405, `Only ${want} is allowed here.`, { Allow: want });
+  const p = url.pathname;
+  if (p === "/api/ping") return only("GET", () => ({ status: 204, headers: {}, body: "" }));
+  if (p === "/api/commands") return only("POST", () => forwardCommand(req, ctx.alfred, ctx.gone));
+  if (p === "/api/uploads") return only("POST", () => forwardUpload(req, url.searchParams.get("name"), ctx.alfred, ctx.gone));
+  if (p === "/api/events") return only("GET", () => forwardEvents(req, url, ctx.alfred, ctx.gone));
+  if (p === "/api/runs") return only("GET", () => runList());
+  const run = RUN_PATH.exec(p)?.[1];
+  if (run) return only("GET", () => runDetailReply(run));
+  if (p.startsWith(FILE_PATH)) return only("GET", () => fileReply(ctx.workspace, p.slice(FILE_PATH.length)));
   return jsonError(404, "There is no such endpoint.");
 }
 
 export function createHandler(opts: HandlerOptions): (req: http.IncomingMessage, res: http.ServerResponse) => Promise<void> {
   const devices = opts.devices ?? new DeviceStore();
+  const alfred = opts.apiSocket ?? apiSocketPath();
   return async (req, res) => {
+    // Aborted when the client goes away, which also ends any request or stream forwarded to Alfred.
+    const gone = new AbortController();
+    res.once("close", () => gone.abort());
     const send = (r: Response) => {
-      res.writeHead(r.status ?? 200, { ...BASE_HEADERS, ...r.headers });
-      if (r.body instanceof fs.ReadStream) {
+      const headers = { ...BASE_HEADERS, ...r.headers };
+      if (r.closeConnection) headers.Connection = "close";
+      res.writeHead(r.status ?? 200, headers);
+      // The request body was refused unread: the connection goes once the reply is out, rather than reading the rest.
+      if (r.closeConnection) res.once("finish", () => req.destroy());
+      if (r.body instanceof http.IncomingMessage) {
+        // Alfred's stream goes out as it arrives. A broken upstream ends the response where it stands.
+        res.flushHeaders();
+        r.body.on("error", () => res.end());
+        r.body.once("close", () => res.end());
+        r.body.pipe(res);
+      } else if (r.body instanceof fs.ReadStream) {
         r.body.on("error", () => res.destroy());
         r.body.pipe(res);
       } else {
@@ -328,7 +413,9 @@ export function createHandler(opts: HandlerOptions): (req: http.IncomingMessage,
       // Answered as a page request below.
     }
     try {
-      if (url?.pathname.startsWith(API_PREFIX)) return send(await apiRoute(req, url, opts.access, devices));
+      if (url?.pathname.startsWith(API_PREFIX)) {
+        return send(await apiRoute(req, url, { access: opts.access, devices, workspace: opts.workspace, alfred, gone: gone.signal }));
+      }
       if (req.method !== "GET") {
         res.writeHead(405, { ...BASE_HEADERS, Allow: "GET", "Content-Type": "text/plain; charset=utf-8" });
         res.end("Only GET is allowed.\n");
@@ -349,6 +436,8 @@ export function createHandler(opts: HandlerOptions): (req: http.IncomingMessage,
       send(await route(url, opts.workspace));
     } catch (err) {
       if (url?.pathname.startsWith(API_PREFIX)) {
+        // A client that went away mid-request is not an error of ours.
+        if (gone.signal.aborted) return;
         log.error(`workbench ${url.pathname} failed: ${describeError(err)}`);
         return send(jsonError(500, "Something went wrong; see the log."));
       }
