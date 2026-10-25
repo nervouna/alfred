@@ -79,6 +79,44 @@ test("the push rule: an app reply always pushes; a WeChat reply pushes only when
   assert.equal(notificationFor(runEvent(6)), undefined, "a run update");
 });
 
+/** A question.asked event; the defaults are one question for run abcdef. */
+function questionEvent(id: number, questions: string[] = ["报告用哪种格式？"]): Event {
+  const option = (label: string) => ({ label, description: `${label}的说明` });
+  return {
+    id,
+    at: AT,
+    type: "question.asked",
+    data: {
+      id: `q-${id}`,
+      runId: "abcdef",
+      questions: questions.map((question) => ({ question, header: "格式", options: [option("甲"), option("乙")], multiSelect: false })),
+    },
+  };
+}
+
+test("a question pushes with the first question as its body, and carries the event and run ids", () => {
+  assert.deepEqual(notificationFor(questionEvent(21)), {
+    aps: { alert: { title: "Alfred", body: "Alfred 想问你：报告用哪种格式？" }, sound: "default", "thread-id": "chat" },
+    eventId: 21,
+    runId: "abcdef",
+  });
+  assert.equal(notificationFor(questionEvent(22, ["第一个？", "第二个？"]))?.aps.alert.body, "Alfred 想问你：第一个？", "only the first question");
+});
+
+test("the question in the body is cut like other bodies: 100 characters, then an ellipsis", () => {
+  const bodyOf = (question: string) => notificationFor(questionEvent(1, [question]))?.aps.alert.body;
+  assert.equal(bodyOf("a".repeat(100)), `Alfred 想问你：${"a".repeat(100)}`, "exactly 100 is not cut");
+  assert.equal(bodyOf("a".repeat(101)), `Alfred 想问你：${"a".repeat(100)}…`);
+  assert.equal(bodyOf("好".repeat(150)), `Alfred 想问你：${"好".repeat(100)}…`, "counted in characters, not bytes");
+});
+
+test("an answer to a question does not push", () => {
+  const answered: Event = { id: 23, at: AT, type: "question.answered", data: { id: "q-21", runId: "abcdef", answers: { "报告用哪种格式？": "甲" } } };
+  assert.equal(notificationFor(answered), undefined);
+  const cancelled: Event = { id: 24, at: AT, type: "question.answered", data: { id: "q-21", runId: "abcdef", answers: {}, cancelled: true } };
+  assert.equal(notificationFor(cancelled), undefined);
+});
+
 test("a notification says Alfred, plays the default sound in the chat thread, and carries the event and run ids", () => {
   assert.deepEqual(notificationFor(messageEvent(12, { channel: "app", text: "报告好了", runId: "k7m2qa" })), {
     aps: { alert: { title: "Alfred", body: "报告好了" }, sound: "default", "thread-id": "chat" },

@@ -32,6 +32,7 @@ export type Sender = Pick<ApnsClient, "send">;
 const TITLE = "Alfred";
 const BODY_CHARS = 100;
 const WECHAT_FAILED = "微信未送达：";
+const QUESTION_ASKED = "Alfred 想问你：";
 
 /** A notification with this body; `eventId` and `runId` are included only when given. */
 export function notify(body: string, eventId?: number, runId?: string): Notification {
@@ -45,9 +46,14 @@ export function notify(body: string, eventId?: number, runId?: string): Notifica
  * The push rule: which events notify the owner, and what each notification says. An
  * outbound message on the app channel always does. An outbound WeChat message does only
  * when WeChat refused it, because what WeChat delivered is already on the owner's phone.
- * A new event that should notify is added here.
+ * A question Alfred asks always does, with the first question as its body: a run is waiting
+ * for the answer. A new event that should notify is added here.
  */
 export function notificationFor(event: Event): Notification | undefined {
+  if (event.type === "question.asked") {
+    const first = event.data.questions[0];
+    return first ? notify(`${QUESTION_ASKED}${clip(first.question)}`, event.id, event.data.runId) : undefined;
+  }
   if (event.type !== "message.created") return undefined;
   const message = event.data;
   if (message.direction !== "out") return undefined;

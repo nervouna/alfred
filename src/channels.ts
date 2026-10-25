@@ -54,6 +54,19 @@ export interface Intake {
   submit(source: InboundSource): Promise<void>;
   /** Stops a live run of the owner's (the task, one of its background subagents, or a queued one) and says so on `channel`. False when there is no such run. */
   stopRun(runId: string, channel: Channel): Promise<boolean>;
+  /**
+   * Answers an open question with `answers`, keyed by the texts of its questions. False when no such question is open.
+   * Rejects with InvalidAnswer, leaving the question open, when a key is not the text of one of its questions.
+   */
+  answerQuestion(id: string, answers: Record<string, string>): Promise<boolean>;
+}
+
+/** An answer to a question keyed by something that is not the text of one of the question's questions. */
+export class InvalidAnswer extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidAnswer";
+  }
 }
 
 /** The app channel: nothing is sent anywhere, the message event is the delivery. */

@@ -1,10 +1,10 @@
 // The command API: the owner's commands in, Alfred's events out, over a Unix
-// socket (no TCP listener). A process on the same host posts message.send and
-// run.stop to /commands, uploads files to /uploads (into the workspace's inbox,
-// for a message to name) and follows /events as server-sent events, resuming by
-// event id. Every command is validated here by parseCommand. Live events (reply
-// text as it is written, the steps of a run) go out as frames without an id and
-// are never replayed.
+// socket (no TCP listener). A process on the same host posts message.send,
+// run.stop and question.answer to /commands, uploads files to /uploads (into the
+// workspace's inbox, for a message to name) and follows /events as server-sent
+// events, resuming by event id. Every command is validated here by parseCommand.
+// Live events (reply text as it is written, the steps of a run) go out as frames
+// without an id and are never replayed.
 
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -12,6 +12,7 @@ import http from "node:http";
 import path from "node:path";
 
 import { resolveInside } from "../agent/guard.ts";
+import { InvalidAnswer } from "../channels.ts";
 import type { Intake } from "../channels.ts";
 import { type EventLog, isLiveEvent } from "../events.ts";
 import { localDate, localTime, sanitizeFileName, uniquePath } from "../files.ts";
@@ -221,6 +222,15 @@ export async function startApi(opts: ApiOptions): Promise<() => Promise<void>> {
     if (command.type === "run.stop") {
       if (await handler.stopRun(command.runId, "app")) return sendJson(res, 202, { stopped: true });
       return sendJson(res, 404, { error: `no live or queued run ${command.runId}` });
+    }
+    if (command.type === "question.answer") {
+      try {
+        if (await handler.answerQuestion(command.questionId, command.answers)) return sendJson(res, 202, { answered: true });
+      } catch (err) {
+        if (err instanceof InvalidAnswer) return sendJson(res, 400, { error: err.message });
+        throw err;
+      }
+      return sendJson(res, 404, { error: `no open question ${command.questionId}` });
     }
     // A message's files are checked before anything is submitted: one that is not in the inbox refuses the message.
     const files = command.files ?? [];

@@ -48,7 +48,7 @@ test("a live event comes without an id, and describeEvent calls it live", async 
   const socket = path.join(dir, "api", "a.sock");
   const events = new EventLog(path.join(dir, "events.jsonl"));
   events.append("run.updated", run);
-  const close = await startApi({ socket, handler: { submit: async () => {}, stopRun: async () => false }, events });
+  const close = await startApi({ socket, handler: { submit: async () => {}, stopRun: async () => false, answerQuestion: async () => false }, events });
   t.after(close);
 
   const frames: { id: number; type: string; data: string }[] = [];
@@ -73,7 +73,7 @@ test("streamEvents reads the backlog and live events, resumes by id and stops wh
   const socket = path.join(dir, "api", "a.sock");
   const events = new EventLog(path.join(dir, "events.jsonl"));
   for (let i = 0; i < 3; i++) events.append("run.updated", run);
-  const close = await startApi({ socket, handler: { submit: async () => {}, stopRun: async () => false }, events });
+  const close = await startApi({ socket, handler: { submit: async () => {}, stopRun: async () => false, answerQuestion: async () => false }, events });
   t.after(close);
 
   const ids = async (opts: Parameters<typeof streamEvents>[1], count: number) => {

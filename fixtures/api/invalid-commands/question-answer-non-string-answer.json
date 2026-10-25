@@ -1,0 +1,7 @@
+{
+  "type": "question.answer",
+  "questionId": "q-8f2a41c0",
+  "answers": {
+    "要对比哪些供应商？": ["Hetzner", "Vultr"]
+  }
+}
