@@ -1,0 +1,25 @@
+name: iOS
+
+on:
+  pull_request:
+    paths:
+      - "ios/**"
+      - "fixtures/**"
+      - ".github/workflows/ios.yml"
+  push:
+    branches: [main]
+    paths:
+      - "ios/**"
+      - "fixtures/**"
+      - ".github/workflows/ios.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  alfredkit:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v5
+      - run: xcodebuild -version && swift --version
+      - run: swift test --package-path ios/AlfredKit
