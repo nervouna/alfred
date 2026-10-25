@@ -125,7 +125,7 @@ cd ~/alfred && git pull && podman build -t localhost/alfred:latest . && systemct
 
 ### Workbench
 
-A read-only web page for following Alfred's work: one card per run with live progress and the files it wrote, the workspace with Markdown, image and PDF preview, HTML reports, spend, session transcripts, memory and logs. You still talk to Alfred only in WeChat. The workbench never sends anything to Alfred, and Alfred never reads from it.
+A read-only web page for following Alfred's work: one card per run with live progress and the files it wrote, the workspace with Markdown, image and PDF preview, HTML reports, spend, session transcripts, memory and logs. You talk to Alfred in WeChat, or from the native app through `/api/` (below). The pages never send anything to Alfred, and Alfred never reads from the workbench.
 
 - **Runs.** Every task (and every memory scan that called the model) is a run with a short id such as `k7m2qa`.
   - The id shows on its card, with a button that copies it, in the 3-minute progress notes, in `/status` and in the logs.
@@ -133,25 +133,47 @@ A read-only web page for following Alfred's work: one card per run with live pro
   - Paste an id into a WeChat message ("把 k7m2qa 的报告改成英文") and the run's title, status and file list are added to the prompt.
 - **HTML reports** open in a sandboxed frame. Inline scripts, styles and SVG run, so charts draw, but the frame has an opaque origin and a policy that blocks every request, so a report can neither read the workbench nor send anything out. Workspace images are inlined as `data:` URIs. With `ALFRED_WORKBENCH=on` (or a URL), the agent is told that HTML reports can be read here and need a PDF only when you want one.
 - **Delivery is best effort.** A reply or `send_file` that WeChat refuses (for example `ret=-2` once the 24-hour push window has closed) is sent once, logged, and marked on the run's card as not delivered; nothing is retried or queued. Your next WeChat message first gets one line naming those runs.
-- **Read-only.** Every endpoint answers only `GET`. The workbench reads `$ALFRED_STATE_DIR/workbench/` (`runs.jsonl` for good, `runs/<id>.json` with the step timeline for 30 days, `status.json` as the heartbeat, `alfred.log`), the transcripts under `claude/projects/`, and the workspace. All output is escaped, Markdown renders without raw HTML, paths are confined to the workspace, and HTML and SVG files download instead of opening outside the report viewer.
-- **Two listeners.** TCP (`ALFRED_WORKBENCH_LISTEN`, default `127.0.0.1:8787`) is for a Cloudflare tunnel. Every request there needs a valid `Cf-Access-Jwt-Assertion`: an RS256 signature from the team's keys, the application's AUD tag, the team's issuer, a token that has not expired, and the owner's email. A Unix socket (`ALFRED_WORKBENCH_SOCKET`, created 0600) needs no token, for an SSH tunnel: `ssh -N -L 8787:/home/<user>/data/workbench-socket/workbench.sock <host>`, then open `http://localhost:8787`.
-- `node src/cli.ts workbench --dev` serves on loopback without the Access check, for local testing.
+- **Read-only.** Every page answers only `GET` (`/api/` is the app's way in, below). The workbench reads `$ALFRED_STATE_DIR/workbench/` (`runs.jsonl` for good, `runs/<id>.json` with the step timeline for 30 days, `status.json` as the heartbeat, `alfred.log`), the transcripts under `claude/projects/`, and the workspace. All output is escaped, Markdown renders without raw HTML, paths are confined to the workspace, and HTML and SVG files download instead of opening outside the report viewer.
+- **Two listeners.** TCP (`ALFRED_WORKBENCH_LISTEN`, default `127.0.0.1:8787`) is for a Cloudflare tunnel. Every request there needs a valid `Cf-Access-Jwt-Assertion`: an RS256 signature from the team's keys, the application's AUD tag, the team's issuer, a token that has not expired, and the owner's email. A Unix socket (`ALFRED_WORKBENCH_SOCKET`, created 0600) needs no Access token (`/api/` still wants a device token), for an SSH tunnel: `ssh -N -L 8787:/home/<user>/data/workbench-socket/workbench.sock <host>`, then open `http://localhost:8787`.
+- **App access.** The native app calls `/api/` on the workbench; the pages stay the owner's. `/api/` takes `GET` and `POST`, its errors are JSON (`{"error": "…"}`) and never cached. Two checks come first, in order:
+  - **Access.** On the tunnel, `/api/` takes the owner's `Cf-Access-Jwt-Assertion` or the one of the app's Access service token, whose `common_name` is the token's client id (`CF_ACCESS_SERVICE_CLIENT_ID`) and which has no email. Either must still pass the signature, AUD, issuer and expiry checks above; otherwise 403. A service-token JWT gets 403 on every page, and without `CF_ACCESS_SERVICE_CLIENT_ID` service tokens are refused.
+  - **Device token.** On every listener, the socket and `--dev` included, the request needs `Authorization: Bearer <device token>` of a paired, unrevoked device. A missing, malformed, unknown or revoked token gets 401 with `WWW-Authenticate: Bearer`. Refusals are logged with their reason, never with a token.
+
+  After those checks, the routes (a method a route does not take gets 405 with `Allow`; an unknown path gets 404):
+  - `GET /api/ping` answers 204.
+  - `POST /api/commands` takes a command as the Command API does (`message.send`, `run.stop`). It is checked with `parseCommand` first: a body that is not `application/json`, not JSON or not a valid command gets 400 `{"error": "…"}` and nothing is sent. A valid command goes to Alfred's socket, and Alfred's status and body come back unchanged. Over 65,536 bytes is 413.
+  - `GET /api/events` relays Alfred's event stream as it arrives, passing on `Last-Event-ID` or `?after=`. A client that goes away closes Alfred's request; when Alfred ends or breaks the stream, the response ends.
+  - `POST /api/uploads?name=<name>` streams the body to Alfred's `/uploads` and relays the answer. A declared length over 52,428,800 bytes is 413 before anything is sent; an undeclared one is cut with 413 once it passes that limit.
+  - `GET /api/runs` answers `RunList`: the 100 newest runs, newest first, with only the fields the client shows.
+  - `GET /api/runs/<id>` answers `RunDetail`: the run and its steps. An unknown or malformed id is 404.
+  - `GET /api/files/<path>` streams a workspace file's bytes, typed by extension as the pages type them, under `Content-Security-Policy: sandbox`. A missing path, a directory, a path outside the workspace and a `..` segment are all 404.
+  - While Alfred's socket cannot be reached (Alfred restarting, or the API off), the three forwarding routes answer 503 `{"error": "…"}`, and the app retries.
+
+  The socket is `ALFRED_API_SOCKET` (`deploy/workbench.container` mounts its directory read-only). The workbench holds no Alfred secret and forwards only the command set.
+- **Pairing.** `node src/cli.ts pair [--name <name>]` (name default `iPhone`) creates a device and shows one QR code with the server URL (`ALFRED_WORKBENCH_URL`, an `https://` origin), the Access service token (`CF_ACCESS_SERVICE_CLIENT_ID` and `CF_ACCESS_SERVICE_CLIENT_SECRET`) and the new device's token, so one scan sets the app up. The tokens appear nowhere but in the QR code; `--json` prints the same pairing as JSON instead, for scripts. On the host: `podman exec -it workbench node src/cli.ts pair --name <name>`.
+- **Revoking.** `node src/cli.ts devices` lists the devices with their ids, names, creation and revocation times, and `devices revoke <id>` locks one out. The workbench re-reads `devices.json` when the file changes, so the next request from that device is refused, with no restart. The file keeps only a SHA-256 of each device token, so a token lost with its phone cannot be read back: revoke the device and pair again.
+- `node src/cli.ts workbench --dev` serves on loopback without the Access check, for local testing. `/api/` still wants a device token there.
 
 On the host, the workbench and a dedicated `cloudflared` run in their own pod (`deploy/workbench.pod`, `workbench.container`, `workbench-tunnel.container`). They use the Alfred image, so `deploy/update.sh` restarts the workbench after an update. In the Cloudflare dashboard, create a remotely managed tunnel whose public hostname points at `http://localhost:8787`, and an Access application on that hostname that allows only your email. Then:
 
 ```bash
-mkdir -p ~/data/state/workbench ~/data/state/claude/projects ~/data/workbench-socket ~/.config/alfred
+mkdir -p ~/data/state/workbench ~/data/state/api ~/data/state/claude/projects ~/data/workbench-socket ~/data/workbench-app ~/.config/alfred
 read -rs TOKEN && printf %s "$TOKEN" | podman secret create workbench_tunnel_token - && unset TOKEN   # the tunnel token
 cat > ~/.config/alfred/workbench.env <<'ENV'
 CF_ACCESS_TEAM_DOMAIN=<team>.cloudflareaccess.com
 CF_ACCESS_AUD=<the Access application's AUD tag>
 ALFRED_WORKBENCH_OWNER_EMAIL=<your email>
+# For the app:
+CF_ACCESS_SERVICE_CLIENT_ID=<the service token's client id, ending in .access>
+CF_ACCESS_SERVICE_CLIENT_SECRET=<its client secret>
+ALFRED_WORKBENCH_URL=https://<hostname>
 ENV
 install -m644 deploy/workbench.pod deploy/workbench.container deploy/workbench-tunnel.container ~/.config/containers/systemd/
 systemctl --user daemon-reload && systemctl --user start workbench-pod
 ```
 
-- The workbench container mounts only what it shows, read-only: `account.json`, the context tokens and the rest of the state dir are not mounted. Its root filesystem is read-only too, and the socket directory is its one writable path.
+- For the app, create a service token in Cloudflare Zero Trust (Access, Service Auth), add a policy with the Service Auth action that includes it to the Access application, and put its client id and secret in `workbench.env` as above. Then pair with `podman exec -it workbench node src/cli.ts pair --name <name>`.
+- The workbench container mounts only what it shows, read-only: `account.json`, the context tokens and the rest of the state dir are not mounted. The one exception is the directory of Alfred's command socket (`~/data/state/api`), which `/api/` forwards to. Its root filesystem is read-only too, and two directories are writable: the socket directory and `~/data/workbench-app`, where `devices.json` lives.
 - Once the workbench is up, set `Environment=ALFRED_WORKBENCH=on` for Alfred in a drop-in such as `~/.config/containers/systemd/alfred.container.d/workbench.conf` (under `[Container]`, as above), not in `alfred.container` itself, then `systemctl --user daemon-reload` and `deploy/update.sh --restart`. Add `Environment=ALFRED_WORKBENCH_URL=https://<hostname>` there when WeChat opens the link and gets through the Access sign-in; leave it unset if it does not, and replies carry the run id only.
 
 ### In WeChat
@@ -324,6 +346,7 @@ Verified WeChat behavior (2026-10-10):
 | `$XDG_STATE_HOME/alfred/claude/` | isolated Claude Code config dir: agent session transcripts used for resume |
 | `$XDG_STATE_HOME/alfred/workspace-plugin/` | the `workspace` skills plugin: a manifest and the `skills` symlink into the workspace, recreated at startup |
 | `$XDG_STATE_HOME/alfred/workbench/` | what the workbench reads: `runs.jsonl` (one line per finished run, kept for good), `runs/<id>.json` (live and recent runs with their steps, kept 30 days), `status.json` (heartbeat), `alfred.log` (the log, rotated at 5 MB to `alfred.log.1`) |
+| `$ALFRED_WORKBENCH_STATE` (default `$XDG_STATE_HOME/alfred/app/`) | `devices.json`: the app's paired devices, each with its id, name, creation and revocation times and the SHA-256 of its token, never the token; the directory is mode 700 and the file 600, rewritten atomically. The workbench re-reads it when it changes |
 | `~/Alfred/` (override with `ALFRED_WORKSPACE`) | `ALFRED.md` (workspace rules), `inbox/`, `reports/`, `notes/`, `images/`, `memory/` (long-term memory), `skills/` (the owner's skills), `.trash/` |
 | `$XDG_CACHE_HOME/alfred/ms-playwright/` (default `~/.cache/…`, override with `PLAYWRIGHT_BROWSERS_PATH`) | Chrome Headless Shell for PDF rendering |
 
@@ -339,10 +362,12 @@ Verified WeChat behavior (2026-10-10):
 | `ALFRED_MEMORY_SCAN_BUDGET_USD` | `0.1` | spend cap for one memory scan; must be a finite number > 0 |
 | `ALFRED_API_SOCKET` | `$STATE_DIR/api/alfred.sock` | the command API's Unix socket (see Command API); `off` disables the API |
 | `ALFRED_WORKBENCH` | off | `on` when a workbench is deployed: the agent is told HTML reports can be read there |
-| `ALFRED_WORKBENCH_URL` | none | the workbench's https base URL, for card links in WeChat replies; implies `ALFRED_WORKBENCH=on` |
+| `ALFRED_WORKBENCH_URL` | none | the workbench's https base URL, for card links in WeChat replies (implies `ALFRED_WORKBENCH=on`) and as the server in the pairing QR code, where it must be an origin with no path |
 | `ALFRED_WORKBENCH_LISTEN` | `127.0.0.1:8787` | the workbench's TCP listener (`host:port`, or `off`); needs the three Access variables below unless `--dev` |
 | `ALFRED_WORKBENCH_SOCKET` | none | the workbench's Unix socket for the SSH-tunnel fallback |
 | `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUD`, `ALFRED_WORKBENCH_OWNER_EMAIL` | none | the Access team domain, the application's AUD tag and the one email allowed in |
+| `CF_ACCESS_SERVICE_CLIENT_ID`, `CF_ACCESS_SERVICE_CLIENT_SECRET` | none | the Access service token the app uses: the workbench accepts its JWT on `/api/` when the client id matches (without it service tokens are refused), and `pair` puts both in the QR code |
+| `ALFRED_WORKBENCH_STATE` | `$ALFRED_STATE_DIR/app` | the directory of `devices.json`, the app's paired devices |
 
 ## Layout
 

@@ -5,7 +5,7 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { after, before, test } from "node:test";
+import { after, before, mock, test } from "node:test";
 
 // store.ts reads these at import time, so set them before loading the modules under test.
 const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "alfred-workbench-")));
@@ -15,27 +15,37 @@ process.env.ALFRED_WORKSPACE = workspace;
 process.env.ALFRED_STATE_DIR = state;
 
 const { RunRecorder, writeHeartbeat } = await import("../runs.ts");
+const { ErrorResponseSchema, RunDetailSchema, RunListSchema } = await import("../api/schema.ts");
 const { AccessVerifier } = await import("./access.ts");
-const { REPORT_CSP, createHandler, inlineImages } = await import("./server.ts");
+const { DeviceStore } = await import("./devices.ts");
+const { REPORT_CSP, createHandler, inlineImages, startWorkbench } = await import("./server.ts");
 
 const SECRET = "SECRET-TOKEN-0123456789";
 const { privateKey, publicKey } = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
 const access = new AccessVerifier(
-  { teamDomain: "team.cloudflareaccess.com", aud: "aud", ownerEmail: "owner@example.com" },
+  { teamDomain: "team.cloudflareaccess.com", aud: "aud", ownerEmail: "owner@example.com", serviceClientId: "svc.access" },
   { fetcher: async () => ({ keys: [{ ...publicKey.export({ format: "jwk" }), kty: "RSA", kid: "k" }] }) },
 );
 
-function jwt(): string {
+function jwt(patch: Record<string, unknown> = {}): string {
   const enc = (o: object) => Buffer.from(JSON.stringify(o)).toString("base64url");
   const head = enc({ alg: "RS256", kid: "k" });
-  const body = enc({ aud: ["aud"], iss: "https://team.cloudflareaccess.com", email: "owner@example.com", exp: Date.now() / 1000 + 600 });
+  const body = enc({ aud: ["aud"], iss: "https://team.cloudflareaccess.com", email: "owner@example.com", exp: Date.now() / 1000 + 600, ...patch });
   return `${head}.${body}.${crypto.sign("RSA-SHA256", Buffer.from(`${head}.${body}`), privateKey).toString("base64url")}`;
+}
+
+/** What Access signs for a request that passed a Service Auth policy: the client id, no email. */
+function serviceJwt(clientId = "svc.access"): string {
+  return jwt({ email: undefined, common_name: clientId, type: "app" });
 }
 
 const servers: http.Server[] = [];
 let open = ""; // no Access check, as on the Unix socket
 let guarded = ""; // Access required, as on the tunnel's TCP listener
 let runId = "";
+const devicesDir = path.join(tmp, "app");
+const devices = new DeviceStore(devicesDir);
+let paired = { id: "", token: "" };
 
 async function serve(handler: http.RequestListener): Promise<string> {
   const server = http.createServer(handler);
@@ -69,8 +79,9 @@ before(async () => {
   run.finish("done");
   runId = run.id;
 
-  open = await serve(createHandler({ workspace }));
-  guarded = await serve(createHandler({ workspace, access }));
+  paired = devices.createDevice("test phone");
+  open = await serve(createHandler({ workspace, devices }));
+  guarded = await serve(createHandler({ workspace, access, devices }));
 });
 
 after(async () => {
@@ -175,4 +186,288 @@ test("Alfred shows as down after a clean stop or 90 s without a heartbeat", asyn
   assert.equal(await shown(), "down");
   beat({ updatedAt: new Date(Date.now() - 95_000).toISOString() });
   assert.equal(await shown(), "down");
+});
+
+// --- /api/ -----------------------------------------------------------------
+
+const bearer = (token: string) => ({ Authorization: `Bearer ${token}` });
+
+/** The /api/ error answers: JSON that parses as an ErrorResponse, with the base headers and no caching. */
+async function assertApiError(res: Response, status: number, label: string): Promise<void> {
+  assert.equal(res.status, status, label);
+  assert.match(res.headers.get("content-type") ?? "", /^application\/json/, label);
+  assert.equal(res.headers.get("cache-control"), "no-store", label);
+  assert.equal(res.headers.get("x-content-type-options"), "nosniff", label);
+  assert.equal(res.headers.get("referrer-policy"), "no-referrer", label);
+  assert.ok(ErrorResponseSchema.safeParse(await res.json()).success, label);
+}
+
+test("GET /api/ping answers 204 for a paired device, on both kinds of listener", async () => {
+  const withJwt = { ...bearer(paired.token), "Cf-Access-Jwt-Assertion": jwt() };
+  for (const [base, headers] of [[open, bearer(paired.token)], [guarded, withJwt]] as const) {
+    const res = await fetch(`${base}/api/ping`, { headers });
+    assert.equal(res.status, 204);
+    assert.equal(await res.text(), "");
+    assert.equal(res.headers.get("cache-control"), "no-store");
+    assert.equal(res.headers.get("x-content-type-options"), "nosniff");
+    assert.equal((await fetch(`${base}/api/ping?x=1`, { headers })).status, 204, "a query string does not matter");
+  }
+});
+
+test("/api/ answers 401 with a Bearer challenge without a valid device token", async () => {
+  const revoked = devices.createDevice("lost phone");
+  new DeviceStore(devicesDir).revokeDevice(revoked.id); // as the devices revoke command does, from another process
+  const wrong = [
+    ["no header", {}],
+    ["empty token", { Authorization: "Bearer " }],
+    ["no scheme", { Authorization: paired.token }],
+    ["another scheme", { Authorization: `Basic ${paired.token}` }],
+    ["two tokens", { Authorization: `Bearer ${paired.token} ${paired.token}` }],
+    ["a character outside base64url", { Authorization: `Bearer ${paired.token}=` }],
+    ["a token nobody holds", bearer("A".repeat(43))],
+    ["a truncated token", bearer(paired.token.slice(0, 20))],
+    ["a revoked device", bearer(revoked.token)],
+  ] as const;
+  for (const base of [open, guarded]) {
+    for (const [label, headers] of wrong) {
+      const res = await fetch(`${base}/api/ping`, { headers: { ...headers, "Cf-Access-Jwt-Assertion": jwt() } });
+      assert.equal(res.headers.get("www-authenticate"), "Bearer", label);
+      await assertApiError(res, 401, label);
+    }
+  }
+  assert.equal((await fetch(`${open}/api/ping`, { headers: bearer(paired.token) })).status, 204, "the paired device is unaffected");
+});
+
+test("a revoke applies to the next request without a restart", async () => {
+  const phone = devices.createDevice("phone");
+  assert.equal((await fetch(`${open}/api/ping`, { headers: bearer(phone.token) })).status, 204);
+  new DeviceStore(devicesDir).revokeDevice(phone.id);
+  assert.equal((await fetch(`${open}/api/ping`, { headers: bearer(phone.token) })).status, 401);
+});
+
+test("on the tunnel listener /api/ needs the Access token before anything else", async () => {
+  const cases = [
+    ["no JWT", {}],
+    ["a malformed JWT", { "Cf-Access-Jwt-Assertion": "x.y.z" }],
+    ["no JWT, with a device token", bearer(paired.token)],
+    ["a service token for another client", { "Cf-Access-Jwt-Assertion": serviceJwt("other.access"), ...bearer(paired.token) }],
+  ] as const;
+  for (const [label, headers] of cases) {
+    await assertApiError(await fetch(`${guarded}/api/ping`, { headers }), 403, label);
+  }
+  // Even a request that would be a 404 is refused first.
+  await assertApiError(await fetch(`${guarded}/api/nothing`), 403, "unknown path");
+});
+
+test("/api/ accepts the owner's and the service token's Access JWT, and still wants a device token", async () => {
+  for (const [who, token] of [["owner", jwt()], ["service token", serviceJwt()]] as const) {
+    const headers = { "Cf-Access-Jwt-Assertion": token };
+    assert.equal((await fetch(`${guarded}/api/ping`, { headers: { ...headers, ...bearer(paired.token) } })).status, 204, who);
+    const res = await fetch(`${guarded}/api/ping`, { headers });
+    assert.equal(res.headers.get("www-authenticate"), "Bearer", who);
+    await assertApiError(res, 401, who);
+  }
+});
+
+test("a service-token JWT gets 403 on a page, and the owner's JWT still gets in", async () => {
+  for (const p of ["/", "/runs", "/files/raw?path=notes/a.md"]) {
+    const res = await fetch(`${guarded}${p}`, { headers: { "Cf-Access-Jwt-Assertion": serviceJwt(), ...bearer(paired.token) } });
+    assert.equal(res.status, 403, p);
+    assert.match(res.headers.get("content-type") ?? "", /^text\/html/, p);
+  }
+  assert.equal((await fetch(`${guarded}/`, { headers: { "Cf-Access-Jwt-Assertion": jwt() } })).status, 200);
+});
+
+test("pages ignore the device token", async () => {
+  assert.equal((await fetch(`${open}/`)).status, 200, "no bearer needed");
+  assert.equal((await fetch(`${open}/`, { headers: bearer("A".repeat(43)) })).status, 200, "a bad bearer does not matter either");
+});
+
+test("POST works under /api/ and still gives 405 on pages", async () => {
+  const headers = { ...bearer(paired.token), "Content-Type": "application/json" };
+  // No POST route exists yet: a 404 JSON body, not the 405 a page would give, shows the method got through.
+  await assertApiError(await fetch(`${open}/api/nothing`, { method: "POST", headers, body: "{}" }), 404, "POST");
+  const tunnel = { ...headers, "Cf-Access-Jwt-Assertion": serviceJwt() };
+  await assertApiError(await fetch(`${guarded}/api/nothing`, { method: "POST", headers: tunnel, body: "{}" }), 404, "POST on the tunnel");
+  // Without a device token a POST is refused like a GET.
+  await assertApiError(await fetch(`${open}/api/nothing`, { method: "POST", body: "{}" }), 401, "POST without a token");
+  for (const base of [open, guarded]) {
+    for (const p of ["/", "/runs", "/api", "/apix"]) {
+      const res = await fetch(`${base}${p}`, { method: "POST", headers: { ...headers, "Cf-Access-Jwt-Assertion": jwt() }, body: "{}" });
+      assert.equal(res.status, 405, `POST ${p}`);
+      assert.equal(res.headers.get("allow"), "GET", `POST ${p}`);
+    }
+  }
+});
+
+test("under /api/ only GET and POST are allowed", async () => {
+  for (const method of ["PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"]) {
+    const res = await fetch(`${open}/api/ping`, { method, headers: bearer(paired.token) });
+    assert.equal(res.status, 405, method);
+    assert.equal(res.headers.get("allow"), "GET, POST", method);
+    if (method !== "HEAD") assert.ok(ErrorResponseSchema.safeParse(await res.json()).success, method);
+  }
+});
+
+test("an unknown /api/ path answers a 404 JSON body", async () => {
+  for (const p of ["/api/", "/api/nothing", "/api/ping/", "/api/ping/x", "/api/runs/", "/api/PING"]) {
+    await assertApiError(await fetch(`${open}${p}`, { headers: bearer(paired.token) }), 404, p);
+  }
+  // Without a device token the path is not revealed.
+  await assertApiError(await fetch(`${open}/api/nothing`), 401, "unknown path, no token");
+});
+
+test("a path that resolves to /api/ is held to the /api/ rules", async () => {
+  const raw = (rawPath: string, headers: http.OutgoingHttpHeaders = {}) =>
+    new Promise<number | undefined>((resolve, reject) => {
+      const url = new URL(open);
+      http.get({ host: url.hostname, port: url.port, path: rawPath, headers }, (res) => {
+        res.resume();
+        resolve(res.statusCode);
+      }).on("error", reject);
+    });
+  assert.equal(await raw("/runs/../api/ping"), 401);
+  assert.equal(await raw("/runs/../api/ping", bearer(paired.token)), 204);
+  assert.equal(await raw("/api/../runs"), 200, "and one that leaves /api/ is a page");
+});
+
+test("a refused /api/ request is logged with its reason, never with a token", async () => {
+  const secretToken = `${"B".repeat(42)}Z`;
+  const lines = mock.method(console, "error", () => {});
+  try {
+    await fetch(`${open}/api/ping`, { headers: bearer(secretToken) });
+    await fetch(`${open}/api/ping`);
+    await fetch(`${open}/api/ping`, { headers: { Authorization: `Bearer ${secretToken}!` } });
+    await fetch(`${guarded}/api/ping`, { headers: bearer(secretToken) });
+  } finally {
+    lines.mock.restore();
+  }
+  const logged = lines.mock.calls.map((call) => String(call.arguments[0]));
+  assert.equal(logged.length, 4);
+  assert.match(logged[0] ?? "", /refused.*\/api\/ping.*not a paired device/);
+  assert.match(logged[1] ?? "", /refused.*no Authorization header/);
+  assert.match(logged[2] ?? "", /refused.*malformed/);
+  assert.match(logged[3] ?? "", /refused.*no Access token/);
+  assert.ok(!logged.some((line) => line.includes(secretToken) || line.includes(paired.token)));
+});
+
+test("the Unix socket listener needs the device token for /api/ too, and nothing for pages", async () => {
+  const socket = path.join(tmp, "w.sock");
+  const close = await startWorkbench({ workspace, socket, devices });
+  try {
+    const get = (p: string, headers: http.OutgoingHttpHeaders = {}) =>
+      new Promise<number | undefined>((resolve, reject) => {
+        http.get({ socketPath: socket, path: p, headers }, (res) => {
+          res.resume();
+          resolve(res.statusCode);
+        }).on("error", reject);
+      });
+    assert.equal(await get("/api/ping"), 401);
+    assert.equal(await get("/api/ping", bearer("A".repeat(43))), 401);
+    assert.equal(await get("/api/ping", bearer(paired.token)), 204);
+    assert.equal(await get("/api/nothing", bearer(paired.token)), 404);
+    assert.equal(await get("/"), 200);
+  } finally {
+    await close();
+  }
+});
+
+// --- /api/runs and /api/files ----------------------------------------------
+
+test("GET /api/runs lists the 100 newest runs, newest first, with only the client's fields", async () => {
+  for (let i = 0; i < 101; i++) {
+    const run = new RunRecorder({ kind: "task", title: `bulk ${i}`, startedAt: new Date(Date.UTC(2030, 0, 1, 0, 0, i)).toISOString() });
+    run.finish("done");
+  }
+  const res = await fetch(`${open}/api/runs`, { headers: bearer(paired.token) });
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("content-type"), "application/json; charset=utf-8");
+  assert.equal(res.headers.get("cache-control"), "no-store");
+  const text = await res.text();
+  const list = RunListSchema.parse(JSON.parse(text));
+  assert.equal(list.runs.length, 100);
+  assert.equal(list.runs[0]?.title, "bulk 100");
+  const starts = list.runs.map((r) => r.startedAt);
+  assert.deepEqual(starts, [...starts].sort().reverse(), "newest first");
+  for (const field of ["toolCalls", "updatedAt", "steps"]) assert.ok(!text.includes(`"${field}"`), `${field} is not sent`);
+});
+
+test("GET /api/runs/<id> gives the run and its steps, and 404 for an unknown or malformed id", async () => {
+  const res = await fetch(`${open}/api/runs/${runId}`, { headers: bearer(paired.token) });
+  assert.equal(res.status, 200);
+  const detail = RunDetailSchema.parse(await res.json());
+  assert.equal(detail.run.id, runId);
+  assert.deepEqual(detail.steps.map((s) => s.tool), ["WebFetch"]);
+  for (const p of ["abcdef", "ABCDEF", "abc", `${runId}0`]) {
+    await assertApiError(await fetch(`${open}/api/runs/${p}`, { headers: bearer(paired.token) }), 404, p);
+  }
+});
+
+test("GET /api/runs/<id> has no steps for a run whose run file is gone", async () => {
+  const run = new RunRecorder({ kind: "task", title: "no file" });
+  run.step("WebSearch", "q");
+  run.finish("done");
+  fs.rmSync(path.join(state, "workbench", "runs", `${run.id}.json`));
+  const detail = RunDetailSchema.parse(await (await fetch(`${open}/api/runs/${run.id}`, { headers: bearer(paired.token) })).json());
+  assert.equal(detail.run.id, run.id);
+  assert.deepEqual(detail.steps, []);
+});
+
+test("GET /api/files/<path> serves a workspace file raw, with its type and the sandbox policy", async () => {
+  const get = (p: string) => fetch(`${open}/api/files/${p}`, { headers: bearer(paired.token) });
+  const md = await get("notes/a.md");
+  assert.equal(md.status, 200);
+  assert.equal(md.headers.get("content-type"), "text/plain; charset=utf-8");
+  assert.equal(md.headers.get("content-security-policy"), "sandbox");
+  assert.equal(md.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(await md.text(), fs.readFileSync(path.join(workspace, "notes", "a.md"), "utf8"));
+
+  const png = await get("images/p.png");
+  assert.equal(png.headers.get("content-type"), "image/png");
+  assert.deepEqual([...Buffer.from(await png.arrayBuffer())], [0x89, 0x50, 0x4e, 0x47]);
+
+  const html = await get("reports/r.html");
+  assert.equal(html.headers.get("content-type"), "text/plain; charset=utf-8", "HTML is never served as HTML");
+  assert.equal(html.headers.get("content-security-policy"), "sandbox");
+
+  const svg = await get("reports/c.svg");
+  assert.equal(svg.headers.get("content-type"), "image/svg+xml");
+  assert.equal(svg.headers.get("content-security-policy"), "sandbox");
+});
+
+test("GET /api/files/<path> answers 404 for a missing path, a directory, anything outside the workspace and a .. segment", async () => {
+  const paths = [
+    "",
+    "nope.txt",
+    "notes",
+    "escape/secret.txt",
+    "..%2Fstate%2Faccount.json",
+    "notes%2F..%2F..%2Foutside%2Fsecret.txt",
+    "%2Fetc%2Fpasswd",
+    "notes/../../outside/secret.txt",
+    "notes%2F%2e%2e%2F%2e%2e%2Foutside%2Fsecret.txt",
+    ".git/config",
+    "%00",
+    "%E0%A4%A",
+  ];
+  for (const p of paths) {
+    const res = await fetch(`${open}/api/files/${p}`, { headers: bearer(paired.token) });
+    const body = await res.text();
+    assert.equal(res.status, 404, p);
+    assert.ok(ErrorResponseSchema.safeParse(JSON.parse(body)).success, p);
+    assert.ok(!body.includes(SECRET), p);
+  }
+});
+
+test("the run and file routes need a device token, and refuse other methods with 405", async () => {
+  const routes = ["/api/runs", `/api/runs/${runId}`, "/api/files/notes/a.md"];
+  for (const p of routes) {
+    await assertApiError(await fetch(`${open}${p}`), 401, `${p} without a token`);
+    await assertApiError(await fetch(`${guarded}${p}`), 403, `${p} on the tunnel without Access`);
+    const wrong = await fetch(`${open}${p}`, { method: "POST", headers: bearer(paired.token), body: "{}" });
+    assert.equal(wrong.status, 405, `POST ${p}`);
+    assert.equal(wrong.headers.get("allow"), "GET", `POST ${p}`);
+  }
+  const ping = await fetch(`${open}/api/ping`, { method: "POST", headers: bearer(paired.token), body: "{}" });
+  assert.equal(ping.headers.get("allow"), "GET", "POST /api/ping");
 });

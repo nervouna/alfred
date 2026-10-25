@@ -3,6 +3,13 @@
 #   CF_ACCESS_TEAM_DOMAIN=<team>.cloudflareaccess.com
 #   CF_ACCESS_AUD=<the Access application's AUD tag>
 #   ALFRED_WORKBENCH_OWNER_EMAIL=<the one email allowed in>
+# For the app (pairing and the /api/ routes), add:
+#   CF_ACCESS_SERVICE_CLIENT_ID=<the Access service token's client id, ending in .access>
+#   CF_ACCESS_SERVICE_CLIENT_SECRET=<its client secret>
+#   ALFRED_WORKBENCH_URL=<the workbench's public https:// origin, no trailing slash>
+# Pair a device by running this on the host, then scanning the QR code it shows:
+#   podman exec -it workbench node src/cli.ts pair --name <name>
+# List the devices with `devices` and lock one out with `devices revoke <id>`, the same way.
 [Unit]
 Description=Alfred workbench
 
@@ -18,13 +25,19 @@ LogDriver=journald
 Volume=%h/data/state/workbench:/data/state/workbench:ro
 Volume=%h/data/state/claude/projects:/data/state/claude/projects:ro
 Volume=%h/data/workspace:/workspace:ro
-# The 0600 socket for the SSH-tunnel fallback: the one writable path.
+# Alfred's command socket, which /api/ forwards to. Only the socket is reached: connecting does not write to the directory.
+Volume=%h/data/state/api:/data/state/api:ro
+# The 0600 socket for the SSH-tunnel fallback: a writable path.
 Volume=%h/data/workbench-socket:/run/workbench
+# The paired devices (devices.json, token hashes only): the other writable path.
+Volume=%h/data/workbench-app:/data/workbench-app
 ReadOnly=true
 ReadOnlyTmpfs=false
 Environment=TZ=Asia/Taipei
 Environment=ALFRED_WORKBENCH_LISTEN=127.0.0.1:8787
 Environment=ALFRED_WORKBENCH_SOCKET=/run/workbench/workbench.sock
+Environment=ALFRED_WORKBENCH_STATE=/data/workbench-app
+Environment=ALFRED_API_SOCKET=/data/state/api/alfred.sock
 EnvironmentFile=%h/.config/alfred/workbench.env
 NoNewPrivileges=true
 DropCapability=all
