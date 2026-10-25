@@ -223,3 +223,29 @@ test("a message needs text or files, its paths stay in the workspace, and its ti
   }
   assert.equal(MessageSchema.safeParse({ ...message, text: "hi", files: [{ path: "reports/a..b.md" }] }).success, true);
 });
+
+test("a pairing's server is an https origin, or an http origin on 127.0.0.1 or localhost with any port", () => {
+  const pairing = JSON.parse(readFixture("pairing", "pairing.json")) as Record<string, unknown>;
+  const accepted = [
+    "https://alfred.example.com",
+    "https://alfred.example.com:8443",
+    "http://127.0.0.1:18900",
+    "http://127.0.0.1",
+    "http://localhost:8787",
+    "http://localhost",
+  ];
+  const refused = [
+    "http://192.168.1.2:8787",
+    "http://alfred.example.com",
+    "http://127.0.0.2:8787",
+    "http://0.0.0.0:8787",
+    "http://localhost.example.com:8787",
+    "http://[::1]:8787",
+    "https://alfred.example.com/",
+    "http://127.0.0.1:18900/workbench",
+    "http://user@127.0.0.1:18900",
+    "ws://127.0.0.1:18900",
+  ];
+  for (const server of accepted) assert.equal(PairingSchema.safeParse({ ...pairing, server }).success, true, server);
+  for (const server of refused) assert.equal(PairingSchema.safeParse({ ...pairing, server }).success, false, server);
+});

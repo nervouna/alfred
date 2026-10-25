@@ -40,51 +40,26 @@ import type { Event, LiveEvent, Message } from "../src/api/schema.ts";
 import { createAgentHandler } from "../src/agent/handler.ts";
 import { request, streamEvents } from "../src/api/client.ts";
 import { startApi } from "../src/api/server.ts";
-import type { BotContext } from "../src/bot.ts";
-import { appOutbound } from "../src/channels.ts";
-import { WeChatChannel } from "../src/channels/wechat.ts";
 import { sharedEventLog } from "../src/events.ts";
-import { IlinkApiError } from "../src/ilink/client.ts";
 import type { WeixinMessage } from "../src/ilink/types.ts";
 import { listRunFiles } from "../src/runs.ts";
+import { OWNER, createLocalHandler, fakeWeChat } from "./local-stack.ts";
 
 const scenario = process.argv[2] ?? "";
 const t0 = Date.now();
 const at = () => `+${((Date.now() - t0) / 1000).toFixed(1)}s`;
-const OWNER = "owner@im.wechat";
 
-let failSends = false;
-const sent: { at: string; text: string }[] = [];
-const client = {
-  async sendMessage(req: { msg: { item_list?: { text_item?: { text?: string } }[] } }) {
-    const text = req.msg.item_list?.[0]?.text_item?.text ?? "[media]";
-    if (failSends) {
-      console.log(`[wechat ✗] ${at()} ${text.replace(/\n/g, " ⏎ ").slice(0, 200)}`);
-      throw new IlinkApiError("sendMessage", { ret: -2, errmsg: "prepare failed" });
-    }
-    sent.push({ at: at(), text });
-    console.log(`[wechat] ${at()} ${text.replace(/\n/g, " ⏎ ")}`);
-    return { ret: 0 };
-  },
-  async getUploadUrl() {
-    throw new Error("uploads are not available in the handler smoke test");
-  },
-};
-const ctx = {
-  client,
-  account: { botToken: "x", botId: "smoke@im.bot", baseUrl: "https://invalid", ownerUserId: OWNER, loggedInAt: new Date().toISOString() },
-  cdnBaseUrl: "https://invalid",
-  tokens: { get: () => undefined, set: () => {} },
-  typing: { start: async () => async () => {} },
-  startedAt: Date.now(),
-} as unknown as BotContext;
+const flat = (text: string) => text.replace(/\n/g, " ⏎ ");
+const wechatFake = fakeWeChat((text, refused) => {
+  const shown = flat(text);
+  console.log(`[wechat${refused ? " ✗" : ""}] ${at()} ${refused ? shown.slice(0, 200) : shown}`);
+});
+const wechat = wechatFake.channel;
+const sent = wechatFake.sent;
 
 function message(text: string): WeixinMessage {
   return { from_user_id: OWNER, item_list: [{ type: 1, text_item: { text } }] } as WeixinMessage;
 }
-
-const wechat = new WeChatChannel(ctx);
-const flat = (text: string) => text.replace(/\n/g, " ⏎ ");
 
 /** Every message event as it is appended: who said it, where, and for which run. */
 const messages: Message[] = [];
@@ -100,7 +75,7 @@ sharedEventLog().subscribe((event) => {
 type Handler = ReturnType<typeof createAgentHandler>;
 
 function newHandler(progressMs?: number): Handler {
-  return createAgentHandler({ owner: OWNER, channels: { wechat: wechat.outbound(OWNER), app: appOutbound() }, progressMs });
+  return createLocalHandler(wechat, progressMs);
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -611,10 +586,10 @@ if (scenario === "background") {
 } else if (scenario === "undelivered") {
   const handler = newHandler();
   await send(handler, "/model haiku");
-  failSends = true;
+  wechatFake.refuse = true;
   await send(handler, "在 notes/hello.md 里写一行“你好”，然后回复“写好了”。");
   await idle();
-  failSends = false;
+  wechatFake.refuse = false;
   await send(handler, "/status");
   summary();
 } else if (scenario === "stop") {

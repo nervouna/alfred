@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "server": "http://127.0.0.1:8787",
+  "access": {
+    "clientId": "example-service-token.access",
+    "clientSecret": "example-client-secret-not-real"
+  },
+  "device": {
+    "id": "k7m2qa",
+    "token": "EXAMPLE-DEVICE-TOKEN-NOT-REAL-0123456789abc"
+  }
+}
