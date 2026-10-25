@@ -49,7 +49,7 @@ function onAbort(signal: AbortSignal, action: () => void): void {
 }
 
 /** The request body as text, or undefined once it is over `limit`; the rest is then not read. */
-function readBody(req: http.IncomingMessage, limit: number): Promise<string | undefined> {
+export function readBody(req: http.IncomingMessage, limit: number): Promise<string | undefined> {
   return new Promise((resolve, reject) => {
     if (Number(req.headers["content-length"]) > limit) return resolve(undefined);
     const chunks: Buffer[] = [];

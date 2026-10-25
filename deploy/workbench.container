@@ -7,6 +7,12 @@
 #   CF_ACCESS_SERVICE_CLIENT_ID=<the Access service token's client id, ending in .access>
 #   CF_ACCESS_SERVICE_CLIENT_SECRET=<its client secret>
 #   ALFRED_WORKBENCH_URL=<the workbench's public https:// origin, no trailing slash>
+# For push notifications (APNs), add to the same file:
+#   ALFRED_APNS_KEY_ID=<the APNs key's id>
+#   ALFRED_APNS_TEAM_ID=<the Apple developer team id>
+#   ALFRED_APNS_TOPIC=<the app's bundle id>
+# The .p8 key itself is a podman secret, mounted below, never a file in the repo or the env file:
+#   podman secret create alfred_apns_key <path to AuthKey_<key id>.p8>
 # Pair a device by running this on the host, then scanning the QR code it shows:
 #   podman exec -it workbench node src/cli.ts pair --name <name>
 # List the devices with `devices` and lock one out with `devices revoke <id>`, the same way.
@@ -31,6 +37,8 @@ Volume=%h/data/state/api:/data/state/api:ro
 Volume=%h/data/workbench-socket:/run/workbench
 # The paired devices (devices.json, token hashes only): the other writable path.
 Volume=%h/data/workbench-app:/data/workbench-app
+# The APNs key, read-only, in the container's secret directory.
+Secret=alfred_apns_key,type=mount,target=/run/secrets/alfred_apns_key,uid=1000,gid=1000,mode=0400
 ReadOnly=true
 ReadOnlyTmpfs=false
 Environment=TZ=Asia/Taipei
@@ -38,6 +46,7 @@ Environment=ALFRED_WORKBENCH_LISTEN=127.0.0.1:8787
 Environment=ALFRED_WORKBENCH_SOCKET=/run/workbench/workbench.sock
 Environment=ALFRED_WORKBENCH_STATE=/data/workbench-app
 Environment=ALFRED_API_SOCKET=/data/state/api/alfred.sock
+Environment=ALFRED_APNS_KEY_FILE=/run/secrets/alfred_apns_key
 EnvironmentFile=%h/.config/alfred/workbench.env
 NoNewPrivileges=true
 DropCapability=all

@@ -147,11 +147,13 @@ A read-only web page for following Alfred's work: one card per run with live pro
   - `GET /api/runs` answers `RunList`: the 100 newest runs, newest first, with only the fields the client shows.
   - `GET /api/runs/<id>` answers `RunDetail`: the run and its steps. An unknown or malformed id is 404.
   - `GET /api/files/<path>` streams a workspace file's bytes, typed by extension as the pages type them, under `Content-Security-Policy: sandbox`. A missing path, a directory, a path outside the workspace and a `..` segment are all 404.
+  - `POST /api/push` takes the app's APNs registration, `{"token": "<hex>", "environment": "development" | "production"}`, and stores it on the device's record in `devices.json`, replacing an earlier one; it answers 204. A body that does not fit is 400 `{"error": "…"}`, and one over 4,096 bytes is 413.
   - While Alfred's socket cannot be reached (Alfred restarting, or the API off), the three forwarding routes answer 503 `{"error": "…"}`, and the app retries.
 
   The socket is `ALFRED_API_SOCKET` (`deploy/workbench.container` mounts its directory read-only). The workbench holds no Alfred secret and forwards only the command set.
 - **Pairing.** `node src/cli.ts pair [--name <name>]` (name default `iPhone`) creates a device and shows one QR code with the server URL (`ALFRED_WORKBENCH_URL`, an `https://` origin), the Access service token (`CF_ACCESS_SERVICE_CLIENT_ID` and `CF_ACCESS_SERVICE_CLIENT_SECRET`) and the new device's token, so one scan sets the app up. The tokens appear nowhere but in the QR code; `--json` prints the same pairing as JSON instead, for scripts. On the host: `podman exec -it workbench node src/cli.ts pair --name <name>`.
 - **Revoking.** `node src/cli.ts devices` lists the devices with their ids, names, creation and revocation times, and `devices revoke <id>` locks one out. The workbench re-reads `devices.json` when the file changes, so the next request from that device is refused, with no restart. The file keeps only a SHA-256 of each device token, so a token lost with its phone cannot be read back: revoke the device and pair again.
+- **Push.** A paired phone with a registration gets a notification through APNs when Alfred's reply in the app goes out, and when WeChat refuses a reply, even with the app closed. A reply WeChat delivered is not pushed. A `development` registration goes to APNs's sandbox, a `production` one to production. The title is `Alfred`, and the body is the text cut to its first 100 characters, with `…` after them when it is longer. A WeChat refusal starts with `微信未送达：`, and a file-only message reads `文件：<first file's name>`. The notification also carries `eventId`, and `runId` when the message has one, so the app can open the right place. Inside `workbench`, a dispatcher follows Alfred's `/events` from the cursor in `push-cursor.json`. With no cursor it starts after the latest event, so old events never push, and the cursor is saved after each event, so a restart pushes nothing twice. A token APNs reports dead (410, or 400 `BadDeviceToken`) is removed from its device's registration; any other refusal is logged and not retried. The provider token is an ES256 JWT signed with the `.p8` key and renewed every 50 minutes. With any one of the four `ALFRED_APNS_*` variables missing, push is off and the workbench logs which one. `node src/cli.ts apns-test [text]` sends one test notification to every registered device and prints each device's answer; on the host: `podman exec -it workbench node src/cli.ts apns-test`.
 - `node src/cli.ts workbench --dev` serves on loopback without the Access check, for local testing. `/api/` still wants a device token there.
 
 On the host, the workbench and a dedicated `cloudflared` run in their own pod (`deploy/workbench.pod`, `workbench.container`, `workbench-tunnel.container`). They use the Alfred image, so `deploy/update.sh` restarts the workbench after an update. In the Cloudflare dashboard, create a remotely managed tunnel whose public hostname points at `http://localhost:8787`, and an Access application on that hostname that allows only your email. Then:
@@ -167,7 +169,12 @@ ALFRED_WORKBENCH_OWNER_EMAIL=<your email>
 CF_ACCESS_SERVICE_CLIENT_ID=<the service token's client id, ending in .access>
 CF_ACCESS_SERVICE_CLIENT_SECRET=<its client secret>
 ALFRED_WORKBENCH_URL=https://<hostname>
+# For push (APNs), with the .p8 key below as the alfred_apns_key secret:
+ALFRED_APNS_KEY_ID=<the APNs key's id>
+ALFRED_APNS_TEAM_ID=<your Apple team id>
+ALFRED_APNS_TOPIC=<the app's bundle id>
 ENV
+podman secret create alfred_apns_key <path to AuthKey_<key id>.p8>
 install -m644 deploy/workbench.pod deploy/workbench.container deploy/workbench-tunnel.container ~/.config/containers/systemd/
 systemctl --user daemon-reload && systemctl --user start workbench-pod
 ```
@@ -350,7 +357,7 @@ Verified WeChat behavior (2026-10-10):
 | `$XDG_STATE_HOME/alfred/claude/` | isolated Claude Code config dir: agent session transcripts used for resume |
 | `$XDG_STATE_HOME/alfred/workspace-plugin/` | the `workspace` skills plugin: a manifest and the `skills` symlink into the workspace, recreated at startup |
 | `$XDG_STATE_HOME/alfred/workbench/` | what the workbench reads: `runs.jsonl` (one line per finished run, kept for good), `runs/<id>.json` (live and recent runs with their steps, kept 30 days), `status.json` (heartbeat), `alfred.log` (the log, rotated at 5 MB to `alfred.log.1`) |
-| `$ALFRED_WORKBENCH_STATE` (default `$XDG_STATE_HOME/alfred/app/`) | `devices.json`: the app's paired devices, each with its id, name, creation and revocation times and the SHA-256 of its token, never the token; the directory is mode 700 and the file 600, rewritten atomically. The workbench re-reads it when it changes |
+| `$ALFRED_WORKBENCH_STATE` (default `$XDG_STATE_HOME/alfred/app/`) | `devices.json`: the app's paired devices, each with its id, name, creation and revocation times and the SHA-256 of its token, never the token; a device that has registered for push also has `push`, its APNs registration (the APNs device token and the environment, as `POST /api/push` stored it); the directory is mode 700 and the file 600, rewritten atomically. The workbench re-reads it when it changes. `push-cursor.json`: the id of the last event the push dispatcher handled |
 | `~/Alfred/` (override with `ALFRED_WORKSPACE`) | `ALFRED.md` (workspace rules), `inbox/`, `reports/`, `notes/`, `images/`, `memory/` (long-term memory), `skills/` (the owner's skills), `.trash/` |
 | `$XDG_CACHE_HOME/alfred/ms-playwright/` (default `~/.cache/…`, override with `PLAYWRIGHT_BROWSERS_PATH`) | Chrome Headless Shell for PDF rendering |
 
@@ -372,6 +379,7 @@ Verified WeChat behavior (2026-10-10):
 | `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUD`, `ALFRED_WORKBENCH_OWNER_EMAIL` | none | the Access team domain, the application's AUD tag and the one email allowed in |
 | `CF_ACCESS_SERVICE_CLIENT_ID`, `CF_ACCESS_SERVICE_CLIENT_SECRET` | none | the Access service token the app uses: the workbench accepts its JWT on `/api/` when the client id matches (without it service tokens are refused), and `pair` puts both in the QR code |
 | `ALFRED_WORKBENCH_STATE` | `$ALFRED_STATE_DIR/app` | the directory of `devices.json`, the app's paired devices |
+| `ALFRED_APNS_KEY_FILE`, `ALFRED_APNS_KEY_ID`, `ALFRED_APNS_TEAM_ID`, `ALFRED_APNS_TOPIC` | none | push: the `.p8` key file, its key id, the Apple team id and the app's bundle id (the topic). With any one missing, push is off and the workbench logs which; the key is read at startup and never logged |
 
 ## Layout
 

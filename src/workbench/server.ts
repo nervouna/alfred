@@ -17,14 +17,14 @@ import path from "node:path";
 
 import { resolveInside } from "../agent/guard.ts";
 import { loadMemories } from "../agent/memory.ts";
-import { RunSchema, StepSchema } from "../api/schema.ts";
+import { PushRegistrationSchema, RunSchema, StepSchema } from "../api/schema.ts";
 import type { Run, RunDetail } from "../api/schema.ts";
 import { apiSocketPath } from "../api/server.ts";
 import { describeError, log } from "../log.ts";
 import type { AccessVerifier } from "./access.ts";
 import { allRuns, alfredStatus, listSessions, readTranscript, runDetail, spendByDay, tailLog } from "./data.ts";
 import { DeviceStore } from "./devices.ts";
-import { forwardCommand, forwardEvents, forwardUpload, jsonError, jsonReply } from "./forward.ts";
+import { forwardCommand, forwardEvents, forwardUpload, jsonError, jsonReply, readBody } from "./forward.ts";
 import { html, trusted } from "./html.ts";
 import type { Html } from "./html.ts";
 import { renderMarkdown } from "./markdown.ts";
@@ -217,6 +217,8 @@ const RUN_PATH = /^\/api\/runs\/([2-9a-hjkmnp-z]{6})$/;
 const FILE_PATH = "/api/files/";
 /** How many runs GET /api/runs lists, newest first. */
 const LISTED_RUNS = 100;
+/** The largest POST /api/push body: a registration is a token and an environment. */
+const MAX_PUSH_BYTES = 4096;
 
 /** The device token in an Authorization header, or why there is none. */
 function bearerToken(header: string | undefined): { token: string } | { reason: string } {
@@ -324,6 +326,31 @@ function runDetailReply(id: string): Response {
   return jsonReply(200, body);
 }
 
+/**
+ * POST /api/push: the device's APNs registration, replacing its earlier one; 204. A body that is not a
+ * PushRegistration is 400 with the first problem found; a device revoked meanwhile is 401.
+ */
+async function pushRegistrationReply(req: http.IncomingMessage, deviceId: string, devices: DeviceStore): Promise<Response> {
+  const body = await readBody(req, MAX_PUSH_BYTES);
+  if (body === undefined) return { ...jsonError(413, `registration is over ${MAX_PUSH_BYTES} bytes`), closeConnection: true };
+  let json: unknown;
+  try {
+    json = JSON.parse(body);
+  } catch {
+    return jsonError(400, "body is not valid JSON");
+  }
+  const parsed = PushRegistrationSchema.safeParse(json);
+  if (!parsed.success) {
+    const [issue] = parsed.error.issues;
+    const where = issue && issue.path.length > 0 ? `${issue.path.map(String).join(".")}: ` : "";
+    return jsonError(400, `${where}${issue?.message ?? "invalid registration"}`);
+  }
+  if (!devices.setPush(deviceId, parsed.data)) {
+    return jsonError(401, "A paired device's token is required.", { "WWW-Authenticate": "Bearer" });
+  }
+  return { status: 204, headers: {}, body: "" };
+}
+
 /** GET /api/files/<path>: a workspace file's bytes, typed by extension as the pages type them, under the sandbox policy. */
 function fileReply(workspace: string, rest: string): Response {
   const notFound = () => jsonError(404, "There is no such file.");
@@ -372,6 +399,7 @@ async function apiRoute(req: http.IncomingMessage, url: URL, ctx: ApiContext): P
   if (p === "/api/uploads") return only("POST", () => forwardUpload(req, url.searchParams.get("name"), ctx.alfred, ctx.gone));
   if (p === "/api/events") return only("GET", () => forwardEvents(req, url, ctx.alfred, ctx.gone));
   if (p === "/api/runs") return only("GET", () => runList());
+  if (p === "/api/push") return only("POST", () => pushRegistrationReply(req, device.id, ctx.devices));
   const run = RUN_PATH.exec(p)?.[1];
   if (run) return only("GET", () => runDetailReply(run));
   if (p.startsWith(FILE_PATH)) return only("GET", () => fileReply(ctx.workspace, p.slice(FILE_PATH.length)));

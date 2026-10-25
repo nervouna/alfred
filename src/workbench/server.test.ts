@@ -471,3 +471,56 @@ test("the run and file routes need a device token, and refuse other methods with
   const ping = await fetch(`${open}/api/ping`, { method: "POST", headers: bearer(paired.token), body: "{}" });
   assert.equal(ping.headers.get("allow"), "GET", "POST /api/ping");
 });
+
+// --- POST /api/push ---------------------------------------------------------
+
+const registration = { token: "c".repeat(64), environment: "development" };
+const pushOf = (id: string) => devices.list().find((d) => d.id === id)?.push;
+
+test("POST /api/push stores the registration on the device, replacing an earlier one, and answers 204", async () => {
+  const phone = devices.createDevice("push phone");
+  const post = (body: unknown) => fetch(`${open}/api/push`, { method: "POST", headers: bearer(phone.token), body: JSON.stringify(body) });
+  const res = await post(registration);
+  assert.equal(res.status, 204);
+  assert.equal(await res.text(), "");
+  assert.deepEqual(pushOf(phone.id), registration);
+  assert.equal((await post({ token: "d".repeat(64), environment: "production" })).status, 204);
+  assert.deepEqual(pushOf(phone.id), { token: "d".repeat(64), environment: "production" });
+  assert.equal((await fetch(`${open}/api/ping`, { headers: bearer(phone.token) })).status, 204, "the token still works");
+});
+
+test("POST /api/push answers 400 for a body that is not a registration, and stores nothing", async () => {
+  const phone = devices.createDevice("bad push phone");
+  const bodies = [
+    "",
+    "not json",
+    "[]",
+    JSON.stringify({ token: "C".repeat(64), environment: "development" }), // upper case is not APNs's hex
+    JSON.stringify({ token: "ab", environment: "development" }),
+    JSON.stringify({ token: "e".repeat(64), environment: "staging" }),
+    JSON.stringify({ token: "e".repeat(64), environment: "development", extra: 1 }),
+  ];
+  for (const body of bodies) {
+    await assertApiError(await fetch(`${open}/api/push`, { method: "POST", headers: bearer(phone.token), body }), 400, body || "empty body");
+  }
+  assert.equal(pushOf(phone.id), undefined);
+});
+
+test("POST /api/push needs a paired device, a revoked one is refused, and other methods get 405", async () => {
+  const lost = devices.createDevice("lost push phone");
+  devices.revokeDevice(lost.id);
+  await assertApiError(await fetch(`${open}/api/push`, { method: "POST", body: JSON.stringify(registration) }), 401, "no token");
+  await assertApiError(await fetch(`${guarded}/api/push`, { method: "POST", body: JSON.stringify(registration) }), 403, "no Access token");
+  await assertApiError(await fetch(`${open}/api/push`, { method: "POST", headers: bearer(lost.token), body: JSON.stringify(registration) }), 401, "revoked");
+  assert.equal(pushOf(lost.id), undefined);
+  const get = await fetch(`${open}/api/push`, { headers: bearer(paired.token) });
+  assert.equal(get.status, 405);
+  assert.equal(get.headers.get("allow"), "POST");
+});
+
+test("POST /api/push refuses a body over 4096 bytes with 413", async () => {
+  const phone = devices.createDevice("big push phone");
+  const body = JSON.stringify({ ...registration, padding: "x".repeat(5000) });
+  await assertApiError(await fetch(`${open}/api/push`, { method: "POST", headers: bearer(phone.token), body }), 413, "over the limit");
+  assert.equal(pushOf(phone.id), undefined);
+});

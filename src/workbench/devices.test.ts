@@ -138,3 +138,41 @@ test("the directory is ALFRED_WORKBENCH_STATE, else app/ under the state dir", (
   assert.equal(deviceStateDir({ ALFRED_WORKBENCH_STATE: "/data/workbench-app" }), "/data/workbench-app");
   assert.equal(deviceStateDir({ ALFRED_WORKBENCH_STATE: "  " }), path.join(tmp, "state", "app"));
 });
+
+test("a device's APNs registration is stored on its record and replaces an earlier one", () => {
+  const dir = freshDir();
+  const store = new DeviceStore(dir);
+  const phone = store.createDevice("iPhone");
+  const first = { token: "a".repeat(64), environment: "development" } as const;
+  const second = { token: "b".repeat(64), environment: "production" } as const;
+  assert.equal(store.setPush(phone.id, first), true);
+  assert.equal(store.setPush(phone.id, second), true);
+  assert.deepEqual(store.list().find((d) => d.id === phone.id)?.push, second);
+  assert.equal(store.authenticate(phone.token)?.id, phone.id, "the token still works");
+  const stored = JSON.parse(fs.readFileSync(path.join(dir, "devices.json"), "utf8")) as { devices: Record<string, unknown>[] };
+  assert.deepEqual(stored.devices[0]?.push, second);
+});
+
+test("a registration is refused for an unknown or revoked device", () => {
+  const store = new DeviceStore(freshDir());
+  const phone = store.createDevice("iPhone");
+  const gone = store.createDevice("iPad");
+  store.revokeDevice(gone.id);
+  const registration = { token: "c".repeat(64), environment: "development" } as const;
+  assert.equal(store.setPush("zzzzz9", registration), false);
+  assert.equal(store.setPush(gone.id, registration), false);
+  assert.equal(store.list().find((d) => d.id === gone.id)?.push, undefined);
+  assert.equal(store.setPush(phone.id, registration), true);
+});
+
+test("forgetPush drops a registration only while it still holds the token it was given", () => {
+  const store = new DeviceStore(freshDir());
+  const phone = store.createDevice("iPhone");
+  store.setPush(phone.id, { token: "d".repeat(64), environment: "development" });
+  store.setPush(phone.id, { token: "e".repeat(64), environment: "development" }); // a newer one
+  store.forgetPush(phone.id, "d".repeat(64));
+  assert.equal(store.list().find((d) => d.id === phone.id)?.push?.token, "e".repeat(64), "the newer one is kept");
+  store.forgetPush(phone.id, "e".repeat(64));
+  assert.equal(store.list().find((d) => d.id === phone.id)?.push, undefined);
+  assert.equal(store.authenticate(phone.token)?.id, phone.id, "the device itself is kept");
+});
