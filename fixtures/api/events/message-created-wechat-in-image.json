@@ -1,0 +1,18 @@
+{
+  "id": 3,
+  "at": "2026-10-25T08:31:10.204Z",
+  "type": "message.created",
+  "data": {
+    "id": "m1002",
+    "channel": "wechat",
+    "direction": "in",
+    "text": "",
+    "files": [
+      {
+        "path": "inbox/IMG_0412.jpg",
+        "kind": "image"
+      }
+    ],
+    "at": "2026-10-25T08:31:10.204Z"
+  }
+}

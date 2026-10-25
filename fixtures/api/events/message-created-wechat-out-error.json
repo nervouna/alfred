@@ -1,0 +1,15 @@
+{
+  "id": 7,
+  "at": "2026-10-25T08:34:43.500Z",
+  "type": "message.created",
+  "data": {
+    "id": "m1004",
+    "channel": "wechat",
+    "direction": "out",
+    "text": "报告写好了。",
+    "files": [],
+    "at": "2026-10-25T08:34:43.500Z",
+    "runId": "k7m2qa",
+    "error": "sendMessage failed: ret=-2"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "id": 1,
+  "at": "2026-10-25T08:30:00.000Z",
+  "type": "message.created",
+  "data": {
+    "id": "m1001",
+    "channel": "app",
+    "direction": "in",
+    "text": "帮我查一下 VPS 价格",
+    "files": [],
+    "at": "2026-10-25T08:30:00.000Z",
+    "clientId": "c-7f3a9e"
+  }
+}
