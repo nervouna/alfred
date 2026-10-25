@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -7,11 +8,14 @@ import { resolveInside } from "./agent/guard.ts";
 import { createAgentHandler } from "./agent/handler.ts";
 import { MEMORY_LOCK_FILE, describeScan, scanTranscripts } from "./agent/memory-scan.ts";
 import { MemoryLock } from "./agent/memory.ts";
+import { describeEvent, request, streamEvents } from "./api/client.ts";
+import { apiSocketPath, startApi } from "./api/server.ts";
 import { createBotContext, runBot } from "./bot.ts";
 import type { BotContext, MessageHandler } from "./bot.ts";
 import { SerialQueue, appOutbound } from "./channels.ts";
 import { WeChatChannel, wechatHandler } from "./channels/wechat.ts";
 import { echoHandler } from "./echo.ts";
+import { sharedEventLog } from "./events.ts";
 import { DEFAULT_CDN_BASE_URL, IlinkClient } from "./ilink/client.ts";
 import { login } from "./ilink/login.ts";
 import { sendMedia, sendText } from "./ilink/send.ts";
@@ -32,7 +36,11 @@ const USAGE = `usage: node src/cli.ts <command>
   setup-pdf                  download the headless Chrome used for PDF rendering
   pdf <source> [output]      render a Markdown or HTML file to PDF
   memory-scan                extract long-term memories from new transcript entries now
-  workbench [--dev]          serve the read-only workbench (--dev: no Access check, loopback only)`;
+  workbench [--dev]          serve the read-only workbench (--dev: no Access check, loopback only)
+  api send <text…>           send a message to the running Alfred over its local API socket
+  api stop <run id>          stop a run
+  api events [--after N] [--follow]
+                             print the events after id N (default 0); --follow keeps streaming`;
 
 function ageOf(epochMs: number): string {
   return `${((Date.now() - epochMs) / 3_600_000).toFixed(2)}h`;
@@ -52,7 +60,7 @@ async function cmdLogin(): Promise<void> {
 async function cmdRun(args: string[]): Promise<void> {
   logToFile(LOG_FILE);
   const ctx = createBotContext();
-  const handler = args.includes("--echo") ? inOrder(echoHandler) : agentHandler(ctx);
+  const handler = args.includes("--echo") ? inOrder(echoHandler) : await agentHandler(ctx);
   const controller = new AbortController();
   const stop = (sig: string) => {
     if (controller.signal.aborted) process.exit(1);
@@ -64,12 +72,31 @@ async function cmdRun(args: string[]): Promise<void> {
   await runBot(ctx, handler, controller.signal);
 }
 
-/** The assistant: the agent handler, with WeChat and the app as its channels. */
-function agentHandler(ctx: BotContext): MessageHandler {
+/** The assistant: the agent handler, with WeChat and the app as its channels, and the command API in front of the app channel. */
+async function agentHandler(ctx: BotContext): Promise<MessageHandler> {
   const wechat = new WeChatChannel(ctx);
   const owner = ctx.account.ownerUserId;
   const agent = createAgentHandler({ owner, channels: { wechat: wechat.outbound(owner), app: appOutbound() } });
-  return wechatHandler(wechat, agent);
+  const handler = wechatHandler(wechat, agent);
+  const socket = apiSocketPath();
+  if (!socket) return handler;
+
+  let closeApi: () => Promise<void>;
+  try {
+    closeApi = await startApi({ socket, handler: agent, events: sharedEventLog() });
+  } catch (err) {
+    await agent.shutdown();
+    throw err;
+  }
+  // The API closes first, so no command reaches an agent that is stopping its runs.
+  handler.shutdown = async () => {
+    try {
+      await closeApi();
+    } finally {
+      await agent.shutdown();
+    }
+  };
+  return handler;
 }
 
 /** The PoC echo handler takes messages one at a time, as the bot used to hand them over. */
@@ -186,6 +213,63 @@ async function cmdWorkbench(args: string[]): Promise<void> {
   await close();
 }
 
+/** Prints an HTTP answer as `<status> <body>`; a status of 400 or more is a failure. */
+function printAnswer(answer: { status: number; body: string }): void {
+  console.log(`${answer.status} ${answer.body}`);
+  if (answer.status >= 400) process.exitCode = 1;
+}
+
+async function cmdApi(args: string[]): Promise<void> {
+  const usage = "usage: api send <text…> | api stop <run id> | api events [--after N] [--follow]";
+  const socket = apiSocketPath();
+  if (!socket) throw new Error("the API is off (ALFRED_API_SOCKET=off)");
+  const [sub, ...rest] = args;
+  switch (sub) {
+    case "send": {
+      const text = rest.join(" ");
+      if (!text.trim()) throw new Error(usage);
+      printAnswer(await request(socket, "POST", "/commands", { type: "message.send", clientId: `cli-${crypto.randomUUID()}`, text }));
+      break;
+    }
+    case "stop": {
+      const [runId, ...extra] = rest;
+      if (!runId || extra.length) throw new Error(usage);
+      printAnswer(await request(socket, "POST", "/commands", { type: "run.stop", runId }));
+      break;
+    }
+    case "events": {
+      let after = 0;
+      let follow = false;
+      for (let i = 0; i < rest.length; i++) {
+        const arg = rest[i];
+        if (arg === "--follow") follow = true;
+        else if (arg === "--after" && /^\d+$/.test(rest[i + 1] ?? "")) after = Number(rest[++i]);
+        else throw new Error(usage);
+      }
+      await printEvents(socket, after, follow);
+      break;
+    }
+    default:
+      throw new Error(usage);
+  }
+}
+
+/** Prints the events after `after`, one line each: with `follow`, for as long as the stream lasts; otherwise up to the last event as of now. */
+async function printEvents(socket: string, after: number, follow: boolean): Promise<void> {
+  let until = Number.POSITIVE_INFINITY;
+  if (!follow) {
+    const health = await request(socket, "GET", "/health");
+    if (health.status !== 200) throw new Error(`GET /health answered ${health.status}: ${health.body}`);
+    until = (JSON.parse(health.body) as { lastEventId?: number }).lastEventId ?? 0;
+    if (until <= after) return;
+  }
+  for await (const frame of streamEvents(socket, { after })) {
+    console.log(describeEvent(frame));
+    if (frame.id >= until) return;
+  }
+  throw new Error("the event stream ended");
+}
+
 function cmdStatus(): void {
   const account = loadAccount();
   console.log(`state dir: ${STATE_DIR}\nworkspace: ${WORKSPACE_DIR}`);
@@ -232,6 +316,9 @@ try {
       break;
     case "workbench":
       await cmdWorkbench(args);
+      break;
+    case "api":
+      await cmdApi(args);
       break;
     default:
       console.log(USAGE);
