@@ -7,10 +7,14 @@
 
 import { z } from "zod";
 
-import type { RunKind, RunStatus } from "../runs.ts";
+import type { RunKind, RunStatus, RunStep } from "../runs.ts";
 
 /** The command API's request body limit, in bytes. */
 export const MAX_COMMAND_BYTES = 65_536;
+/** The most files one message.send attaches. */
+export const MAX_MESSAGE_FILES = 10;
+/** The upload limit for one file, in bytes (50 MiB). */
+export const MAX_UPLOAD_BYTES = 52_428_800;
 const MAX_TEXT_CHARS = 20_000;
 
 const IsoTimestampSchema = z.iso.datetime();
@@ -22,14 +26,20 @@ export const ChannelSchema = z.enum(["app", "wechat"]);
 
 export const FileKindSchema = z.enum(["image", "voice", "video", "file"]);
 
+// A path relative to the workspace.
+const WorkspacePathSchema = z
+  .string()
+  .min(1, "must not be empty")
+  .refine((path) => !path.startsWith("/"), "must not start with /")
+  .refine((path) => !path.split("/").includes(".."), "must not contain a .. segment");
+
 export const FileRefSchema = z.object({
-  path: z
-    .string()
-    .min(1, "must not be empty")
-    .refine((path) => !path.startsWith("/"), "must not start with /")
-    .refine((path) => !path.split("/").includes(".."), "must not contain a .. segment"),
+  path: WorkspacePathSchema,
   kind: FileKindSchema.optional(),
 });
+
+// A file in the inbox, where inbound media and app uploads are saved.
+const InboxPathSchema = WorkspacePathSchema.refine((path) => path.startsWith("inbox/"), "must start with inbox/");
 
 export const MessageSchema = z
   .object({
@@ -70,6 +80,17 @@ export const RunSchema = z.object({
   error: z.string().optional(),
 });
 
+/** One step of a run's timeline: a tool the run used, and what it was used on. */
+export const StepSchema = z.object({
+  at: IsoTimestampSchema,
+  tool: z.string(),
+  detail: z.string(),
+  agent: z.string().optional(),
+});
+
+// Compile-time check that StepSchema is exactly RunStep in src/runs.ts.
+type StepMatches = Expect<Equals<z.infer<typeof StepSchema>, RunStep>>;
+
 const EventEnvelope = { id: z.int().positive(), at: IsoTimestampSchema };
 
 export const EventSchema = z.discriminatedUnion("type", [
@@ -77,17 +98,96 @@ export const EventSchema = z.discriminatedUnion("type", [
   z.object({ ...EventEnvelope, type: z.literal("run.updated"), data: RunSchema }),
 ]);
 
+const StreamIdSchema = z.string().regex(/^[A-Za-z0-9_.:-]{1,64}$/, "must be 1-64 letters, digits, _, ., : or -");
+
+// A live event is streamed as it happens and is never stored, so it has no id: it is sent
+// without an SSE id line and is never replayed on resume. A client tells the two apart by the
+// id key: an Event has one, a LiveEvent does not. A live type the client does not know is skipped.
+export const LiveEventSchema = z.discriminatedUnion("type", [
+  z.object({
+    at: IsoTimestampSchema,
+    type: z.literal("message.delta"),
+    data: z.object({
+      runId: RunIdSchema,
+      streamId: StreamIdSchema,
+      text: z.string().min(1, "must not be empty"),
+    }),
+  }),
+  z.object({
+    at: IsoTimestampSchema,
+    type: z.literal("run.step"),
+    data: z.object({ runId: RunIdSchema, step: StepSchema }),
+  }),
+]);
+
+/** The body of GET /api/runs: runs, newest first. */
+export const RunListSchema = z.object({ runs: z.array(RunSchema) });
+
+/** The body of GET /api/runs/<id>: a run and its step timeline. */
+export const RunDetailSchema = z.object({ run: RunSchema, steps: z.array(StepSchema) });
+
+/** The body of POST /api/uploads: the file Alfred saved under inbox/. */
+export const UploadResultSchema = z.object({
+  file: FileRefSchema.extend({ path: InboxPathSchema, kind: FileKindSchema }),
+});
+
+/** The body of any error response. */
+export const ErrorResponseSchema = z.object({ error: z.string() });
+
+// The server part of a pairing is an https origin: no path, query, fragment or trailing slash.
+function isHttpsOrigin(text: string): boolean {
+  try {
+    const url = new URL(text);
+    return url.protocol === "https:" && url.origin === text;
+  } catch {
+    return false;
+  }
+}
+
+/** The QR code the app scans to pair: where Alfred is, the Cloudflare Access service token and the device token. */
+export const PairingSchema = z.strictObject({
+  version: z.literal(1),
+  server: z.string().refine(isHttpsOrigin, "must be an https:// origin with no path, query or trailing slash"),
+  access: z.strictObject({
+    clientId: z.string().regex(/^[A-Za-z0-9_-]+\.access$/, "must be a Cloudflare Access client id ending in .access"),
+    clientSecret: z.string().min(1).max(256),
+  }),
+  device: z.strictObject({
+    id: RunIdSchema,
+    token: z.string().regex(/^[A-Za-z0-9_-]{43}$/, "must be 43 characters of base64url"),
+  }),
+});
+
+/** The APNs device token the app registers for push notifications. */
+export const PushRegistrationSchema = z.strictObject({
+  token: z.string().regex(/^[0-9a-f]{64,200}$/, "must be a lowercase hex APNs device token"),
+  environment: z.enum(["development", "production"]),
+});
+
+const CommandFileSchema = FileRefSchema.extend({ path: InboxPathSchema });
+
+const CommandFilesSchema = z
+  .array(CommandFileSchema)
+  .min(1, "must not be empty")
+  .max(MAX_MESSAGE_FILES, `must have at most ${MAX_MESSAGE_FILES} files`);
+
+// Text is "" only beside files. Otherwise it must not be blank, and it is at most MAX_TEXT_CHARS characters.
 const CommandTextSchema = z
   .string()
-  .min(1, "must not be empty")
-  .refine((text) => text.trim() !== "", "must not be blank")
+  .refine((text) => text === "" || text.trim() !== "", "must not be blank")
   .refine((text) => [...text].length <= MAX_TEXT_CHARS, `must be at most ${MAX_TEXT_CHARS} characters`);
 
-export const MessageSendSchema = z.strictObject({
-  type: z.literal("message.send"),
-  clientId: ClientIdSchema,
-  text: CommandTextSchema,
-});
+export const MessageSendSchema = z
+  .strictObject({
+    type: z.literal("message.send"),
+    clientId: ClientIdSchema,
+    text: CommandTextSchema,
+    files: CommandFilesSchema.optional(),
+  })
+  .refine((command) => command.text !== "" || command.files !== undefined, {
+    path: ["text"],
+    message: "must not be empty unless files are attached",
+  });
 
 export const RunStopSchema = z.strictObject({
   type: z.literal("run.stop"),
@@ -100,7 +200,15 @@ export type Channel = z.infer<typeof ChannelSchema>;
 export type FileRef = z.infer<typeof FileRefSchema>;
 export type Message = z.infer<typeof MessageSchema>;
 export type Run = z.infer<typeof RunSchema>;
+export type Step = z.infer<typeof StepSchema>;
 export type Event = z.infer<typeof EventSchema>;
+export type LiveEvent = z.infer<typeof LiveEventSchema>;
+export type RunList = z.infer<typeof RunListSchema>;
+export type RunDetail = z.infer<typeof RunDetailSchema>;
+export type UploadResult = z.infer<typeof UploadResultSchema>;
+export type ErrorResponse = z.infer<typeof ErrorResponseSchema>;
+export type Pairing = z.infer<typeof PairingSchema>;
+export type PushRegistration = z.infer<typeof PushRegistrationSchema>;
 export type Command = z.infer<typeof CommandSchema>;
 
 export type ParseCommandResult = { ok: true; command: Command } | { ok: false; error: string };

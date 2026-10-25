@@ -41,3 +41,24 @@ public struct Run: Decodable, Hashable, Sendable {
         error = try container.decodeIfPresent(String.self, forKey: .error)
     }
 }
+
+/// One step of a run's timeline: a tool the run used, and what it was used on.
+public struct Step: Decodable, Hashable, Sendable {
+    public let at: Date
+    public let tool: String
+    public let detail: String
+    /// Set for a step a subagent took: its role.
+    public let agent: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case at, tool, detail, agent
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        at = try container.decodeTimestamp(forKey: .at)
+        tool = try container.decode(String.self, forKey: .tool)
+        detail = try container.decode(String.self, forKey: .detail)
+        agent = try container.decodeIfPresent(String.self, forKey: .agent)
+    }
+}

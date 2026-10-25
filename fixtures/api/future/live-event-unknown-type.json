@@ -1,0 +1,8 @@
+{
+  "at": "2026-10-25T08:44:00.000Z",
+  "type": "task.progress",
+  "data": {
+    "taskId": "t-vps",
+    "percent": 40
+  }
+}

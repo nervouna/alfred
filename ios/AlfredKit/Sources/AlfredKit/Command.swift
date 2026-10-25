@@ -1,10 +1,11 @@
 /// A command the client sends to Alfred. Alfred validates it; this type only shapes the JSON.
 public enum Command: Hashable, Sendable, Codable {
-    case messageSend(clientId: String, text: String)
+    /// `files` are inbox paths the owner attached. `text` is empty only when `files` is not.
+    case messageSend(clientId: String, text: String, files: [FileRef] = [])
     case runStop(runId: String)
 
     private enum CodingKeys: String, CodingKey {
-        case type, clientId, text, runId
+        case type, clientId, text, runId, files
     }
 
     public init(from decoder: any Decoder) throws {
@@ -14,7 +15,8 @@ public enum Command: Hashable, Sendable, Codable {
         case "message.send":
             self = .messageSend(
                 clientId: try container.decode(String.self, forKey: .clientId),
-                text: try container.decode(String.self, forKey: .text)
+                text: try container.decode(String.self, forKey: .text),
+                files: try container.decodeIfPresent([FileRef].self, forKey: .files) ?? []
             )
         case "run.stop":
             self = .runStop(runId: try container.decode(String.self, forKey: .runId))
@@ -30,10 +32,13 @@ public enum Command: Hashable, Sendable, Codable {
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         switch self {
-        case let .messageSend(clientId, text):
+        case let .messageSend(clientId, text, files):
             try container.encode("message.send", forKey: .type)
             try container.encode(clientId, forKey: .clientId)
             try container.encode(text, forKey: .text)
+            if !files.isEmpty {
+                try container.encode(files, forKey: .files)
+            }
         case let .runStop(runId):
             try container.encode("run.stop", forKey: .type)
             try container.encode(runId, forKey: .runId)

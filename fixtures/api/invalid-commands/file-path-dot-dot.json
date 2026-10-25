@@ -1,0 +1,10 @@
+{
+  "type": "message.send",
+  "clientId": "c-7f3a9e",
+  "text": "",
+  "files": [
+    {
+      "path": "inbox/../reports/vps.md"
+    }
+  ]
+}
