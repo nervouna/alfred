@@ -23,3 +23,26 @@ jobs:
       - uses: actions/checkout@v5
       - run: xcodebuild -version && swift --version
       - run: swift test --package-path ios/AlfredKit
+
+  app:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v5
+      - name: Select Xcode 27
+        shell: bash
+        run: |
+          echo "Xcode installs on this runner:"
+          ls -d /Applications/Xcode*.app || true
+          xcode=$(ls -d /Applications/Xcode_27*.app 2>/dev/null | sort -V | tail -n 1 || true)
+          if [ -z "$xcode" ]; then
+            echo "::error::No /Applications/Xcode_27*.app on this runner; the app needs the iOS 27 SDK"
+            exit 1
+          fi
+          echo "DEVELOPER_DIR=$xcode/Contents/Developer" >> "$GITHUB_ENV"
+      - run: xcodebuild -version && xcrun --sdk iphonesimulator --show-sdk-version
+      - name: Install XcodeGen
+        run: |
+          brew install xcodegen
+          xcodegen --version
+      - run: xcodegen generate --spec ios/project.yml
+      - run: xcodebuild -project ios/Alfred.xcodeproj -scheme Alfred -destination 'generic/platform=iOS Simulator' -derivedDataPath ios/build CODE_SIGNING_ALLOWED=NO build

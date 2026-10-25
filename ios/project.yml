@@ -1,0 +1,81 @@
+# XcodeGen spec for the Alfred app and its Share Extension.
+# Generate with `xcodegen generate --spec ios/project.yml`; the .xcodeproj is not committed.
+name: Alfred
+
+options:
+  deploymentTarget:
+    iOS: "27.0"
+
+configFiles:
+  Debug: Config/Base.xcconfig
+  Release: Config/Base.xcconfig
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+
+packages:
+  AlfredKit:
+    path: AlfredKit
+
+targets:
+  Alfred:
+    type: application
+    platform: iOS
+    sources:
+      - path: Alfred
+    dependencies:
+      - package: AlfredKit
+      - target: AlfredShare
+    info:
+      path: Alfred/Info.plist
+      properties:
+        CFBundleDisplayName: Alfred
+        CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
+        UILaunchScreen: {}
+    entitlements:
+      path: Alfred/Alfred.entitlements
+      properties:
+        aps-environment: development
+        com.apple.security.application-groups:
+          - group.$(ALFRED_BUNDLE_ID)
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)$(ALFRED_BUNDLE_ID)
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(ALFRED_BUNDLE_ID)
+        TARGETED_DEVICE_FAMILY: "1"
+
+  AlfredShare:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: AlfredShare
+    info:
+      path: AlfredShare/Info.plist
+      properties:
+        CFBundleDisplayName: Alfred
+        CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
+        NSExtension:
+          NSExtensionAttributes:
+            NSExtensionActivationRule: 'SUBQUERY(extensionItems, $item, SUBQUERY($item.attachments, $a, (ANY $a.registeredTypeIdentifiers UTI-CONFORMS-TO "public.url") OR (ANY $a.registeredTypeIdentifiers UTI-CONFORMS-TO "com.adobe.pdf") OR (ANY $a.registeredTypeIdentifiers UTI-CONFORMS-TO "public.image")).@count == 1).@count == 1 AND extensionItems.@count == 1'
+          NSExtensionPointIdentifier: com.apple.share-services
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).ShareViewController
+    entitlements:
+      path: AlfredShare/AlfredShare.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.$(ALFRED_BUNDLE_ID)
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)$(ALFRED_BUNDLE_ID)
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(ALFRED_BUNDLE_ID).share
+        TARGETED_DEVICE_FAMILY: "1"
+
+schemes:
+  Alfred:
+    build:
+      targets:
+        Alfred: all
+        AlfredShare: all
