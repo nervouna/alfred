@@ -15,6 +15,10 @@ import type { EventLog as EventLogType } from "../events.ts";
 // Unix socket paths are short-limited (about 100 bytes): keep the temp dir shallow.
 const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "alf-")));
 process.env.ALFRED_STATE_DIR = path.join(tmp, "state");
+// Uploads and the files of a message are checked against the workspace's inbox.
+const workspace = path.join(tmp, "workspace");
+fs.mkdirSync(workspace);
+process.env.ALFRED_WORKSPACE = workspace;
 // With no umask in the way, the modes below are the server's doing.
 const umask = process.umask(0);
 after(() => {
@@ -23,7 +27,8 @@ after(() => {
 });
 
 const { EventLog } = await import("../events.ts");
-const { MAX_COMMAND_BYTES, parseCommand } = await import("./schema.ts");
+const { localDate } = await import("../files.ts");
+const { MAX_COMMAND_BYTES, MAX_UPLOAD_BYTES, parseCommand } = await import("./schema.ts");
 const { HEARTBEAT_MS, apiSocketPath, startApi } = await import("./server.ts");
 
 const run: Run = { id: "k7m2qa", kind: "task", title: "调研 VPS 价格", status: "running", startedAt: "2026-10-25T08:30:05.000Z", costUsd: 0, files: [] };
@@ -97,7 +102,7 @@ function call(
   socket: string,
   method: string,
   target: string,
-  opts: { headers?: http.OutgoingHttpHeaders; body?: string; agent?: http.Agent } = {},
+  opts: { headers?: http.OutgoingHttpHeaders; body?: string | Buffer; agent?: http.Agent } = {},
 ): Promise<Reply> {
   return new Promise((resolve, reject) => {
     const req = http.request({ socketPath: socket, method, path: target, headers: opts.headers, agent: opts.agent ?? false }, (res) => {
@@ -584,4 +589,221 @@ test("a stream resumed with Last-Event-ID or ?after never replays live events", 
     assert.doesNotMatch(sse.text(), /message\.delta|run\.step/, "live events are not in the log, so they are not in a backlog");
   }
   assert.deepEqual(byHeader.ids(), [2, 3, 4]);
+});
+
+const inbox = () => path.join(workspace, "inbox", localDate());
+/** The names in today's inbox; none before the first upload. */
+const inboxNames = (): string[] => (fs.existsSync(inbox()) ? fs.readdirSync(inbox()) : []);
+const upload = (socket: string, name: string, body: Buffer | string = "x") =>
+  call(socket, "POST", `/uploads?name=${encodeURIComponent(name)}`, { headers: { "Content-Type": "application/octet-stream" }, body });
+
+test("POST /uploads saves the bytes under today's inbox and answers 201 with the path and kind", async (t) => {
+  const { socket } = await start(t);
+  const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]);
+  const reply = await upload(socket, "Screen Shot.PNG", bytes);
+  assert.equal(reply.status, 201);
+  assert.deepEqual(reply.json(), { file: { path: `inbox/${localDate()}/Screen Shot.PNG`, kind: "image" } });
+  assert.deepEqual(fs.readFileSync(path.join(inbox(), "Screen Shot.PNG")), bytes);
+  assert.deepEqual(
+    inboxNames().filter((n) => n.startsWith(".upload-")),
+    [],
+    "nothing is left under a temporary name",
+  );
+});
+
+test("the kind of an upload follows its extension: image, video or file", async (t) => {
+  const { socket } = await start(t);
+  const kinds: [string, string][] = [
+    ["kind-a.png", "image"],
+    ["kind-b.JPG", "image"],
+    ["kind-c.jpeg", "image"],
+    ["kind-d.gif", "image"],
+    ["kind-e.webp", "image"],
+    ["kind-f.heic", "image"],
+    ["kind-g.mp4", "video"],
+    ["kind-h.MOV", "video"],
+    ["kind-i.pdf", "file"],
+    ["kind-j.md", "file"],
+    ["kind-k", "file"],
+  ];
+  for (const [name, kind] of kinds) {
+    const reply = await upload(socket, name);
+    assert.equal(reply.status, 201, name);
+    assert.deepEqual(reply.json(), { file: { path: `inbox/${localDate()}/${name}`, kind } }, name);
+  }
+});
+
+test("a name that is already in the inbox gets a unique path, and the first file is kept", async (t) => {
+  const { socket } = await start(t);
+  assert.equal((await upload(socket, "same-name.txt", "first")).status, 201);
+  const second = await upload(socket, "same-name.txt", "second");
+  assert.deepEqual(second.json(), { file: { path: `inbox/${localDate()}/same-name-1.txt`, kind: "file" } });
+  assert.equal(fs.readFileSync(path.join(inbox(), "same-name.txt"), "utf8"), "first");
+  assert.equal(fs.readFileSync(path.join(inbox(), "same-name-1.txt"), "utf8"), "second");
+});
+
+test("the name is trimmed and sanitized the way WeChat media names are", async (t) => {
+  const { socket } = await start(t);
+  const trimmed = await call(socket, "POST", `/uploads?name=${encodeURIComponent("  spaced.txt  ")}`, { body: "x" });
+  assert.deepEqual(trimmed.json(), { file: { path: `inbox/${localDate()}/spaced.txt`, kind: "file" } });
+  const unsafe = await upload(socket, "a:b?.txt");
+  assert.deepEqual(unsafe.json(), { file: { path: `inbox/${localDate()}/a_b_.txt`, kind: "file" } });
+  const longest = await upload(socket, "y".repeat(255));
+  assert.equal(longest.status, 201, "255 characters is the most a name can have");
+});
+
+test("a name that is missing, empty, unsafe or too long gets 400 and nothing is saved", async (t) => {
+  const { socket } = await start(t);
+  const before = inboxNames();
+  for (const target of [
+    "/uploads",
+    "/uploads?name=",
+    "/uploads?name=%20%20",
+    "/uploads?name=a%2Fb",
+    "/uploads?name=a%5Cb",
+    "/uploads?name=.",
+    "/uploads?name=..",
+    "/uploads?name=%2E%2E",
+    "/uploads?name=a%00b",
+    `/uploads?name=${"z".repeat(256)}`,
+  ]) {
+    const reply = await call(socket, "POST", target, { headers: { "Content-Type": "application/octet-stream" }, body: "x" });
+    assert.equal(reply.status, 400, target);
+    assert.deepEqual(Object.keys(reply.json() as object), ["error"], target);
+  }
+  assert.deepEqual(inboxNames(), before);
+});
+
+test("a declared length over the limit is 413 before the body is read, and nothing is saved", async (t) => {
+  const { socket } = await start(t);
+  const before = inboxNames();
+  // Only a little of the body is sent: the answer comes without the rest.
+  const status = await new Promise<number>((resolve, reject) => {
+    const req = http.request(
+      {
+        socketPath: socket,
+        method: "POST",
+        path: "/uploads?name=declared.bin",
+        headers: { "Content-Type": "application/octet-stream", "Content-Length": MAX_UPLOAD_BYTES + 1 },
+        agent: false,
+      },
+      (res) => {
+        res.resume();
+        resolve(res.statusCode ?? 0);
+        req.destroy();
+      },
+    );
+    req.on("error", () => {});
+    setTimeout(() => reject(new Error("no answer before the body was sent")), 5000).unref();
+    req.write("only a little");
+  });
+  assert.equal(status, 413);
+  assert.deepEqual(inboxNames(), before);
+});
+
+test("a body that grows past the limit is cut with 413, and no file is left", async (t) => {
+  const { socket } = await start(t);
+  const before = inboxNames();
+  const chunk = Buffer.alloc(1024 * 1024, 0x61);
+  // A connection that stays open, as a client's does: a closed one would drop the 413 with the unread body.
+  const agent = new http.Agent({ keepAlive: true });
+  t.after(() => agent.destroy());
+  const status = await new Promise<number>((resolve, reject) => {
+    let answered = false;
+    const req = http.request(
+      { socketPath: socket, method: "POST", path: "/uploads?name=grows.bin", headers: { "Content-Type": "application/octet-stream" }, agent },
+      (res) => {
+        answered = true;
+        res.resume();
+        resolve(res.statusCode ?? 0);
+        req.destroy();
+      },
+    );
+    req.on("error", (err) => {
+      if (!answered) reject(err);
+    });
+    setTimeout(() => reject(new Error("no answer while the body was still being sent")), 10_000).unref();
+    void (async () => {
+      // 60 MiB is over the 50 MiB limit: the answer must come before all of it is sent.
+      for (let i = 0; i < 60 && !answered; i++) {
+        if (!req.write(chunk) && !answered) await new Promise((next) => req.once("drain", next));
+      }
+    })();
+  });
+  assert.equal(status, 413);
+  assert.deepEqual(inboxNames(), before);
+});
+
+test("an upload cut short by the client leaves no file", async (t) => {
+  const { socket } = await start(t);
+  const before = inboxNames();
+  const req = http.request({
+    socketPath: socket,
+    method: "POST",
+    path: "/uploads?name=cut-short.bin",
+    headers: { "Content-Type": "application/octet-stream", "Content-Length": 1000 },
+    agent: false,
+  });
+  req.on("error", () => {});
+  req.write(Buffer.alloc(100, 1));
+  await until("the upload to start", () => inboxNames().some((n) => n.startsWith(".upload-")));
+  req.destroy();
+  await until("the partial file to go", () => inboxNames().every((n) => before.includes(n)));
+  assert.equal(inboxNames().includes("cut-short.bin"), false);
+});
+
+test("other methods on /uploads get 405 with POST allowed", async (t) => {
+  const { socket, handler } = await start(t);
+  const reply = await call(socket, "GET", "/uploads?name=x.txt");
+  assert.equal(reply.status, 405);
+  assert.equal(reply.headers.allow, "POST");
+  assert.equal(handler.submitted.length, 0);
+});
+
+test("message.send with files hands them to the handler with the message, and an answer of 202", async (t) => {
+  const { socket, handler } = await start(t);
+  const saved = (await upload(socket, "for-message.txt", "hi")).json() as { file: { path: string } };
+  const reply = await post(socket, { type: "message.send", clientId: "c-files", text: "看看这个", files: [{ path: saved.file.path }] });
+  assert.equal(reply.status, 202);
+  assert.deepEqual(handler.submitted, [{ channel: "app", text: "看看这个", clientId: "c-files", files: [{ path: saved.file.path }] }]);
+
+  // Files with no text, and a kind that goes along with a path.
+  const kinded = await post(socket, { type: "message.send", clientId: "c-files-2", text: "", files: [{ path: saved.file.path, kind: "file" }] });
+  assert.equal(kinded.status, 202);
+  assert.deepEqual(handler.submitted.at(-1), { channel: "app", text: "", clientId: "c-files-2", files: [{ path: saved.file.path, kind: "file" }] });
+});
+
+test("a file of a message that is not a regular file in the inbox gets 400, and nothing is submitted", async (t) => {
+  const { socket, handler } = await start(t);
+  const real = (await upload(socket, "real.txt", "hi")).json() as { file: { path: string } };
+  fs.mkdirSync(inbox(), { recursive: true });
+  const outside = path.join(tmp, "outside.txt");
+  fs.writeFileSync(outside, "outside the workspace");
+  fs.mkdirSync(path.join(workspace, "reports"), { recursive: true });
+  fs.writeFileSync(path.join(workspace, "reports", "memo.md"), "not in the inbox");
+  fs.mkdirSync(path.join(inbox(), "a-folder"), { recursive: true });
+  fs.symlinkSync(outside, path.join(inbox(), "escape-link.txt"));
+  fs.symlinkSync(path.join(workspace, "reports", "memo.md"), path.join(inbox(), "memo-link.md"));
+  fs.symlinkSync(real.file.path.replace(/^inbox\//, path.join(workspace, "inbox") + path.sep), path.join(inbox(), "alias.txt"));
+
+  const cases: [string, string][] = [
+    [`inbox/${localDate()}/never-uploaded.txt`, "files.0.path: no such file in the inbox"],
+    [`inbox/${localDate()}/a-folder`, "files.0.path: no such file in the inbox"],
+    [`inbox/${localDate()}/escape-link.txt`, "files.0.path: no such file in the inbox"],
+    [`inbox/${localDate()}/memo-link.md`, "files.0.path: no such file in the inbox"],
+    ["reports/memo.md", "files.0.path: must start with inbox/"],
+  ];
+  for (const [i, [file, error]] of cases.entries()) {
+    const reply = await post(socket, { type: "message.send", clientId: `bad-${i}`, text: "x", files: [{ path: file }] });
+    assert.equal(reply.status, 400, file);
+    assert.deepEqual(reply.json(), { error }, file);
+  }
+  // With a good file first, the bad one is named by its place in the list.
+  const second = await post(socket, { type: "message.send", clientId: "bad-second", text: "x", files: [{ path: real.file.path }, { path: `inbox/${localDate()}/none.txt` }] });
+  assert.deepEqual(second.json(), { error: "files.1.path: no such file in the inbox" });
+  assert.equal(handler.submitted.length, 0);
+
+  // A symlink in the inbox to another file of the inbox is that file.
+  const alias = `inbox/${localDate()}/alias.txt`;
+  assert.equal((await post(socket, { type: "message.send", clientId: "alias", text: "x", files: [{ path: alias }] })).status, 202);
 });

@@ -30,7 +30,7 @@ How Alfred works in this workspace. Alfred reads this file at the start of every
 
 ## Layout
 
-- inbox/<date>/  files sent in WeChat (images, PDFs, documents, video); Alfred saves them here
+- inbox/<date>/  files sent in WeChat or in the app (images, PDFs, documents, video); Alfred saves them here
 - reports/  deliverables written for the user
 - notes/  working notes and collected material
 - images/<date>/  images Alfred generated

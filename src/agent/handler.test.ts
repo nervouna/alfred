@@ -388,6 +388,31 @@ test("every message is recorded with its channel, files, client id and run", asy
   assert.deepEqual(t.messages()[0]?.files, [image]);
 });
 
+test("an app message's files are attached to the next message, as WeChat media is, and the saved line goes to the app", async () => {
+  const hold = held();
+  const t = setup({ turn: hold.turn });
+  const brief = { path: "inbox/2026-10-25/brief.pdf", kind: "file" as const };
+
+  await t.send("app", "", { files: [brief], clientId: "c-f1" });
+  assert.deepEqual(t.app.texts, [`已保存 ${brief.path}，告诉我要怎么处理。`]);
+  assert.deepEqual(t.wechat.texts, []);
+
+  await t.send("app", "看看这份", { clientId: "c-f2" });
+  await until("the run to start", () => hold.waiting === 1);
+  assert.match(t.agent.prompts[0] ?? "", /^Attached files \(workspace paths\):\n- inbox\/2026-10-25\/brief\.pdf\n\n看看这份$/);
+  hold.release("看完了");
+  await until("the run to finish", () => t.finished());
+
+  const inbound = t.messages().filter((m) => m.direction === "in");
+  assert.deepEqual(
+    inbound.map((m) => [m.channel, m.text, m.files, m.clientId]),
+    [
+      ["app", "", [brief], "c-f1"],
+      ["app", "看看这份", [], "c-f2"],
+    ],
+  );
+});
+
 test("a command and what it replies are recorded without a run", async () => {
   const t = setup();
   await t.send("app", "/help", { clientId: "c-5" });

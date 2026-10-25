@@ -112,10 +112,13 @@ function localFile(root: string, url: string): string | undefined {
 export interface RenderOptions {
   /** The source and every local image, stylesheet and font it loads must resolve inside this directory. */
   root: string;
+  /** Aborting it closes the browser: the render stops and rejects. */
+  signal?: AbortSignal;
 }
 
 /** Render a Markdown or HTML file to an A4 PDF with page numbers. */
-export async function renderPdf(source: string, output: string, { root }: RenderOptions): Promise<{ bytes: number }> {
+export async function renderPdf(source: string, output: string, { root, signal }: RenderOptions): Promise<{ bytes: number }> {
+  signal?.throwIfAborted();
   const ext = path.extname(source).toLowerCase();
   if (!PDF_SOURCE_EXTS.has(ext)) throw new Error(`cannot render ${ext || "extensionless"} files; use .md or .html`);
   const real = resolveInside(root, source);
@@ -150,7 +153,11 @@ export async function renderPdf(source: string, output: string, { root }: Render
   process.env.PLAYWRIGHT_BROWSERS_PATH ??= BROWSERS_PATH;
   const { chromium } = await import("playwright-core");
   const browser = await chromium.launch({ headless: true });
+  // An abort closes the browser, which fails the page operations under way. One that came during the launch is caught by the check below.
+  const stop = () => void browser.close().catch(() => {});
+  signal?.addEventListener("abort", stop, { once: true });
   try {
+    signal?.throwIfAborted();
     const context = await browser.newContext({ offline: true, javaScriptEnabled: false });
     // Routes see file:// requests too; data: URLs are inline and never become requests.
     await context.route(() => true, handle);
@@ -168,6 +175,7 @@ export async function renderPdf(source: string, output: string, { root }: Render
     });
     return { bytes: pdf.length };
   } finally {
+    signal?.removeEventListener("abort", stop);
     await browser.close();
   }
 }
