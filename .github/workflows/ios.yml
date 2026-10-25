@@ -28,21 +28,40 @@ jobs:
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v5
-      - name: Select Xcode 27
+      - name: Select the newest Xcode
         shell: bash
         run: |
+          set -euo pipefail
           echo "Xcode installs on this runner:"
           ls -d /Applications/Xcode*.app || true
-          xcode=$(ls -d /Applications/Xcode_27*.app 2>/dev/null | sort -V | tail -n 1 || true)
-          if [ -z "$xcode" ]; then
-            echo "::error::No /Applications/Xcode_27*.app on this runner; the app needs the iOS 27 SDK"
+          # Newest by the version xcodebuild reports for each install, Xcode 27 first if there is one.
+          newest=$(for app in /Applications/Xcode*.app; do
+            [ -d "$app" ] || continue
+            echo "$(DEVELOPER_DIR="$app/Contents/Developer" xcodebuild -version | awk 'NR == 1 { print $2 }') $app"
+          done | sort -V | tail -n 1)
+          if [ -z "$newest" ]; then
+            echo "::error::No Xcode installed on this runner"
             exit 1
           fi
-          echo "DEVELOPER_DIR=$xcode/Contents/Developer" >> "$GITHUB_ENV"
+          app=${newest#* }
+          echo "Selected $(echo "$newest" | cut -d' ' -f1) at $app"
+          echo "DEVELOPER_DIR=$app/Contents/Developer" >> "$GITHUB_ENV"
+          # No runner has Xcode 27 yet. With an older SDK, build with the deployment target
+          # passed on the command line; project.yml stays at iOS 27.0 for local and device builds.
+          sdk=$(DEVELOPER_DIR="$app/Contents/Developer" xcrun --sdk iphonesimulator --show-sdk-version)
+          major=${sdk%%.*}
+          if [ "$major" -lt 27 ]; then
+            echo "iOS $sdk SDK is older than 27: CI builds with IPHONEOS_DEPLOYMENT_TARGET=${major}.0"
+            echo "IOS_DEPLOYMENT_OVERRIDE=IPHONEOS_DEPLOYMENT_TARGET=${major}.0" >> "$GITHUB_ENV"
+          fi
       - run: xcodebuild -version && xcrun --sdk iphonesimulator --show-sdk-version
       - name: Install XcodeGen
         run: |
           brew install xcodegen
           xcodegen --version
       - run: xcodegen generate --spec ios/project.yml
-      - run: xcodebuild -project ios/Alfred.xcodeproj -scheme Alfred -destination 'generic/platform=iOS Simulator' -derivedDataPath ios/build CODE_SIGNING_ALLOWED=NO build
+      # TEMPORARY, CI only: no macOS runner has Xcode 27 yet, so the select step sets
+      # IOS_DEPLOYMENT_OVERRIDE to the older SDK's major version and this step passes it here.
+      # Remove the variable from this command once a runner has Xcode 27.
+      - name: Build the Alfred scheme for the simulator
+        run: xcodebuild -project ios/Alfred.xcodeproj -scheme Alfred -destination 'generic/platform=iOS Simulator' -derivedDataPath ios/build CODE_SIGNING_ALLOWED=NO ${IOS_DEPLOYMENT_OVERRIDE:-} build
