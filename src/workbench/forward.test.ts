@@ -178,9 +178,19 @@ test("a command with files is forwarded as the command set allows it", async () 
   assert.equal(res.status, 202);
 });
 
+test("a question.answer is forwarded, and Alfred's 404 for a question that is not open comes back", async () => {
+  const command = { type: "question.answer", questionId: "q-fwd", answers: { "报告用哪种格式？": "短表格" } };
+  const res = await fetch(`${open}/api/commands`, { method: "POST", headers: { ...bearer, "Content-Type": "application/json" }, body: JSON.stringify(command) });
+  assert.equal(res.status, 202);
+  const sent = upstreamSeen.at(-1);
+  assert.deepEqual(JSON.parse(sent?.body.toString("utf8") ?? ""), command);
+});
+
 test("an invalid command gets 400 with the parser's error line and never reaches Alfred", async () => {
   const before = upstreamSeen.length;
   const cases: unknown[] = [
+    { type: "question.answer", questionId: "q-bad", answers: {} },
+    { type: "question.answer", questionId: "q-bad", answers: { 问题: "" } },
     { type: "message.send", clientId: "c-bad-1", text: "   " },
     { type: "run.stop" },
     { type: "message.send", clientId: "c-bad-2", text: "", files: [{ path: "notes/a.md" }] },

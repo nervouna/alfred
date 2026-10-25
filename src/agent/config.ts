@@ -330,17 +330,23 @@ export interface PromptContext {
   memory?: PromptIndex;
   /** Whether the Agent tool and its delegation rules are offered; default true. */
   subagents?: boolean;
+  /** Whether AskUserQuestion is offered, so the prompt says when to use it; default false. */
+  questions?: boolean;
   /** Whether the workbench section is included; default WORKBENCH_ON. */
   workbench?: boolean;
   /** The workbench's base URL for links; default WORKBENCH_URL. */
   workbenchUrl?: string;
 }
 
+/** When to use the AskUserQuestion tool, as the last bullet of the reply rules. */
+const ASK_LINE =
+  "- The AskUserQuestion tool asks the owner a question with a few options and waits for the answer, however long it takes. Use it when a choice between a few options blocks progress and you cannot decide it yourself; never for things you can decide.";
+
 export function systemPrompt(now: Date, context: PromptContext = {}): string {
   const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const date = now.toLocaleDateString("en-CA", { timeZone: tz });
   const weekday = now.toLocaleDateString("en-US", { weekday: "long", timeZone: tz });
-  const core = `You are Alfred, a personal research assistant for one person. They talk to you through WeChat on their phone and see only your final reply, never your tool calls.
+  const core = `You are Alfred, a personal research assistant for one person. They talk to you through WeChat or the app on their phone and see only your final reply, never your tool calls.
 
 Today is ${date} (${weekday}), time zone ${tz}.
 
@@ -361,7 +367,7 @@ Your working directory is the workspace, and nothing outside it is accessible. F
 - WeChat opens .md, .pdf, images and Office files, but not .html, so never send HTML. Images sent with send_file arrive as image messages.
 - For formal reports, anything with charts or wide tables, or anything the user may keep or forward: write Markdown, or self-contained HTML when you need charts, convert it with render_pdf, and send the PDF. Draw charts as inline SVG. Rendering is sandboxed: only workspace images, stylesheets and fonts load, by relative path, e.g. ![](../images/<date>/cover.jpg) from reports/; network URLs, files outside the workspace, iframes and scripts do not.
 - If a request is ambiguous in a way that changes the result, ask one short question. Otherwise proceed and state your assumptions.`;
-  const sections = [core];
+  const sections = [context.questions ? `${core}\n${ASK_LINE}` : core];
   if (context.workbench ?? WORKBENCH_ON) sections.push(workbenchSection(context.workbenchUrl ?? WORKBENCH_URL));
   if (context.subagents !== false) sections.push(delegationSection());
   sections.push(rulesPromptSection(context.rootRules), memorySection(context.memory ?? { lines: [], total: 0 }));

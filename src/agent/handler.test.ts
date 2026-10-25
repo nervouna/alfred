@@ -26,7 +26,8 @@ Object.assign(process.env, {
 const { createAgentHandler } = await import("./handler.ts");
 const { EventLog, isLiveEvent } = await import("../events.ts");
 const { readRunFile } = await import("../runs.ts");
-const { appOutbound } = await import("../channels.ts");
+const { InvalidAnswer, appOutbound } = await import("../channels.ts");
+const { questionText } = await import("./questions.ts");
 
 const cleanups: (() => Promise<void>)[] = [];
 after(async () => {
@@ -286,13 +287,15 @@ function setup(options: { turn?: TurnFn; progressMs?: number; interruptMs?: numb
   });
   const messages = (): Message[] => events.readSince(0).flatMap((e) => (e.type === "message.created" ? [e.data] : []));
   const runs = (): Run[] => events.readSince(0).flatMap((e) => (e.type === "run.updated" ? [e.data] : []));
+  const questions = () => events.readSince(0).flatMap((e) => (e.type === "question.asked" ? [e.data] : []));
+  const answered = () => events.readSince(0).flatMap((e) => (e.type === "question.answered" ? [e.data] : []));
   const finished = (n = 1) => runs().filter((r) => r.kind === "task" && r.status !== "running").length >= n;
   const send = (channel: Channel, text: string, more: Partial<Inbound> = {}) => handler.submit({ channel, text, files: [], ...more });
   /** The run's id once it started, and the ids of the background subagents it started so far. */
   const taskId = (): string => runs().findLast((r) => r.kind === "task")?.id ?? "";
   const subagentIds = (): string[] => [...new Set(runs().filter((r) => r.kind === "subagent").map((r) => r.id))];
   const statusOf = (id: string): string | undefined => runs().findLast((r) => r.id === id)?.status;
-  return { handler, wechat, app, events, agent, live, messages, runs, finished, send, taskId, subagentIds, statusOf };
+  return { handler, wechat, app, events, agent, live, messages, runs, questions, answered, finished, send, taskId, subagentIds, statusOf };
 }
 
 const STEERED = "收到，会在当前步骤结束后转给 Alfred。";
@@ -956,4 +959,429 @@ test("the abort fallback is dropped when the interrupted turn ends in time", asy
   await until("the run to stop", () => t.statusOf(runId) === "stopped");
   await sleep(450);
   assert.equal(t.agent.signals[0]?.aborted, false, "nothing aborts the run afterwards");
+});
+
+// Structured questions: the SDK's AskUserQuestion, answered in a PreToolUse hook (see questions.ts).
+
+const FORMAT_ASK = {
+  questions: [
+    {
+      question: "报告用哪种格式？",
+      header: "报告格式",
+      multiSelect: false,
+      options: [
+        { label: "短表格", description: "一张对比表", preview: "<table></table>" },
+        { label: "长文章", description: "完整分析" },
+      ],
+    },
+  ],
+};
+const FORMAT_Q = FORMAT_ASK.questions[0]?.question ?? "";
+const VENDORS_ASK = {
+  questions: [
+    {
+      question: "要对比哪些供应商？",
+      header: "供应商",
+      multiSelect: true,
+      options: [
+        { label: "Hetzner", description: "欧洲，价格最低" },
+        { label: "Vultr", description: "节点多" },
+        { label: "DigitalOcean", description: "文档好" },
+      ],
+    },
+  ],
+};
+const VENDORS_Q = VENDORS_ASK.questions[0]?.question ?? "";
+
+interface Decision {
+  permissionDecision: string;
+  permissionDecisionReason?: string;
+  updatedInput?: { answers?: Record<string, string> };
+}
+
+/** The agent calls AskUserQuestion: every PreToolUse hook of the options runs, as in the SDK, and a deny wins. */
+async function askTool(
+  turn: Turn,
+  input: unknown,
+  opts: { agentId?: string; signal?: AbortSignal; toolUseId?: string } = {},
+): Promise<Decision | undefined> {
+  const toolUseId = opts.toolUseId ?? "toolu_ask";
+  const event = {
+    hook_event_name: "PreToolUse",
+    session_id: SESSION,
+    transcript_path: "/dev/null",
+    cwd: "/",
+    tool_name: "AskUserQuestion",
+    tool_input: input,
+    tool_use_id: toolUseId,
+    ...(opts.agentId ? { agent_id: opts.agentId, agent_type: "general-purpose" } : {}),
+  };
+  const hooks = (turn.options.hooks?.PreToolUse ?? []).flatMap((matcher) => matcher.hooks);
+  const outputs = await Promise.all(hooks.map((hook) => hook(event as never, toolUseId, { signal: opts.signal ?? new AbortController().signal })));
+  const decisions = outputs.flatMap((out) => {
+    const specific = "hookSpecificOutput" in out ? (out.hookSpecificOutput as Decision | undefined) : undefined;
+    return specific?.permissionDecision ? [specific] : [];
+  });
+  return decisions.find((d) => d.permissionDecision === "deny") ?? decisions[0];
+}
+
+/** A turn that asks `input` once, records the hook's decision and ends as the SDK does when the call was denied by a stop. */
+function asking(input: unknown, decisions: (Decision | undefined)[]): TurnFn {
+  return async (_prompt, _signal, turn) => {
+    const decision = await askTool(turn, input);
+    decisions.push(decision);
+    return decision?.permissionDecision === "deny" ? INTERRUPTED : "问完了";
+  };
+}
+
+const idOfOpenQuestion = (t: ReturnType<typeof setup>): string => t.questions().at(-1)?.id ?? "";
+
+test("a question in a WeChat run is recorded, sent to WeChat as text and held until it is answered; the tool call then gets the answers", async () => {
+  const decisions: (Decision | undefined)[] = [];
+  const t = setup({ turn: asking(FORMAT_ASK, decisions) });
+  await t.send("wechat", "出一份报告");
+  await until("the question", () => t.questions().length === 1);
+
+  const [asked] = t.questions();
+  assert.ok(asked);
+  assert.match(asked.id, /^[A-Za-z0-9_-]{1,64}$/);
+  assert.equal(asked.runId, t.taskId());
+  assert.deepEqual(asked.questions, [
+    {
+      question: FORMAT_Q,
+      header: "报告格式",
+      options: [
+        { label: "短表格", description: "一张对比表" },
+        { label: "长文章", description: "完整分析" },
+      ],
+      multiSelect: false,
+    },
+  ]);
+  assert.deepEqual(t.wechat.texts, [questionText(asked.questions)]);
+  assert.deepEqual(t.wechat.texts, ["【报告格式】报告用哪种格式？\n1. 短表格：一张对比表\n2. 长文章：完整分析\n回复编号或直接打字回答。"]);
+  assert.deepEqual(t.app.texts, []);
+  const sentAsMessage = t.messages().find((m) => m.direction === "out" && m.text === t.wechat.texts[0]);
+  assert.deepEqual([sentAsMessage?.channel, sentAsMessage?.runId], ["wechat", asked.runId], "recorded like any text sent in the run");
+
+  await sleep(100);
+  assert.deepEqual(decisions, [], "the call is held while the question is open");
+  assert.equal(t.runs().findLast((r) => r.kind === "task")?.status, "running");
+
+  assert.equal(await t.handler.answerQuestion(asked.id, { [FORMAT_Q]: "长文章" }), true);
+  await until("the call to be allowed", () => decisions.length === 1);
+  assert.deepEqual(decisions[0], {
+    hookEventName: "PreToolUse",
+    permissionDecision: "allow",
+    updatedInput: { ...FORMAT_ASK, answers: { [FORMAT_Q]: "长文章" } },
+  });
+  assert.deepEqual(t.answered(), [{ id: asked.id, runId: asked.runId, answers: { [FORMAT_Q]: "长文章" } }]);
+  await until("the run to finish", () => t.finished());
+  assert.equal(t.wechat.texts.at(-1), "问完了");
+  assert.equal(await t.handler.answerQuestion(asked.id, { [FORMAT_Q]: "短表格" }), false, "it is answered once");
+  assert.equal(t.answered().length, 1);
+});
+
+test("a question in an app run sends no text to any channel: the event is the delivery", async () => {
+  const decisions: (Decision | undefined)[] = [];
+  const t = setup({ turn: asking(FORMAT_ASK, decisions) });
+  await t.send("app", "出一份报告", { clientId: "c-q1" });
+  await until("the question", () => t.questions().length === 1);
+
+  assert.deepEqual(t.wechat.texts, []);
+  assert.deepEqual(t.app.texts, []);
+  assert.deepEqual(t.messages().map((m) => [m.direction, m.text]), [["in", "出一份报告"]], "no message for the question");
+  await t.handler.answerQuestion(idOfOpenQuestion(t), { [FORMAT_Q]: "短表格" });
+  await until("the run to finish", () => t.finished());
+  assert.equal(decisions[0]?.permissionDecision, "allow");
+});
+
+test("a reply of option numbers answers a single question with the labels; the message is recorded with the run id and does not steer the run", async () => {
+  const decisions: (Decision | undefined)[] = [];
+  const t = setup({ turn: asking(VENDORS_ASK, decisions) });
+  await t.send("wechat", "对比供应商");
+  await until("the question", () => t.questions().length === 1);
+  const runId = t.taskId();
+
+  await t.send("wechat", "1 3");
+  await until("the call to be allowed", () => decisions.length === 1);
+  assert.deepEqual(decisions[0]?.updatedInput?.answers, { [VENDORS_Q]: "Hetzner, DigitalOcean" });
+  assert.deepEqual(t.answered().map((a) => a.answers), [{ [VENDORS_Q]: "Hetzner, DigitalOcean" }]);
+  const reply = t.messages().find((m) => m.direction === "in" && m.text === "1 3");
+  assert.equal(reply?.runId, runId, "recorded with the run id");
+  assert.equal(reply?.channel, "wechat");
+  await until("the run to finish", () => t.finished());
+  assert.deepEqual(t.agent.prompts, ["对比供应商"], "the reply was not pushed as a follow-up");
+  assert.ok(!t.wechat.texts.includes(STEERED), "and not acknowledged as one");
+  assert.deepEqual(t.wechat.texts.slice(1), ["问完了"]);
+});
+
+test("other text is free text, given as the answer to every question of the ask, from either channel", async () => {
+  const decisions: (Decision | undefined)[] = [];
+  const both = { questions: [...FORMAT_ASK.questions, ...VENDORS_ASK.questions] };
+  const t = setup({ turn: asking(both, decisions) });
+  await t.send("wechat", "出报告");
+  await until("the question", () => t.questions().length === 1);
+
+  await t.send("app", "1", { clientId: "c-free" });
+  await until("the call to be allowed", () => decisions.length === 1);
+  assert.deepEqual(decisions[0]?.updatedInput?.answers, { [FORMAT_Q]: "1", [VENDORS_Q]: "1" }, "with several questions, even a number is text");
+  const reply = t.messages().find((m) => m.direction === "in" && m.channel === "app");
+  assert.equal(reply?.runId, t.taskId());
+  await until("the run to finish", () => t.finished());
+  assert.deepEqual(t.app.texts, [], "no acknowledgement either");
+});
+
+test("free text answers a single question too, and a number that is no option is text", async () => {
+  const decisions: (Decision | undefined)[] = [];
+  const t = setup({ turn: asking(FORMAT_ASK, decisions) });
+  await t.send("wechat", "出报告");
+  await until("the question", () => t.questions().length === 1);
+  await t.send("wechat", "7");
+  await until("the call to be allowed", () => decisions.length === 1);
+  assert.deepEqual(decisions[0]?.updatedInput?.answers, { [FORMAT_Q]: "7" });
+  await until("the run to finish", () => t.finished());
+
+  const again: (Decision | undefined)[] = [];
+  const u = setup({ turn: asking(FORMAT_ASK, again) });
+  await u.send("wechat", "出报告");
+  await until("the question", () => u.questions().length === 1);
+  await u.send("wechat", "  两个都要，先出表格  ");
+  await until("the call to be allowed", () => again.length === 1);
+  assert.deepEqual(again[0]?.updatedInput?.answers, { [FORMAT_Q]: "两个都要，先出表格" });
+  await until("the run to finish", () => u.finished());
+});
+
+test("a slash command does not answer the question, and neither does a message with no text", async () => {
+  const decisions: (Decision | undefined)[] = [];
+  const t = setup({ turn: asking(FORMAT_ASK, decisions) });
+  await t.send("wechat", "出报告");
+  await until("the question", () => t.questions().length === 1);
+  const asked = t.wechat.texts.length;
+
+  await t.send("wechat", "/status");
+  await t.send("app", "/help", { clientId: "c-help" });
+  await t.send("wechat", "", { files: [{ path: "inbox/2026-10-26/a.jpg", kind: "image" as const }] });
+  assert.match(t.wechat.texts[asked] ?? "", /^模型：/, "/status was answered");
+  assert.match(t.app.texts[0] ?? "", /^Alfred 调研助手/, "/help was answered");
+  assert.match(t.wechat.texts.at(-1) ?? "", /^已保存 inbox\/2026-10-26\/a\.jpg/, "a message with only a file was saved");
+  assert.deepEqual(decisions, [], "still held");
+  assert.deepEqual(t.answered(), []);
+
+  assert.equal(await t.handler.answerQuestion(idOfOpenQuestion(t), { [FORMAT_Q]: "短表格" }), true, "the question was still open");
+  await until("the run to finish", () => t.finished());
+});
+
+test("question.answer for an unknown question is refused, and a key that is not a question's text is refused and leaves the question open", async () => {
+  const decisions: (Decision | undefined)[] = [];
+  const t = setup({ turn: asking(FORMAT_ASK, decisions) });
+  assert.equal(await t.handler.answerQuestion("q-none", { [FORMAT_Q]: "x" }), false, "nothing is open yet");
+  await t.send("wechat", "出报告");
+  await until("the question", () => t.questions().length === 1);
+  const id = idOfOpenQuestion(t);
+
+  assert.equal(await t.handler.answerQuestion("q-other", { [FORMAT_Q]: "x" }), false, "an unknown id");
+  await assert.rejects(t.handler.answerQuestion(id, { "不是这个问题": "x" }), (err: unknown) => {
+    assert.ok(err instanceof InvalidAnswer);
+    assert.match(err.message, /不是这个问题/);
+    return true;
+  });
+  await assert.rejects(t.handler.answerQuestion(id, { [FORMAT_Q]: "x", 多余: "y" }), InvalidAnswer);
+  assert.deepEqual(decisions, []);
+  assert.deepEqual(t.answered(), []);
+
+  assert.equal(await t.handler.answerQuestion(id, { [FORMAT_Q]: "x" }), true);
+  await until("the run to finish", () => t.finished());
+  assert.equal(t.answered().length, 1);
+});
+
+test("an answer by question.answer may leave a question of the ask unanswered", async () => {
+  const decisions: (Decision | undefined)[] = [];
+  const t = setup({ turn: asking({ questions: [...FORMAT_ASK.questions, ...VENDORS_ASK.questions] }, decisions) });
+  await t.send("app", "出报告", { clientId: "c-part" });
+  await until("the question", () => t.questions().length === 1);
+  await t.handler.answerQuestion(idOfOpenQuestion(t), { [VENDORS_Q]: "Vultr" });
+  await until("the run to finish", () => t.finished());
+  assert.deepEqual(decisions[0]?.updatedInput?.answers, { [VENDORS_Q]: "Vultr" });
+});
+
+test("/stop cancels an open question: it is recorded as cancelled, the call is denied with the reason, and the run ends stopped", async () => {
+  const decisions: (Decision | undefined)[] = [];
+  const t = setup({ turn: asking(FORMAT_ASK, decisions) });
+  await t.send("wechat", "出报告");
+  await until("the question", () => t.questions().length === 1);
+  const asked = t.questions()[0];
+
+  await t.send("wechat", "/stop");
+  await until("the call to be denied", () => decisions.length === 1);
+  assert.deepEqual(decisions[0], { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "The user stopped the run" });
+  assert.deepEqual(t.answered(), [{ id: asked?.id, runId: asked?.runId, answers: {}, cancelled: true }]);
+  await until("the run to finish", () => t.finished());
+  assert.equal(t.statusOf(t.taskId()), "stopped");
+  assert.ok(t.wechat.texts.includes("已停止当前任务。"));
+  assert.equal(t.agent.calls.interrupt, 1);
+  assert.equal(await t.handler.answerQuestion(asked?.id ?? "", { [FORMAT_Q]: "x" }), false, "a cancelled question cannot be answered");
+  assert.equal(t.answered().length, 1);
+});
+
+test("run.stop for the run (stopRun) cancels the question the same way", async () => {
+  const decisions: (Decision | undefined)[] = [];
+  const t = setup({ turn: asking(FORMAT_ASK, decisions) });
+  await t.send("app", "出报告", { clientId: "c-stopq" });
+  await until("the question", () => t.questions().length === 1);
+
+  assert.equal(await t.handler.stopRun(t.taskId(), "app"), true);
+  await until("the run to finish", () => t.finished());
+  assert.equal(decisions[0]?.permissionDecision, "deny");
+  assert.equal(decisions[0]?.permissionDecisionReason, "The user stopped the run");
+  assert.deepEqual(t.answered().map((a) => [a.cancelled, a.answers]), [[true, {}]]);
+  assert.equal(t.statusOf(t.taskId()), "stopped");
+});
+
+test("an aborted signal on the held call cancels the question", async () => {
+  const abort = new AbortController();
+  const decisions: (Decision | undefined)[] = [];
+  const t = setup({
+    turn: async (_prompt, _signal, turn) => {
+      const decision = await askTool(turn, FORMAT_ASK, { signal: abort.signal });
+      decisions.push(decision);
+      return INTERRUPTED;
+    },
+  });
+  await t.send("wechat", "出报告");
+  await until("the question", () => t.questions().length === 1);
+  abort.abort();
+  await until("the call to be denied", () => decisions.length === 1);
+  assert.equal(decisions[0]?.permissionDecision, "deny");
+  assert.equal(decisions[0]?.permissionDecisionReason, "The user stopped the run");
+  assert.deepEqual(t.answered().map((a) => [a.cancelled, a.answers]), [[true, {}]]);
+  assert.equal(await t.handler.answerQuestion(idOfOpenQuestion(t), { [FORMAT_Q]: "x" }), false);
+  await until("the run to finish", () => t.finished());
+});
+
+test("a signal that is already aborted records nothing", async () => {
+  const abort = new AbortController();
+  abort.abort();
+  const decisions: (Decision | undefined)[] = [];
+  const t = setup({
+    turn: async (_prompt, _signal, turn) => {
+      decisions.push(await askTool(turn, FORMAT_ASK, { signal: abort.signal }));
+      return "完";
+    },
+  });
+  await t.send("wechat", "出报告");
+  await until("the run to finish", () => t.finished());
+  assert.equal(decisions[0]?.permissionDecision, "deny");
+  assert.deepEqual([t.questions(), t.answered()], [[], []]);
+  assert.deepEqual(t.wechat.texts, ["完"]);
+});
+
+test("shutdown cancels an open question", async () => {
+  const decisions: (Decision | undefined)[] = [];
+  const t = setup({ turn: asking(FORMAT_ASK, decisions) });
+  await t.send("wechat", "出报告");
+  await until("the question", () => t.questions().length === 1);
+  const asked = t.questions()[0];
+
+  await t.handler.shutdown();
+  assert.deepEqual(t.answered(), [{ id: asked?.id, runId: asked?.runId, answers: {}, cancelled: true }]);
+  await until("the call to be denied", () => decisions.length === 1);
+  assert.equal(decisions[0]?.permissionDecision, "deny");
+  assert.equal(t.statusOf(t.taskId()), "lost");
+});
+
+test("a run that ends with a question open cancels it", async () => {
+  const t = setup({
+    turn: async (_prompt, signal, turn) => {
+      void askTool(turn, FORMAT_ASK); // never awaited: the call is still held when the turn ends
+      await sleep(30);
+      return signal.aborted ? "x" : "完";
+    },
+  });
+  await t.send("wechat", "出报告");
+  await until("the run to finish", () => t.finished());
+  assert.deepEqual(t.answered().map((a) => [a.cancelled, a.answers]), [[true, {}]]);
+  assert.equal(await t.handler.answerQuestion(idOfOpenQuestion(t), { [FORMAT_Q]: "x" }), false);
+});
+
+test("a subagent's call is denied at once with a message to tell the main agent instead, and nothing is asked", async () => {
+  const decisions: (Decision | undefined)[] = [];
+  const t = setup({
+    turn: async (_prompt, _signal, turn) => {
+      decisions.push(await askTool(turn, FORMAT_ASK, { agentId: "agent-9" }));
+      return "完";
+    },
+  });
+  await t.send("wechat", "出报告");
+  await until("the run to finish", () => t.finished());
+
+  assert.equal(decisions[0]?.permissionDecision, "deny");
+  assert.match(decisions[0]?.permissionDecisionReason ?? "", /Tell the main agent what you need to know/);
+  assert.match(decisions[0]?.permissionDecisionReason ?? "", /it will ask/);
+  assert.deepEqual([t.questions(), t.answered()], [[], []]);
+  assert.deepEqual(t.wechat.texts, ["完"]);
+});
+
+test("input that does not fit the tool is denied and asks nothing", async () => {
+  const decisions: (Decision | undefined)[] = [];
+  const t = setup({
+    turn: async (_prompt, _signal, turn) => {
+      decisions.push(await askTool(turn, { questions: [] }));
+      decisions.push(await askTool(turn, { questions: [FORMAT_ASK.questions[0], FORMAT_ASK.questions[0]] }));
+      return "完";
+    },
+  });
+  await t.send("wechat", "出报告");
+  await until("the run to finish", () => t.finished());
+  assert.deepEqual(decisions.map((d) => d?.permissionDecision), ["deny", "deny"]);
+  assert.deepEqual([t.questions(), t.answered()], [[], []]);
+});
+
+test("a free-text message answers every open question when the agent asked in parallel", async () => {
+  const decisions: (Decision | undefined)[] = [];
+  const t = setup({
+    turn: async (_prompt, _signal, turn) => {
+      const [a, b] = await Promise.all([askTool(turn, FORMAT_ASK, { toolUseId: "toolu_a" }), askTool(turn, VENDORS_ASK, { toolUseId: "toolu_b" })]);
+      decisions.push(a, b);
+      return "完";
+    },
+  });
+  await t.send("wechat", "出报告");
+  await until("both questions", () => t.questions().length === 2);
+
+  await t.send("wechat", "2");
+  await until("both calls", () => decisions.length === 2);
+  assert.deepEqual(decisions[0]?.updatedInput?.answers, { [FORMAT_Q]: "长文章" }, "a number maps within the ask it answers");
+  assert.deepEqual(decisions[1]?.updatedInput?.answers, { [VENDORS_Q]: "Vultr" });
+  assert.equal(t.answered().length, 2);
+  await until("the run to finish", () => t.finished());
+});
+
+test("no progress note goes to WeChat while a question waits for the owner", async () => {
+  const decisions: (Decision | undefined)[] = [];
+  const t = setup({ turn: asking(FORMAT_ASK, decisions), progressMs: 20 });
+  await t.send("wechat", "出报告");
+  await until("the question", () => t.questions().length === 1);
+  const before = t.wechat.texts.length;
+  await sleep(150);
+  assert.equal(t.wechat.texts.length, before, "no 仍在处理 note");
+  await t.handler.answerQuestion(idOfOpenQuestion(t), { [FORMAT_Q]: "短表格" });
+  await until("the run to finish", () => t.finished());
+});
+
+test("the question is recorded before its text is sent, so the owner's quick reply finds it open", async () => {
+  const decisions: (Decision | undefined)[] = [];
+  const t = setup({ turn: asking(VENDORS_ASK, decisions) });
+  const order: string[] = [];
+  t.events.subscribe((event) => {
+    if (!isLiveEvent(event)) order.push(event.type === "message.created" ? `message:${event.data.direction}` : event.type);
+  });
+  await t.send("wechat", "对比供应商");
+  await until("the question", () => t.questions().length === 1);
+  await until("its text", () => t.wechat.texts.length === 1);
+  await t.send("wechat", "2");
+  await until("the run to finish", () => t.finished());
+  assert.deepEqual(
+    order.filter((o) => o.startsWith("question") || o.startsWith("message")),
+    ["message:in", "question.asked", "message:out", "message:in", "question.answered", "message:out"],
+  );
 });

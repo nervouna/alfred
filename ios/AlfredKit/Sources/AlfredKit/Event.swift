@@ -6,6 +6,10 @@ public struct Event: Decodable, Hashable, Sendable {
     public enum Payload: Hashable, Sendable {
         case messageCreated(Message)
         case runUpdated(Run)
+        /// Alfred asks the owner something and the run waits.
+        case questionAsked(QuestionAsked)
+        /// The question was answered, or cancelled.
+        case questionAnswered(QuestionAnswered)
         /// An event type this client does not know. Its `data` is not decoded.
         case unknown(type: String)
     }
@@ -28,6 +32,10 @@ public struct Event: Decodable, Hashable, Sendable {
             payload = .messageCreated(try container.decode(Message.self, forKey: .data))
         case "run.updated":
             payload = .runUpdated(try container.decode(Run.self, forKey: .data))
+        case "question.asked":
+            payload = .questionAsked(try container.decode(QuestionAsked.self, forKey: .data))
+        case "question.answered":
+            payload = .questionAnswered(try container.decode(QuestionAnswered.self, forKey: .data))
         default:
             payload = .unknown(type: type)
         }

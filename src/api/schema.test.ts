@@ -223,3 +223,78 @@ test("a message needs text or files, its paths stay in the workspace, and its ti
   }
   assert.equal(MessageSchema.safeParse({ ...message, text: "hi", files: [{ path: "reports/a..b.md" }] }).success, true);
 });
+
+const QUESTION = {
+  question: "报告用哪种格式？",
+  header: "报告格式",
+  options: [
+    { label: "短表格", description: "一张对比表" },
+    { label: "长文章", description: "完整分析" },
+  ],
+  multiSelect: false,
+};
+const asked = (data: Record<string, unknown>) => ({ id: 1, at: "2026-10-25T08:36:00.000Z", type: "question.asked", data });
+const answered = (data: Record<string, unknown>) => ({ id: 2, at: "2026-10-25T08:36:42.000Z", type: "question.answered", data });
+
+test("question.asked has an id of 1 to 64 safe characters and one to four questions of two to four options", () => {
+  const ok = (data: Record<string, unknown>) => EventSchema.safeParse(asked(data)).success;
+  const base = { id: "q-1", runId: "k7m2qa", questions: [QUESTION] };
+  assert.equal(ok(base), true);
+  assert.equal(ok({ ...base, id: "a".repeat(64) }), true, "64 characters");
+  for (const id of ["", "a".repeat(65), "has space", "问题", "q.1"]) assert.equal(ok({ ...base, id }), false, `id ${id}`);
+  assert.equal(ok({ ...base, runId: "K7M2QA" }), false, "a malformed run id");
+
+  assert.equal(ok({ ...base, questions: [] }), false, "no questions");
+  assert.equal(ok({ ...base, questions: Array.from({ length: 4 }, () => QUESTION) }), true, "four questions");
+  assert.equal(ok({ ...base, questions: Array.from({ length: 5 }, () => QUESTION) }), false, "five questions");
+
+  const option = (n: number) => ({ label: `选项 ${n}`, description: `说明 ${n}` });
+  const withOptions = (n: number) => ({ ...base, questions: [{ ...QUESTION, options: Array.from({ length: n }, (_, i) => option(i)) }] });
+  assert.equal(ok(withOptions(1)), false, "one option");
+  assert.equal(ok(withOptions(2)), true);
+  assert.equal(ok(withOptions(4)), true);
+  assert.equal(ok(withOptions(5)), false, "five options");
+
+  for (const key of ["question", "header", "options", "multiSelect"]) {
+    const { [key]: _gone, ...rest } = QUESTION as Record<string, unknown>;
+    assert.equal(ok({ ...base, questions: [rest] }), false, `a question without ${key}`);
+  }
+  assert.equal(ok({ ...base, questions: [{ ...QUESTION, options: [{ label: "", description: "x" }, option(1)] }] }), false, "an empty label");
+});
+
+test("question.asked keeps what it knows and drops what it does not, a preview among it", () => {
+  const withPreview = { ...QUESTION, options: QUESTION.options.map((o) => ({ ...o, preview: "<b>x</b>" })), extra: 1 };
+  const parsed = EventSchema.parse(asked({ id: "q-1", runId: "k7m2qa", questions: [withPreview], note: "x" }));
+  assert.deepEqual(parsed.data, { id: "q-1", runId: "k7m2qa", questions: [QUESTION] });
+});
+
+test("question.answered carries answers by question text, and a cancelled one carries none", () => {
+  const ok = (data: Record<string, unknown>) => EventSchema.safeParse(answered(data)).success;
+  const base = { id: "q-1", runId: "k7m2qa", answers: { "报告用哪种格式？": "短表格" } };
+  assert.equal(ok(base), true);
+  assert.equal(ok({ ...base, cancelled: false }), true);
+  assert.equal(ok({ ...base, answers: {}, cancelled: true }), true);
+  assert.equal(ok({ ...base, cancelled: true }), false, "a cancelled question has no answers");
+  assert.equal(ok({ ...base, answers: { "报告用哪种格式？": 1 } }), false, "an answer is text");
+  assert.equal(ok({ ...base, answers: { "报告用哪种格式？": "" } }), false, "an answer is not empty");
+  assert.equal(ok({ ...base, id: "has space" }), false);
+  assert.equal(ok({ id: "q-1", runId: "k7m2qa" }), false, "no answers key");
+});
+
+test("question.answer names a question and gives each answer 1 to 2000 characters, a character being a code point", () => {
+  const answer = (over: Record<string, unknown>) => parseCommand({ type: "question.answer", questionId: "q-1", answers: { 问题: "短表格" }, ...over });
+  assert.equal(answer({}).ok, true);
+  assert.equal(answer({ answers: { 问题: "a".repeat(2000) } }).ok, true, "2000 characters");
+  assert.equal(answer({ answers: { 问题: "a".repeat(2001) } }).ok, false, "2001 characters");
+  assert.equal(answer({ answers: { 问题: "😀".repeat(2000) } }).ok, true, "2000 emoji are 2000 characters");
+  assert.equal(answer({ answers: { 问题: "😀".repeat(2001) } }).ok, false);
+  assert.equal(answer({ answers: { 问题: "" } }).ok, false, "an empty answer");
+  assert.equal(answer({ answers: {} }).ok, false, "no answers");
+  assert.equal(answer({ answers: { 一: "a", 二: "b", 三: "c", 四: "d" } }).ok, true, "one answer per question");
+  assert.equal(answer({ answers: { 问题: 1 } }).ok, false, "an answer is text");
+  assert.equal(answer({ answers: ["短表格"] }).ok, false, "answers is a map");
+  assert.equal(answer({ questionId: "a".repeat(65) }).ok, false);
+  assert.equal(answer({ questionId: "has space" }).ok, false);
+  assert.equal(answer({ cancelled: true }).ok, false, "an unknown key");
+  assert.deepEqual(answer({ questionId: "q 1" }), { ok: false, error: "questionId: must be 1-64 letters, digits, _ or -" });
+});

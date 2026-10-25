@@ -5,7 +5,7 @@ import XCTest
 final class CommandFixtureTests: XCTestCase {
     func testEveryCommandFixtureRoundTripsToTheSameJSON() throws {
         let files = try Fixtures.jsonFiles(in: "commands")
-        XCTAssertGreaterThanOrEqual(files.count, 2, "one command fixture per command type")
+        XCTAssertGreaterThanOrEqual(files.count, 3, "one command fixture per command type")
         for file in files {
             let name = file.lastPathComponent
             do {
@@ -29,6 +29,21 @@ final class CommandFixtureTests: XCTestCase {
         XCTAssertEqual(send, .messageSend(clientId: "c-7f3a9e", text: "帮我查一下 VPS 价格"))
         let stop = try JSONDecoder().decode(Command.self, from: Data(#"{"type":"run.stop","runId":"k7m2qa"}"#.utf8))
         XCTAssertEqual(stop, .runStop(runId: "k7m2qa"))
+    }
+
+    func testQuestionAnswerCarriesTheQuestionIdAndItsAnswers() throws {
+        let command = try decodeCommand("commands/question-answer.json")
+        XCTAssertEqual(
+            command,
+            .questionAnswer(
+                questionId: "q-8f2a41c0",
+                answers: ["报告用哪种格式？": "短表格", "要对比哪些供应商？": "Hetzner, Vultr"]
+            )
+        )
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(command)) as? [String: Any])
+        XCTAssertEqual(json["type"] as? String, "question.answer")
+        XCTAssertEqual(json["questionId"] as? String, "q-8f2a41c0")
+        XCTAssertEqual((json["answers"] as? [String: String])?["报告用哪种格式？"], "短表格")
     }
 
     func testMessageSendWithFilesCarriesThem() throws {

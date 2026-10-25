@@ -3,9 +3,12 @@ public enum Command: Hashable, Sendable, Codable {
     /// `files` are inbox paths the owner attached. `text` is empty only when `files` is not.
     case messageSend(clientId: String, text: String, files: [FileRef] = [])
     case runStop(runId: String)
+    /// Answers an open question. `answers` maps a question's text to its answer: an option's label, the labels of
+    /// several joined with `, ` for a multi-select question, or free text of 1 to 2000 characters.
+    case questionAnswer(questionId: String, answers: [String: String])
 
     private enum CodingKeys: String, CodingKey {
-        case type, clientId, text, runId, files
+        case type, clientId, text, runId, files, questionId, answers
     }
 
     public init(from decoder: any Decoder) throws {
@@ -20,6 +23,11 @@ public enum Command: Hashable, Sendable, Codable {
             )
         case "run.stop":
             self = .runStop(runId: try container.decode(String.self, forKey: .runId))
+        case "question.answer":
+            self = .questionAnswer(
+                questionId: try container.decode(String.self, forKey: .questionId),
+                answers: try container.decode([String: String].self, forKey: .answers)
+            )
         default:
             throw DecodingError.dataCorruptedError(
                 forKey: .type,
@@ -42,6 +50,10 @@ public enum Command: Hashable, Sendable, Codable {
         case let .runStop(runId):
             try container.encode("run.stop", forKey: .type)
             try container.encode(runId, forKey: .runId)
+        case let .questionAnswer(questionId, answers):
+            try container.encode("question.answer", forKey: .type)
+            try container.encode(questionId, forKey: .questionId)
+            try container.encode(answers, forKey: .answers)
         }
     }
 }

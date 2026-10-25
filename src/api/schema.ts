@@ -16,11 +16,13 @@ export const MAX_MESSAGE_FILES = 10;
 /** The upload limit for one file, in bytes (50 MiB). */
 export const MAX_UPLOAD_BYTES = 52_428_800;
 const MAX_TEXT_CHARS = 20_000;
+const MAX_ANSWER_CHARS = 2000;
 
 const IsoTimestampSchema = z.iso.datetime();
 // The shape newRunId in src/runs.ts draws from: no 0, o, 1, l or i.
 const RunIdSchema = z.string().regex(/^[2-9a-hjkmnp-z]{6}$/, "must be a six-character run id");
 const ClientIdSchema = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "must be 1-64 letters, digits, _ or -");
+const QuestionIdSchema = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "must be 1-64 letters, digits, _ or -");
 
 export const ChannelSchema = z.enum(["app", "wechat"]);
 
@@ -91,11 +93,50 @@ export const StepSchema = z.object({
 // Compile-time check that StepSchema is exactly RunStep in src/runs.ts.
 type StepMatches = Expect<Equals<z.infer<typeof StepSchema>, RunStep>>;
 
+/** One choice of a question. The agent's preview of an option is not part of the contract. */
+export const QuestionOptionSchema = z.object({
+  label: z.string().min(1, "must not be empty"),
+  description: z.string(),
+});
+
+/** One question Alfred asks the owner mid-run: two to four options, one or several of which may be picked. */
+export const QuestionSchema = z.object({
+  question: z.string().min(1, "must not be empty"),
+  header: z.string().min(1, "must not be empty"),
+  options: z.array(QuestionOptionSchema).min(2, "must have at least 2 options").max(4, "must have at most 4 options"),
+  multiSelect: z.boolean(),
+});
+
+/** The data of question.asked: a run waits on these questions until they are answered or cancelled. */
+export const QuestionAskedSchema = z.object({
+  id: QuestionIdSchema,
+  runId: RunIdSchema,
+  questions: z.array(QuestionSchema).min(1, "must have at least 1 question").max(4, "must have at most 4 questions"),
+});
+
+/**
+ * The data of question.answered. `answers` maps a question's text to its answer: an option's label, the labels
+ * of several options joined with ", " for a multi-select question, or free text. A cancelled question has none.
+ */
+export const QuestionAnsweredSchema = z
+  .object({
+    id: QuestionIdSchema,
+    runId: RunIdSchema,
+    answers: z.record(z.string(), z.string().min(1, "must not be empty")),
+    cancelled: z.boolean().optional(),
+  })
+  .refine((data) => !data.cancelled || Object.keys(data.answers).length === 0, {
+    path: ["answers"],
+    message: "must be empty when the question was cancelled",
+  });
+
 const EventEnvelope = { id: z.int().positive(), at: IsoTimestampSchema };
 
 export const EventSchema = z.discriminatedUnion("type", [
   z.object({ ...EventEnvelope, type: z.literal("message.created"), data: MessageSchema }),
   z.object({ ...EventEnvelope, type: z.literal("run.updated"), data: RunSchema }),
+  z.object({ ...EventEnvelope, type: z.literal("question.asked"), data: QuestionAskedSchema }),
+  z.object({ ...EventEnvelope, type: z.literal("question.answered"), data: QuestionAnsweredSchema }),
 ]);
 
 const StreamIdSchema = z.string().regex(/^[A-Za-z0-9_.:-]{1,64}$/, "must be 1-64 letters, digits, _, ., : or -");
@@ -194,13 +235,29 @@ export const RunStopSchema = z.strictObject({
   runId: RunIdSchema,
 });
 
-export const CommandSchema = z.discriminatedUnion("type", [MessageSendSchema, RunStopSchema]);
+// An answer is 1 to MAX_ANSWER_CHARS characters of text; the keys must be the texts of the question's questions,
+// which only Alfred, who knows the open question, can check.
+const AnswerTextSchema = z
+  .string()
+  .min(1, "must not be empty")
+  .refine((text) => [...text].length <= MAX_ANSWER_CHARS, `must be at most ${MAX_ANSWER_CHARS} characters`);
+
+export const QuestionAnswerSchema = z.strictObject({
+  type: z.literal("question.answer"),
+  questionId: QuestionIdSchema,
+  answers: z.record(z.string(), AnswerTextSchema).refine((answers) => Object.keys(answers).length > 0, "must answer at least one question"),
+});
+
+export const CommandSchema = z.discriminatedUnion("type", [MessageSendSchema, RunStopSchema, QuestionAnswerSchema]);
 
 export type Channel = z.infer<typeof ChannelSchema>;
 export type FileRef = z.infer<typeof FileRefSchema>;
 export type Message = z.infer<typeof MessageSchema>;
 export type Run = z.infer<typeof RunSchema>;
 export type Step = z.infer<typeof StepSchema>;
+export type Question = z.infer<typeof QuestionSchema>;
+export type QuestionAsked = z.infer<typeof QuestionAskedSchema>;
+export type QuestionAnswered = z.infer<typeof QuestionAnsweredSchema>;
 export type Event = z.infer<typeof EventSchema>;
 export type LiveEvent = z.infer<typeof LiveEventSchema>;
 export type RunList = z.infer<typeof RunListSchema>;
