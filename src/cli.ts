@@ -25,8 +25,10 @@ import { describeError, log, logToFile, mask } from "./log.ts";
 import { BROWSERS_PATH, renderPdf } from "./pdf.ts";
 import { LOG_FILE } from "./runs.ts";
 import { AccessVerifier } from "./workbench/access.ts";
+import { ApnsClient, apnsSettings } from "./workbench/apns.ts";
 import { DeviceStore } from "./workbench/devices.ts";
 import { buildPairing, pairingSettings } from "./workbench/pairing.ts";
+import { describeResult, notify, pushToDevices, startPush } from "./workbench/push.ts";
 import { startWorkbench } from "./workbench/server.ts";
 import { ContextTokenStore, STATE_DIR, WORKSPACE_DIR, loadAccount, loadCursor, requireAccount, saveAccount } from "./store.ts";
 
@@ -41,6 +43,7 @@ const USAGE = `usage: node src/cli.ts <command>
   pdf <source> [output]      render a Markdown or HTML file to PDF
   memory-scan                extract long-term memories from new transcript entries now
   workbench [--dev]          serve the read-only workbench (--dev: no Access check, loopback only)
+  apns-test [text]           send a test notification to every device with a push registration
   pair [--name <name>] [--json]
                              pair the app: create a device and show a QR code to scan (--json: print the pairing instead)
   devices                    list the paired devices
@@ -215,12 +218,32 @@ async function cmdWorkbench(args: string[]): Promise<void> {
     throw new Error(`--dev serves without an Access check, so it listens on loopback only, not ${listen.host}`);
   }
   const close = await startWorkbench({ workspace: WORKSPACE_DIR, tcp: listen && { ...listen, access }, socket });
+  const stopPush = startPush();
   await new Promise<void>((resolve) => {
     process.once("SIGINT", resolve);
     process.once("SIGTERM", resolve);
   });
   log.info("workbench stopping");
+  await stopPush();
   await close();
+}
+
+/** Sends one test notification to every device with a push registration, and prints each device's answer. */
+async function cmdApnsTest(args: string[]): Promise<void> {
+  const setting = apnsSettings();
+  if (!setting.ok) throw new Error(`push is not configured: ${setting.missing.join(", ")} not set`);
+  const { key, keyId, teamId, topic } = setting.settings;
+  const apns = new ApnsClient({ key, keyId, teamId, topic });
+  try {
+    const outcomes = await pushToDevices(notify(args.join(" ").trim() || "推送测试"), new DeviceStore(), apns);
+    if (!outcomes.length) console.log("no device has a push registration");
+    for (const { deviceId, result } of outcomes) {
+      console.log(`${deviceId} ${describeResult(result)}`);
+      if (result.status !== 200) process.exitCode = 1;
+    }
+  } finally {
+    apns.close();
+  }
 }
 
 /** Creates a device and shows the pairing the app scans: server, Access service token and the new device's token. */
@@ -373,6 +396,9 @@ try {
       break;
     case "workbench":
       await cmdWorkbench(args);
+      break;
+    case "apns-test":
+      await cmdApnsTest(args);
       break;
     case "pair":
       cmdPair(args);
