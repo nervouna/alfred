@@ -43,7 +43,7 @@ public struct Timeline: Hashable, Sendable {
         switch event {
         case let .event(stored):
             guard stored.id > lastEventId else { return }
-            if case .unknown = stored.payload { return }
+            // An unknown stored event still moves the resume point, so it is not replayed.
             lastEventId = stored.id
             applyStored(stored.payload)
         case let .live(live):

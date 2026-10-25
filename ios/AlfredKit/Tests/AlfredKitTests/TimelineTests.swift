@@ -121,7 +121,7 @@ final class TimelineTests: XCTestCase {
         XCTAssertEqual(timeline.latestStep["k7m2qa"]?.detail, "https://example.com/pricing")
     }
 
-    func testUnknownEventsChangeNothing() throws {
+    func testUnknownEventsChangeNothingButTheResumePoint() throws {
         var timeline = Timeline()
         timeline.apply(try streamEvent("events/message-created-app-in.json"))
         timeline.apply(try streamEvent("live/message-delta.json"))
@@ -130,7 +130,12 @@ final class TimelineTests: XCTestCase {
 
         timeline.apply(try streamEvent("future/event-unknown-type.json"))
         timeline.apply(try streamEvent("future/live-event-unknown-type.json"))
-        XCTAssertEqual(timeline, before)
+        XCTAssertEqual(timeline.lastEventId, 9)
+        XCTAssertEqual(timeline.messages, before.messages)
+        XCTAssertEqual(timeline.pending, before.pending)
+        XCTAssertEqual(timeline.drafts, before.drafts)
+        XCTAssertEqual(timeline.runs, before.runs)
+        XCTAssertEqual(timeline.latestStep, before.latestStep)
     }
 
     func testAnExtraFieldInAnEventIsIgnored() throws {
