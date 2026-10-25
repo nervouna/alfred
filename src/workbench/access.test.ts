@@ -28,8 +28,8 @@ function claims(patch: Record<string, unknown> = {}): Record<string, unknown> {
   };
 }
 
-function verifier(fetches: string[] = []): AccessVerifier {
-  return new AccessVerifier(config, {
+function verifier(fetches: string[] = [], serviceClientId?: string): AccessVerifier {
+  return new AccessVerifier(serviceClientId === undefined ? config : { ...config, serviceClientId }, {
     now: () => NOW,
     fetcher: async (url) => {
       fetches.push(url);
@@ -85,4 +85,47 @@ test("an unknown key id refetches the keys at most once a minute", async () => {
   assert.deepEqual(await v.verify(sign(claims(), { kid: "k2" })), { error: "unknown signing key" });
   assert.deepEqual(await v.verify(sign(claims(), { kid: "k2" })), { error: "unknown signing key" });
   assert.equal(fetches.length, 1);
+});
+
+// What Access signs for a request that passed a Service Auth policy: the token's client id as
+// common_name, and no email.
+function serviceClaims(patch: Record<string, unknown> = {}): Record<string, unknown> {
+  return claims({ email: undefined, common_name: "abc123.access", type: "app", sub: "", ...patch });
+}
+
+test("a service-token JWT passes with the configured client id", async () => {
+  const v = verifier([], "abc123.access");
+  assert.deepEqual(await v.verify(sign(serviceClaims())), { serviceClientId: "abc123.access" });
+  assert.deepEqual(await v.verify(sign(claims())), { email: "owner@example.com" }, "the owner still passes as the owner");
+});
+
+test("a service-token JWT fails with another client id or none configured", async () => {
+  const token = sign(serviceClaims());
+  for (const v of [verifier([], "other.access"), verifier(), verifier([], "")]) {
+    const verdict = await v.verify(token);
+    assert.ok("error" in verdict);
+    assert.match(verdict.error, /service token/);
+  }
+});
+
+test("a service-token JWT is checked like any other: signature, audience, issuer and lifetime", async () => {
+  const v = verifier([], "abc123.access");
+  const cases: [Record<string, unknown>, RegExp][] = [
+    [{ aud: ["other-app"] }, /audience/],
+    [{ iss: "https://evil.cloudflareaccess.com" }, /issuer/],
+    [{ exp: NOW / 1000 - 3600 }, /expired/],
+  ];
+  for (const [patch, reason] of cases) {
+    const verdict = await v.verify(sign(serviceClaims(patch)));
+    assert.ok("error" in verdict, JSON.stringify(patch));
+    assert.match(verdict.error, reason, JSON.stringify(patch));
+  }
+  assert.deepEqual(await v.verify(sign(serviceClaims(), { key: other.privateKey })), { error: "bad signature" });
+  assert.deepEqual(await v.verify(sign(serviceClaims({ common_name: undefined }))), { error: "not the owner" });
+});
+
+test("a token with another person's email is not a service token, whatever its common_name", async () => {
+  const v = verifier([], "abc123.access");
+  const verdict = await v.verify(sign(claims({ email: "someone@example.com", common_name: "abc123.access" })));
+  assert.deepEqual(verdict, { error: "not the owner" });
 });
