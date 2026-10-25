@@ -40,6 +40,15 @@ test("a URL that is not an https origin is refused", () => {
   }
 });
 
+test("a loopback http URL, with any port, is accepted for local work, and any other http URL is refused", () => {
+  for (const url of ["http://127.0.0.1:18900", "http://localhost:8787", "http://localhost"]) {
+    assert.equal(pairingSettings({ ...ENV, ALFRED_WORKBENCH_URL: url }).server, url);
+  }
+  for (const url of ["http://192.168.1.2:8787", "http://127.0.0.2:8787", "http://0.0.0.0:8787", "http://localhost.example.com:8787", "http://[::1]:8787"]) {
+    assert.throws(() => pairingSettings({ ...ENV, ALFRED_WORKBENCH_URL: url }), /ALFRED_WORKBENCH_URL.*https/, url);
+  }
+});
+
 test("a missing variable is named", () => {
   for (const name of Object.keys(ENV)) {
     for (const value of [undefined, "", "  "]) {

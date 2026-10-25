@@ -175,11 +175,14 @@ export const UploadResultSchema = z.object({
 /** The body of any error response. */
 export const ErrorResponseSchema = z.object({ error: z.string() });
 
-// The server part of a pairing is an https origin: no path, query, fragment or trailing slash.
-function isHttpsOrigin(text: string): boolean {
+// The server part of a pairing is an origin with no path, query, fragment or trailing slash: https, or http on
+// 127.0.0.1 or localhost (any port), for local work with no TLS.
+const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(["127.0.0.1", "localhost"]);
+function isServerOrigin(text: string): boolean {
   try {
     const url = new URL(text);
-    return url.protocol === "https:" && url.origin === text;
+    if (url.origin !== text) return false;
+    return url.protocol === "https:" || (url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname));
   } catch {
     return false;
   }
@@ -188,7 +191,9 @@ function isHttpsOrigin(text: string): boolean {
 /** The QR code the app scans to pair: where Alfred is, the Cloudflare Access service token and the device token. */
 export const PairingSchema = z.strictObject({
   version: z.literal(1),
-  server: z.string().refine(isHttpsOrigin, "must be an https:// origin with no path, query or trailing slash"),
+  server: z
+    .string()
+    .refine(isServerOrigin, "must be an https:// origin, or an http:// origin on 127.0.0.1 or localhost, with no path, query or trailing slash"),
   access: z.strictObject({
     clientId: z.string().regex(/^[A-Za-z0-9_-]+\.access$/, "must be a Cloudflare Access client id ending in .access"),
     clientSecret: z.string().min(1).max(256),
