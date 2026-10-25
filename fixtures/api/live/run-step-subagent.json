@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-25T08:31:40.500Z",
+  "type": "run.step",
+  "data": {
+    "runId": "h6w4tz",
+    "step": {
+      "at": "2026-10-25T08:31:40.500Z",
+      "tool": "Read",
+      "detail": "reports/vps.md",
+      "agent": "reviewer"
+    }
+  }
+}

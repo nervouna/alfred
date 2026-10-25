@@ -1,0 +1,11 @@
+{
+  "type": "message.send",
+  "clientId": "c-7f3a9g",
+  "text": "",
+  "files": [
+    {
+      "path": "inbox/2026-10-25/quote.pdf",
+      "kind": "file"
+    }
+  ]
+}

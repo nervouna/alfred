@@ -1,0 +1,51 @@
+{
+  "type": "message.send",
+  "clientId": "c-7f3a9e",
+  "text": "全部看一下",
+  "files": [
+    {
+      "path": "inbox/2026-10-25/IMG_400.jpg",
+      "kind": "image"
+    },
+    {
+      "path": "inbox/2026-10-25/IMG_401.jpg",
+      "kind": "image"
+    },
+    {
+      "path": "inbox/2026-10-25/IMG_402.jpg",
+      "kind": "image"
+    },
+    {
+      "path": "inbox/2026-10-25/IMG_403.jpg",
+      "kind": "image"
+    },
+    {
+      "path": "inbox/2026-10-25/IMG_404.jpg",
+      "kind": "image"
+    },
+    {
+      "path": "inbox/2026-10-25/IMG_405.jpg",
+      "kind": "image"
+    },
+    {
+      "path": "inbox/2026-10-25/IMG_406.jpg",
+      "kind": "image"
+    },
+    {
+      "path": "inbox/2026-10-25/IMG_407.jpg",
+      "kind": "image"
+    },
+    {
+      "path": "inbox/2026-10-25/IMG_408.jpg",
+      "kind": "image"
+    },
+    {
+      "path": "inbox/2026-10-25/IMG_409.jpg",
+      "kind": "image"
+    },
+    {
+      "path": "inbox/2026-10-25/IMG_410.jpg",
+      "kind": "image"
+    }
+  ]
+}

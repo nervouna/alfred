@@ -30,4 +30,36 @@ final class CommandFixtureTests: XCTestCase {
         let stop = try JSONDecoder().decode(Command.self, from: Data(#"{"type":"run.stop","runId":"k7m2qa"}"#.utf8))
         XCTAssertEqual(stop, .runStop(runId: "k7m2qa"))
     }
+
+    func testMessageSendWithFilesCarriesThem() throws {
+        let withText = try decodeCommand("commands/message-send-files.json")
+        guard case let .messageSend(clientId, text, files) = withText else {
+            return XCTFail("expected message.send, got \(withText)")
+        }
+        XCTAssertEqual(clientId, "c-7f3a9f")
+        XCTAssertEqual(text, "这张图里是什么？")
+        XCTAssertEqual(files.map(\.path), ["inbox/2026-10-25/IMG_0413.jpg"])
+        XCTAssertEqual(files.map(\.kind?.rawValue), ["image"])
+
+        let filesOnly = try decodeCommand("commands/message-send-files-only.json")
+        guard case let .messageSend(_, emptyText, pdfs) = filesOnly else {
+            return XCTFail("expected message.send, got \(filesOnly)")
+        }
+        XCTAssertEqual(emptyText, "")
+        XCTAssertEqual(pdfs.map(\.path), ["inbox/2026-10-25/quote.pdf"])
+    }
+
+    func testMessageSendWithoutFilesHasNoFilesKeyWhenEncoded() throws {
+        let command = try decodeCommand("commands/message-send.json")
+        guard case let .messageSend(_, _, files) = command else {
+            return XCTFail("expected message.send, got \(command)")
+        }
+        XCTAssertEqual(files.count, 0)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(command)) as? [String: Any])
+        XCTAssertNil(json["files"])
+    }
+
+    private func decodeCommand(_ name: String) throws -> Command {
+        try JSONDecoder().decode(Command.self, from: Data(contentsOf: Fixtures.directory.appending(path: name)))
+    }
 }

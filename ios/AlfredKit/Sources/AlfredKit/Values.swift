@@ -55,6 +55,12 @@ public struct RunKind: ExtensibleString {
     public static let subagent = RunKind(rawValue: "subagent")
 }
 
+/// The APNs environment a device token belongs to. A development-signed build uses the sandbox.
+public enum PushEnvironment: String, Hashable, Sendable, Codable {
+    case development
+    case production
+}
+
 /// Where a run stands.
 public struct RunStatus: ExtensibleString {
     public let rawValue: String

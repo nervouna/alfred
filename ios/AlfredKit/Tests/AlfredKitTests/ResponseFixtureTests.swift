@@ -1,0 +1,56 @@
+import AlfredKit
+import Foundation
+import XCTest
+
+final class ResponseFixtureTests: XCTestCase {
+    func testEveryResponseFixtureDecodesToItsType() throws {
+        let files = try Fixtures.jsonFiles(in: "responses")
+        XCTAssertGreaterThanOrEqual(files.count, 4, "an upload, a run list, a run detail and an error")
+        let decoder = JSONDecoder()
+        for file in files {
+            let name = file.lastPathComponent
+            let data = try Data(contentsOf: file)
+            do {
+                switch name {
+                case "upload-result.json": _ = try decoder.decode(UploadResult.self, from: data)
+                case "run-list.json": _ = try decoder.decode(RunList.self, from: data)
+                case "run-detail.json": _ = try decoder.decode(RunDetail.self, from: data)
+                case "error.json": _ = try decoder.decode(ErrorResponse.self, from: data)
+                default: XCTFail("\(name) has no response type")
+                }
+            } catch {
+                XCTFail("\(name) does not decode: \(error)")
+            }
+        }
+    }
+
+    func testUploadResultIsAFileUnderInbox() throws {
+        let data = try Data(contentsOf: Fixtures.directory.appending(path: "responses/upload-result.json"))
+        let result = try JSONDecoder().decode(UploadResult.self, from: data)
+        XCTAssertEqual(result.file.path, "inbox/2026-10-25/IMG_0413.jpg")
+        XCTAssertEqual(result.file.kind, .image)
+    }
+
+    func testRunListIsNewestFirst() throws {
+        let data = try Data(contentsOf: Fixtures.directory.appending(path: "responses/run-list.json"))
+        let list = try JSONDecoder().decode(RunList.self, from: data)
+        XCTAssertGreaterThanOrEqual(list.runs.count, 2)
+        let starts = list.runs.map(\.startedAt)
+        XCTAssertEqual(starts, starts.sorted(by: >))
+    }
+
+    func testRunDetailCarriesItsStepsAndTheSubagentRole() throws {
+        let data = try Data(contentsOf: Fixtures.directory.appending(path: "responses/run-detail.json"))
+        let detail = try JSONDecoder().decode(RunDetail.self, from: data)
+        XCTAssertEqual(detail.run.id, "k7m2qa")
+        XCTAssertEqual(detail.steps.map(\.tool), ["WebSearch", "Task", "Write"])
+        XCTAssertNil(detail.steps[0].agent)
+        XCTAssertEqual(detail.steps[1].agent, "reviewer")
+    }
+
+    func testErrorResponseCarriesItsMessage() throws {
+        let data = try Data(contentsOf: Fixtures.directory.appending(path: "responses/error.json"))
+        let error = try JSONDecoder().decode(ErrorResponse.self, from: data)
+        XCTAssertEqual(error.error, "no live or queued run k7m2qa")
+    }
+}

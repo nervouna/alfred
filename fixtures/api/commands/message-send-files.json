@@ -1,0 +1,11 @@
+{
+  "type": "message.send",
+  "clientId": "c-7f3a9f",
+  "text": "这张图里是什么？",
+  "files": [
+    {
+      "path": "inbox/2026-10-25/IMG_0413.jpg",
+      "kind": "image"
+    }
+  ]
+}

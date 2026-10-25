@@ -68,8 +68,9 @@ final class FutureFixtureTests: XCTestCase {
 
     func testEveryFutureFixtureDecodesWithoutError() throws {
         let files = try Fixtures.jsonFiles(in: "future")
-        XCTAssertGreaterThanOrEqual(files.count, 2, "an unknown type and an extra field")
-        for file in files {
+        XCTAssertGreaterThanOrEqual(files.count, 3, "an unknown type, an extra field and a live event")
+        // Live events have no id; LiveEventFixtureTests decodes them.
+        for file in files where !file.lastPathComponent.hasPrefix("live-") {
             let name = file.lastPathComponent
             do {
                 let event = try JSONDecoder().decode(Event.self, from: Data(contentsOf: file))
