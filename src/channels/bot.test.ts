@@ -102,12 +102,16 @@ fs.writeFileSync(
   path.join(tmp, "state", "account.json"),
   JSON.stringify({ botToken: "bot-token", botId: "b@im.bot", baseUrl, ownerUserId: OWNER, loggedInAt: new Date().toISOString() }),
 );
-after(() => {
-  ilink.server.close();
+// The test has stopped the bot and the agent by now (see its t.after), so nothing is left to talk to the server or use the directory.
+after(async () => {
+  await new Promise<void>((resolve) => {
+    ilink.server.close(() => resolve());
+    ilink.server.closeAllConnections();
+  });
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
-test("a WeChat message long-polled by the bot gets its reply on WeChat, and both are events; the app channel shares the timeline", async () => {
+test("a WeChat message long-polled by the bot gets its reply on WeChat, and both are events; the app channel shares the timeline", async (t) => {
   const { createBotContext, runBot } = await import("../bot.ts");
   const { appOutbound } = await import("../channels.ts");
   const { WeChatChannel, wechatHandler } = await import("./wechat.ts");
@@ -125,9 +129,23 @@ test("a WeChat message long-polled by the bot gets its reply on WeChat, and both
   });
   const stop = new AbortController();
   const bot = runBot(ctx, wechatHandler(wechat, agent), stop.signal);
+  // Whether the assertions below pass or not, the bot stops polling and the agent shuts down before the server and the directory go.
+  t.after(async () => {
+    stop.abort();
+    try {
+      await bot;
+    } finally {
+      await agent.shutdown();
+    }
+  });
 
   const sends = () => ilink.calls.filter((c) => c.path.endsWith("/sendmessage"));
-  await until("the reply", () => sends().length === 1);
+  const messages = () => events.readSince(0).flatMap((e) => (e.type === "message.created" ? [e.data] : []));
+  const finishedTasks = () => events.readSince(0).filter((e) => e.type === "run.updated" && e.data.kind === "task" && e.data.status === "done").length;
+
+  // The reply is an event once WeChat has taken it, which is a moment after the fake server has seen it.
+  await until("the reply", () => messages().some((m) => m.channel === "wechat" && m.direction === "out"));
+  assert.equal(sends().length, 1);
   const [send] = sends();
   const msg = send?.body.msg as { to_user_id: string; context_token: string; item_list: { text_item: { text: string } }[] };
   assert.equal(msg.to_user_id, OWNER);
@@ -135,11 +153,13 @@ test("a WeChat message long-polled by the bot gets its reply on WeChat, and both
   assert.equal(msg.item_list[0]?.text_item.text, "echo: 你好");
 
   // A message from the app joins the same timeline and the same session, and is answered on the app channel only.
+  // It is sent once the first run is over: while that run winds down, the message would be queued behind it and acknowledged, not answered.
+  await until("the first run to finish", () => finishedTasks() === 1);
   await agent.submit({ channel: "app", text: "来自 app", files: [], clientId: "c-1" });
-  await until("the app run to finish", () => events.readSince(0).some((e) => e.type === "message.created" && e.data.channel === "app" && e.data.direction === "out"));
+  await until("the app run to finish", () => finishedTasks() === 2);
   assert.equal(sends().length, 1, "nothing more went to WeChat");
 
-  const timeline = events.readSince(0).flatMap((e) => (e.type === "message.created" ? [[e.data.channel, e.data.direction, e.data.text]] : []));
+  const timeline = messages().map((m) => [m.channel, m.direction, m.text]);
   assert.deepEqual(timeline, [
     ["wechat", "in", "你好"],
     ["wechat", "out", "echo: 你好"],
