@@ -4,14 +4,14 @@ import os from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
 
-import type { Run } from "./api/schema.ts";
+import type { Event, LiveEvent, Run } from "./api/schema.ts";
 
 // store.ts reads this at import time, so set it before loading the module under test.
 const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "alfred-events-")));
 process.env.ALFRED_STATE_DIR = path.join(tmp, "state");
 after(() => fs.rmSync(tmp, { recursive: true, force: true }));
 
-const { EVENTS_LOG, EventLog, sharedEventLog } = await import("./events.ts");
+const { EVENTS_LOG, EventLog, isLiveEvent, sharedEventLog } = await import("./events.ts");
 
 const run: Run = {
   id: "k7m2qa",
@@ -95,7 +95,9 @@ test("readSince returns at most 1000 events unless told otherwise", () => {
 test("listeners hear each appended event until they unsubscribe", () => {
   const log = new EventLog(logFile("subscribe"));
   const heard: number[] = [];
-  const stop = log.subscribe((event) => heard.push(event.id));
+  const stop = log.subscribe((event) => {
+    if (!isLiveEvent(event)) heard.push(event.id);
+  });
 
   log.append("run.updated", run);
   stop();
@@ -110,7 +112,9 @@ test("a listener that throws does not stop the others or the append", () => {
   log.subscribe(() => {
     throw new Error("listener failed");
   });
-  log.subscribe((event) => heard.push(event.id));
+  log.subscribe((event) => {
+    if (!isLiveEvent(event)) heard.push(event.id);
+  });
 
   assert.equal(log.append("run.updated", run)?.id, 1);
   assert.deepEqual(heard, [1]);
@@ -137,4 +141,64 @@ test("the log directory is created with mode 0700 and the file with mode 0600", 
 
   assert.equal(fs.statSync(path.dirname(file)).mode & 0o777, 0o700);
   assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+});
+
+const delta = { runId: "k7m2qa", streamId: "msg_01.0", text: "你好" };
+
+test("publish reaches subscribers as a live event with a time and no id, writes nothing and leaves lastId alone", () => {
+  const file = logFile("publish");
+  const log = new EventLog(file);
+  assert.ok(log.append("run.updated", run));
+  const before = fs.readFileSync(file, "utf8");
+  const heard: (Event | LiveEvent)[] = [];
+  const stop = log.subscribe((event) => heard.push(event));
+
+  const live = log.publish("message.delta", delta);
+
+  assert.deepEqual(heard, [live], "subscribers get what publish returns");
+  assert.match(live?.at ?? "", /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+  assert.equal(live?.type, "message.delta");
+  assert.deepEqual(live?.data, delta);
+  assert.deepEqual(Object.keys(live ?? {}).sort(), ["at", "data", "type"], "no id");
+  assert.equal(heard[0] !== undefined && isLiveEvent(heard[0]), true);
+  assert.equal(log.lastId(), 1, "the last id did not move");
+  assert.equal(fs.readFileSync(file, "utf8"), before, "nothing was written");
+  assert.deepEqual(log.readSince(0).map((e) => e.id), [1]);
+
+  assert.equal(log.append("run.updated", run)?.id, 2, "the next durable event takes the next id");
+  assert.equal(heard.length, 2);
+  const durable = heard[1];
+  assert.ok(durable && !isLiveEvent(durable), "a durable event has an id");
+
+  stop();
+  log.publish("message.delta", delta);
+  assert.equal(heard.length, 2, "an unsubscribed listener hears no more");
+});
+
+test("publish on a log that was never written creates no file", () => {
+  const file = logFile("publish-only");
+  const log = new EventLog(file);
+  const step = { at: "2026-10-25T08:31:02.000Z", tool: "WebFetch", detail: "https://example.com/pricing" };
+  assert.ok(log.publish("run.step", { runId: "k7m2qa", step }));
+
+  assert.equal(fs.existsSync(path.dirname(file)), false);
+  assert.equal(log.lastId(), 0);
+  assert.deepEqual(log.readSince(0), []);
+});
+
+test("an invalid live event is not published, and a listener that throws does not stop the others", () => {
+  const log = new EventLog(logFile("publish-invalid"));
+  const heard: (Event | LiveEvent)[] = [];
+  log.subscribe(() => {
+    throw new Error("listener failed");
+  });
+  log.subscribe((event) => heard.push(event));
+
+  assert.equal(log.publish("message.delta", { ...delta, text: "" }), undefined, "an empty delta");
+  assert.equal(log.publish("message.delta", { ...delta, runId: "k7m2" }), undefined);
+  assert.equal(log.publish("message.delta", { ...delta, streamId: "has a space" }), undefined);
+  assert.deepEqual(heard, []);
+
+  assert.ok(log.publish("message.delta", delta));
+  assert.equal(heard.length, 1);
 });

@@ -1,12 +1,14 @@
 // The event log: the durable changes a client must see, one JSON line per event
 // in $STATE_DIR/events/events.jsonl. Ids grow by one and follow file order, so a
 // client that reconnects asks for the events after the last id it saw. Only
-// durable events go here; streaming deltas and per-step progress never do.
+// durable events go here. Streaming deltas and per-step progress are live
+// events: publish() tells the listeners and writes nothing, so they have no id
+// and are never replayed.
 
 import fs from "node:fs";
 import path from "node:path";
 
-import { type Event, EventSchema } from "./api/schema.ts";
+import { type Event, EventSchema, type LiveEvent, LiveEventSchema } from "./api/schema.ts";
 import { describeError, log } from "./log.ts";
 import { STATE_DIR } from "./store.ts";
 
@@ -16,7 +18,14 @@ export const EVENTS_LOG = path.join(STATE_DIR, "events", "events.jsonl");
 const DEFAULT_READ_LIMIT = 1000;
 
 type EventOf<T extends Event["type"]> = Extract<Event, { type: T }>;
-export type EventListener = (event: Event) => void;
+type LiveEventOf<T extends LiveEvent["type"]> = Extract<LiveEvent, { type: T }>;
+/** Hears durable and live events, which differ by `id`: only a durable event has one (see isLiveEvent). */
+export type EventListener = (event: Event | LiveEvent) => void;
+
+/** True for a live event: it was never stored and has no id. */
+export function isLiveEvent(event: Event | LiveEvent): event is LiveEvent {
+  return !("id" in event);
+}
 
 /**
  * An append-only log in one file. Several instances on the same file see each
@@ -63,13 +72,7 @@ export class EventLog {
       this.last = event.id;
       this.seenSize += Buffer.byteLength(text);
       this.torn = false;
-      for (const listener of this.listeners) {
-        try {
-          listener(event);
-        } catch (err) {
-          log.error(`an event listener failed on ${event.type} ${event.id}: ${describeError(err)}`);
-        }
-      }
+      this.notify(event);
       return event;
     } catch (err) {
       // The file may now end in a partial line: read it again before the next append.
@@ -77,6 +80,21 @@ export class EventLog {
       log.error(`appending a ${type} event failed: ${describeError(err)}`);
       return undefined;
     }
+  }
+
+  /**
+   * Tells the listeners about a live event: validated, stamped with the time, never stored, and with
+   * no id (the last id does not move). Returns the event, or undefined when it is invalid. Never throws.
+   */
+  publish<T extends LiveEvent["type"]>(type: T, data: LiveEventOf<T>["data"]): LiveEvent | undefined {
+    const parsed = LiveEventSchema.safeParse({ at: new Date().toISOString(), type, data });
+    if (!parsed.success) {
+      const [issue] = parsed.error.issues;
+      log.error(`not publishing an invalid ${type} event: ${issue?.path.map(String).join(".") ?? ""}: ${issue?.message ?? "invalid"}`);
+      return undefined;
+    }
+    this.notify(parsed.data);
+    return parsed.data;
   }
 
   /** Events with an id above `afterId`, oldest first, at most `limit` of them. */
@@ -91,12 +109,22 @@ export class EventLog {
     return events;
   }
 
-  /** Calls `listener` after each append. The returned function stops it. */
+  /** Calls `listener` after each append and for each published live event. The returned function stops it. */
   subscribe(listener: EventListener): () => void {
     this.listeners.add(listener);
     return () => {
       this.listeners.delete(listener);
     };
+  }
+
+  private notify(event: Event | LiveEvent): void {
+    for (const listener of this.listeners) {
+      try {
+        listener(event);
+      } catch (err) {
+        log.error(`an event listener failed on ${event.type}${isLiveEvent(event) ? "" : ` ${event.id}`}: ${describeError(err)}`);
+      }
+    }
   }
 
   private refresh(): void {

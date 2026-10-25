@@ -515,3 +515,73 @@ test("a client that leaves while the backlog is read is not read for any longer"
   assert.ok(reads - leftAt < 5, `${reads - leftAt} pages read after the client left`);
   assert.ok(reads < 60, "the backlog was not read to its end");
 });
+
+const delta = (text: string) => ({ runId: "k7m2qa", streamId: "msg_01.0", text });
+
+test("a live event goes out as a frame with an event and a data line and no id line", async (t) => {
+  const { socket, events } = await start(t);
+  appendRuns(events, 1);
+  const sse = await open(t, socket);
+  await until("the backlog", () => sse.ids().length === 1);
+
+  const live = events.publish("message.delta", delta("你好"));
+  assert.ok(live);
+  await until("the live event", () => sse.text().includes("event: message.delta"));
+  assert.ok(sse.text().endsWith(`event: message.delta\ndata: ${JSON.stringify(live)}\n\n`), "the whole live event on one line");
+  assert.deepEqual(sse.ids(), [1], "the live event has no id line");
+  assert.equal((sse.text().match(/^id: /gm) ?? []).length, 1);
+
+  events.publish("run.step", { runId: "k7m2qa", step: { at: "2026-10-25T08:31:02.000Z", tool: "WebFetch", detail: "https://example.com/pricing" } });
+  appendRuns(events, 1);
+  await until("the next durable event", () => sse.ids().length === 2);
+  assert.deepEqual(sse.ids(), [1, 2], "ids go on as if the live events had not been there");
+  assert.deepEqual(
+    [...sse.text().matchAll(/^event: (.+)$/gm)].map((m) => m[1]),
+    ["run.updated", "message.delta", "run.step", "run.updated"],
+    "in the order they happened",
+  );
+});
+
+test("a live event published while a stream is still sending its backlog is dropped for that stream, not buffered", async (t) => {
+  const { socket, events } = await start(t, { pageSize: 2 });
+  appendRuns(events, 5);
+  let published = 0;
+  events.onRead = () => {
+    published++;
+    events.publish("message.delta", delta(`during ${published}`));
+  };
+  const sse = await open(t, socket);
+  await until("the backlog", () => sse.ids().length === 5);
+
+  events.onRead = undefined;
+  assert.equal(published, 3, "events were published during the three pages of the backlog");
+  events.publish("message.delta", delta("after"));
+  await until("the live event after the backlog", () => sse.text().includes("event: message.delta"));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal((sse.text().match(/^event: message\.delta$/gm) ?? []).length, 1, "only the one that came after the backlog");
+  assert.match(sse.text(), /"text":"after"/);
+  assert.doesNotMatch(sse.text(), /during/);
+  assert.deepEqual(sse.ids(), [1, 2, 3, 4, 5]);
+});
+
+test("a stream resumed with Last-Event-ID or ?after never replays live events", async (t) => {
+  const { socket, events } = await start(t);
+  appendRuns(events, 2);
+  events.publish("message.delta", delta("before the third"));
+  appendRuns(events, 1);
+  events.publish("run.step", { runId: "k7m2qa", step: { at: "2026-10-25T08:31:02.000Z", tool: "Read", detail: "notes/a.md" } });
+  appendRuns(events, 1);
+
+  const byHeader = await open(t, socket, "/events", { "Last-Event-ID": "1" });
+  await until("events 2 to 4", () => byHeader.ids().length === 3);
+  const everything = await open(t, socket);
+  await until("everything", () => everything.ids().length === 4);
+  const byQuery = await open(t, socket, "/events?after=0");
+  await until("everything by query", () => byQuery.ids().length === 4);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  for (const sse of [byHeader, everything, byQuery]) {
+    assert.doesNotMatch(sse.text(), /message\.delta|run\.step/, "live events are not in the log, so they are not in a backlog");
+  }
+  assert.deepEqual(byHeader.ids(), [2, 3, 4]);
+});

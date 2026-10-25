@@ -8,6 +8,7 @@ import type { ModelUsage } from "@anthropic-ai/claude-agent-sdk";
 
 import { TranscriptUsage, unitPrices } from "./cost.ts";
 import { MODELS, SUBAGENT_ROLES, isModelKey, isSubagentRole } from "./config.ts";
+import type { EventLog } from "../events.ts";
 import { RunRecorder } from "../runs.ts";
 import type { RunStatus } from "../runs.ts";
 import type { AgentAdmission, AgentCall } from "./subagents.ts";
@@ -61,6 +62,7 @@ export class BackgroundRuns implements AgentAdmission {
   private readonly overBudget: () => boolean;
   private readonly release: (brief: QueuedBrief) => void;
   private readonly transcriptOf: (agentId: string) => string | undefined;
+  private readonly events?: EventLog;
   /** Admitted Agent calls whose subagent has not started yet, by tool_use id. */
   private readonly launching = new Map<string, BackgroundRun>();
   /** Running subagents, by the SDK's agent (task) id. */
@@ -82,12 +84,15 @@ export class BackgroundRuns implements AgentAdmission {
     release: (brief: QueuedBrief) => void;
     /** A subagent's transcript, once its session is known. */
     transcriptOf: (agentId: string) => string | undefined;
+    /** Where the subagents' runs publish their events; the shared event log by default. */
+    events?: EventLog;
   }) {
     this.parentRunId = opts.parentRunId;
     this.max = opts.max;
     this.overBudget = opts.overBudget;
     this.release = opts.release;
     this.transcriptOf = opts.transcriptOf;
+    this.events = opts.events;
   }
 
   /** Nothing running, starting, queued or handed back: the task's query may end. */
@@ -111,6 +116,7 @@ export class BackgroundRuns implements AgentAdmission {
       role: call.role,
       parentRunId: this.parentRunId,
       queued,
+      events: this.events,
     });
   }
 

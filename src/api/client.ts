@@ -10,7 +10,7 @@ export interface ApiResponse {
   body: string;
 }
 
-/** One event as the stream sends it: its id, its type and the JSON of the whole event. */
+/** One event as the stream sends it: its id, its type and the JSON of the whole event. A live event has no id line, and its id is NaN. */
 export interface Frame {
   id: number;
   type: string;
@@ -111,5 +111,5 @@ export function describeEvent(frame: Frame): string {
   } catch {
     // Not JSON: the raw data stays.
   }
-  return `${frame.id} ${frame.type} ${summary}`;
+  return `${Number.isNaN(frame.id) ? "live" : frame.id} ${frame.type} ${summary}`;
 }
