@@ -287,7 +287,7 @@ Verified WeChat behavior (2026-10-10):
 
 | Path | Content |
 | --- | --- |
-| `$XDG_STATE_HOME/alfred/` (default `~/.local/state/alfred/`, override with `ALFRED_STATE_DIR`) | `account.json` (bot token), `sync.json` (poll cursor), `context-tokens.json`, `agent-state.json` (active and previous session, model and spend per user), `memory-scan.json` (transcript offsets and extraction spend), `memory.lock` (held while a task or memory scan runs); files are mode 600 |
+| `$XDG_STATE_HOME/alfred/` (default `~/.local/state/alfred/`, override with `ALFRED_STATE_DIR`) | `account.json` (bot token), `sync.json` (poll cursor), `context-tokens.json`, `agent-state.json` (active and previous session, model and spend per user), `memory-scan.json` (transcript offsets and extraction spend), `memory.lock` (held while a task or memory scan runs), `events/events.jsonl` (the append-only event log for clients: one line per durable event, ids increase, kept for good); files are mode 600 |
 | `$XDG_STATE_HOME/alfred/claude/` | isolated Claude Code config dir: agent session transcripts used for resume |
 | `$XDG_STATE_HOME/alfred/workspace-plugin/` | the `workspace` skills plugin: a manifest and the `skills` symlink into the workspace, recreated at startup |
 | `$XDG_STATE_HOME/alfred/workbench/` | what the workbench reads: `runs.jsonl` (one line per finished run, kept for good), `runs/<id>.json` (live and recent runs with their steps, kept 30 days), `status.json` (heartbeat), `alfred.log` (the log, rotated at 5 MB to `alfred.log.1`) |

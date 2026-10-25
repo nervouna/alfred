@@ -10,6 +10,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
+import { type EventLog, sharedEventLog } from "./events.ts";
 import { describeError, log } from "./log.ts";
 import { STATE_DIR, readJson, writeJson } from "./store.ts";
 
@@ -219,6 +220,7 @@ export function toolName(tool: string): string {
 export class RunRecorder {
   readonly id: string;
   private readonly file: RunFile;
+  private readonly events: EventLog;
   private timer?: NodeJS.Timeout;
   private lastWrite = 0;
   private finished = false;
@@ -232,8 +234,11 @@ export class RunRecorder {
     queued?: boolean;
     parentRunId?: string;
     role?: string;
+    /** Where the run.updated events go; the shared event log by default. */
+    events?: EventLog;
   }) {
     this.id = init.id ?? newRunId();
+    this.events = init.events ?? sharedEventLog();
     const now = new Date().toISOString();
     this.file = {
       id: this.id,
@@ -251,6 +256,7 @@ export class RunRecorder {
       steps: [],
     };
     this.write();
+    this.publish();
   }
 
   get record(): Readonly<RunFile> {
@@ -299,6 +305,7 @@ export class RunRecorder {
     this.file.status = "running";
     this.file.startedAt = new Date().toISOString();
     this.write();
+    this.publish();
   }
 
   /** Final state: the run file is written at once and the record appended to runs.jsonl. */
@@ -311,6 +318,12 @@ export class RunRecorder {
     if (error) this.file.error = error;
     this.write();
     appendRunLog(toRecord(this.file));
+    this.publish();
+  }
+
+  /** Lifecycle changes only: the client sees the run's record in the event log. */
+  private publish(): void {
+    this.events.append("run.updated", toRecord(this.file));
   }
 
   private schedule(): void {
@@ -378,9 +391,10 @@ export function listRunFiles(dir = RUN_FILES_DIR): RunFile[] {
 
 /**
  * At startup: runs still marked running belonged to an earlier process, so they
- * are lost. Their files say so, and runs.jsonl gets their record. Returns them.
+ * are lost. Their files say so, runs.jsonl gets their record, and the event log
+ * gets a run.updated for each. Returns them.
  */
-export function markLostRuns(dir = RUN_FILES_DIR, logFile = RUNS_LOG): RunRecord[] {
+export function markLostRuns(dir = RUN_FILES_DIR, logFile = RUNS_LOG, events: EventLog = sharedEventLog()): RunRecord[] {
   const lost: RunRecord[] = [];
   for (const f of listRunFiles(dir)) {
     if (f.status !== "running" && f.status !== "queued") continue;
@@ -392,8 +406,10 @@ export function markLostRuns(dir = RUN_FILES_DIR, logFile = RUNS_LOG): RunRecord
     } catch (err) {
       log.warn(`marking run ${f.id} lost failed: ${describeError(err)}`);
     }
-    appendRunLog(toRecord(f), logFile);
-    lost.push(toRecord(f));
+    const record = toRecord(f);
+    appendRunLog(record, logFile);
+    events.append("run.updated", record);
+    lost.push(record);
   }
   return lost;
 }
