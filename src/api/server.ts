@@ -1,18 +1,20 @@
 // The command API: the owner's commands in, Alfred's events out, over a Unix
 // socket (no TCP listener). A process on the same host posts message.send and
 // run.stop to /commands and follows /events as server-sent events, resuming by
-// event id. Every command is validated here by parseCommand.
+// event id. Every command is validated here by parseCommand. Live events (reply
+// text as it is written, the steps of a run) go out as frames without an id and
+// are never replayed.
 
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 
 import type { Intake } from "../channels.ts";
-import type { EventLog } from "../events.ts";
+import { type EventLog, isLiveEvent } from "../events.ts";
 import { describeError, log } from "../log.ts";
 import { STATE_DIR } from "../store.ts";
 import { MAX_COMMAND_BYTES, parseCommand } from "./schema.ts";
-import type { Event } from "./schema.ts";
+import type { Event, LiveEvent } from "./schema.ts";
 
 /** How often an event stream gets a `: ping` comment. */
 export const HEARTBEAT_MS = 30_000;
@@ -81,9 +83,10 @@ function readBody(req: http.IncomingMessage): Promise<string | undefined> {
   });
 }
 
-/** One SSE frame: the whole event on one line of JSON. */
-function frame(event: Event): string {
-  return `id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
+/** One SSE frame: the whole event on one line of JSON. A live event has no id line, so a client's last id stays that of the last durable event. */
+function frame(event: Event | LiveEvent): string {
+  const id = isLiveEvent(event) ? "" : `id: ${event.id}\n`;
+  return `${id}event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
 }
 
 /** An id from a header or a query: a non-negative integer. */
@@ -160,8 +163,10 @@ export async function startApi(opts: ApiOptions): Promise<() => Promise<void>> {
 
   /**
    * Sends the events after `after`: the backlog in pages, then live ones. The stream subscribes first
-   * and buffers what arrives while the backlog is read; events are sent in id order and one with an id
-   * that was already sent is dropped, so nothing is skipped or repeated at the switch to live.
+   * and buffers the durable events that arrive while the backlog is read; events are sent in id order
+   * and one with an id that was already sent is dropped, so nothing is skipped or repeated at the switch
+   * to live. A live event (one without an id) that arrives before that switch is dropped: it was never
+   * stored, so a stream that was not there when it happened never gets it.
    */
   async function stream(res: http.ServerResponse, after: number): Promise<void> {
     res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-store" });
@@ -193,7 +198,12 @@ export async function startApi(opts: ApiOptions): Promise<() => Promise<void>> {
       write(frame(event));
     };
 
-    const unsubscribe = events.subscribe((event) => (live ? send(event) : buffered.push(event)));
+    const unsubscribe = events.subscribe((event) => {
+      if (isLiveEvent(event)) {
+        if (live) write(frame(event));
+      } else if (live) send(event);
+      else buffered.push(event);
+    });
     const timer = setInterval(() => write(": ping\n\n"), heartbeatMs);
     res.on("drain", wake);
     res.once("close", () => {

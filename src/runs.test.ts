@@ -135,6 +135,25 @@ test("steps, file writes and cost updates append no events", () => {
   assert.equal(runUpdates(events).filter((u) => u.id === run.id).length, 2);
 });
 
+test("a step is also published as a live run.step event with the run id and the step as recorded, and is stored nowhere else", () => {
+  const events = new EventLog(path.join(tmp, "live-steps.jsonl"));
+  const heard: unknown[] = [];
+  events.subscribe((event) => heard.push(event));
+  const run = new RunRecorder({ kind: "task", title: "调研", events });
+  const sub = new RunRecorder({ kind: "subagent", title: "读页面", parentRunId: run.id, role: "collector", events });
+  run.step("mcp__alfred__render_pdf", "reports/a.md", "writer");
+  sub.step("WebFetch", "https://example.com/pricing");
+  run.finish("done");
+  sub.finish("done");
+
+  const live = heard.filter((event) => typeof event === "object" && event !== null && !("id" in event)) as { at: string; type: string; data: { runId: string; step: unknown } }[];
+  assert.deepEqual(live.map((e) => [e.type, e.data.runId]), [["run.step", run.id], ["run.step", sub.id]]);
+  assert.deepEqual(live[0]?.data.step, readRunFile(run.id)?.steps[0], "exactly the step in the run file");
+  assert.deepEqual(live[1]?.data.step, readRunFile(sub.id)?.steps[0]);
+  assert.deepEqual(Object.keys(live[0]?.data.step ?? {}), ["at", "tool", "detail", "agent"]);
+  assert.ok(events.readSince(0).every((e) => e.type === "run.updated"), "the log holds the lifecycle only");
+});
+
 test("run.updated carries the run record without its steps", () => {
   const events = new EventLog(path.join(tmp, "shape.jsonl"));
   const run = new RunRecorder({ kind: "task", title: "形状", model: "claude-sonnet-5-5", events });

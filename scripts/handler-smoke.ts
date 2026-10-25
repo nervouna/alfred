@@ -18,6 +18,11 @@
 //                HTTP only: a question and its reply, a task stopped with run.stop, a duplicate
 //                client id and a reconnect with Last-Event-ID; ends with one pass or fail line
 //                per check
+//   stream       the real handler behind the command API on a temp socket, driven over HTTP: a
+//                question streams its reply as message.delta events, a longer task is stopped with
+//                run.stop after its first run.step (an interrupt: the stop reply, no error reply,
+//                the run ends stopped), and the next message starts a new turn in the same
+//                session; ends with one pass or fail line per check and the spend
 //   prompt <text>  one message on the default model, then the spend per model
 // Every WeChat send and every message event is printed as it happens.
 
@@ -25,7 +30,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import type { Event, Message } from "../src/api/schema.ts";
+import { LiveEventSchema } from "../src/api/schema.ts";
+import type { Event, LiveEvent, Message } from "../src/api/schema.ts";
 import { createAgentHandler } from "../src/agent/handler.ts";
 import { request, streamEvents } from "../src/api/client.ts";
 import { startApi } from "../src/api/server.ts";
@@ -226,7 +232,9 @@ async function api(): Promise<number> {
   const stopFollowing = new AbortController();
   const follower = (async () => {
     try {
-      for await (const frame of streamEvents(socket, { signal: stopFollowing.signal })) followed.push(JSON.parse(frame.data) as Event);
+      for await (const frame of streamEvents(socket, { signal: stopFollowing.signal })) {
+        if (!Number.isNaN(frame.id)) followed.push(JSON.parse(frame.data) as Event); // a live event has no id and is not in the log
+      }
     } catch (err) {
       if (!stopFollowing.signal.aborted) console.log(`[follower] ended: ${err}`);
     }
@@ -311,6 +319,7 @@ async function api(): Promise<number> {
     const middle = all[Math.floor(all.length / 2)]?.id ?? 0;
     const resumed: Event[] = [];
     for await (const frame of streamEvents(socket, { lastEventId: middle })) {
+      if (Number.isNaN(frame.id)) continue;
       resumed.push(JSON.parse(frame.data) as Event);
       if (frame.id >= last) break;
     }
@@ -322,6 +331,154 @@ async function api(): Promise<number> {
         : [`got ${resumed.length} events (ids ${ids(resumed)}), the log has ${expected.length} after ${middle}`],
     );
     summary();
+  } finally {
+    stopFollowing.abort();
+    await follower;
+    await closeApi();
+    await handler.shutdown();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  return failed;
+}
+
+/** The stream scenario: live events and the interrupting stop on the real handler, driven over HTTP only. Returns the number of checks that failed. */
+async function stream(): Promise<number> {
+  // What the handler logs, to tell an interrupted turn from an aborted run.
+  const logged: string[] = [];
+  for (const name of ["log", "error"] as const) {
+    const original = console[name].bind(console);
+    console[name] = (...args: unknown[]) => {
+      logged.push(args.map(String).join(" "));
+      original(...args);
+    };
+  }
+  const handler = newHandler();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "alf-"));
+  const socket = path.join(dir, "api.sock");
+  const closeApi = await startApi({ socket, handler, events: sharedEventLog() });
+  let failed = 0;
+  const check = (name: string, problems: string[]) => {
+    if (problems.length) failed++;
+    console.log(`[${problems.length ? "fail" : "pass"}] ${name}${problems.length ? `: ${problems.join("; ")}` : ""}`);
+  };
+
+  // A client that follows the stream from the start, as the app does: durable events by id, live ones as they come.
+  const followed: Event[] = [];
+  const live: LiveEvent[] = [];
+  const stopFollowing = new AbortController();
+  const follower = (async () => {
+    try {
+      for await (const frame of streamEvents(socket, { signal: stopFollowing.signal })) {
+        const parsed: unknown = JSON.parse(frame.data);
+        if (!Number.isNaN(frame.id)) {
+          followed.push(parsed as Event);
+          continue;
+        }
+        const event = LiveEventSchema.safeParse(parsed);
+        if (!event.success) {
+          console.log(`[follower] a live event that does not parse: ${frame.data.slice(0, 120)}`);
+          continue;
+        }
+        live.push(event.data);
+        if (event.data.type === "run.step") {
+          const { runId, step } = event.data.data;
+          console.log(`[live] ${at()} run.step run=${runId}${step.agent ? ` ${step.agent}` : ""} ${step.tool} ${step.detail.slice(0, 60)}`);
+        }
+      }
+    } catch (err) {
+      if (!stopFollowing.signal.aborted) console.log(`[follower] ended: ${err}`);
+    }
+  })();
+  const post = (command: unknown) => request(socket, "POST", "/commands", command);
+  const messageOf = (pick: (m: Message) => boolean) => {
+    const found = followed.find((e) => e.type === "message.created" && pick(e.data));
+    return found?.type === "message.created" ? found.data : undefined;
+  };
+  const runEvent = (runId: string, status: string) => followed.find((e) => e.type === "run.updated" && e.data.id === runId && e.data.status === status);
+  const deltasOf = (runId: string) => live.flatMap((e) => (e.type === "message.delta" && e.data.runId === runId ? [e.data] : []));
+  const send = async (clientId: string, text: string): Promise<string | undefined> => {
+    console.log(`[app] ${at()} ${text.slice(0, 60)}`);
+    await post({ type: "message.send", clientId, text });
+    return (await waitFor(() => messageOf((m) => m.direction === "in" && m.clientId === clientId), 30_000))?.runId;
+  };
+
+  try {
+    // The model stays on haiku, as in the other scenarios.
+    await post({ type: "message.send", clientId: "smoke-model", text: "/model haiku" });
+    await waitFor(() => messageOf((m) => m.direction === "out" && m.channel === "app" && /^已切换到 haiku/.test(m.text)), 30_000);
+
+    // 1. A question: its reply text streams as message.delta events.
+    const questionRun = await send("smoke-question", "用两三句话解释一下为什么天空是蓝色的。");
+    const reply = questionRun ? await waitFor(() => messageOf((m) => m.direction === "out" && m.runId === questionRun && m.text !== ""), 180_000) : undefined;
+    await sleep(500);
+    const deltas = questionRun ? deltasOf(questionRun) : [];
+    const lastStream = deltas.at(-1)?.streamId;
+    const streamed = deltas.filter((d) => d.streamId === lastStream).map((d) => d.text).join("");
+    const streams = new Set(deltas.map((d) => d.streamId));
+    console.log(`[stream] ${deltas.length} delta(s) in ${streams.size} stream(s); the last stream ${lastStream ?? "-"} has ${streamed.length} of the reply's ${reply?.text.length ?? 0} characters`);
+    check(
+      "a question gets message.delta events, and the deltas of the run's last stream, concatenated, equal the start of the reply text",
+      !questionRun || !reply
+        ? [`no run (${questionRun ?? "none"}) or no reply`]
+        : deltas.length === 0
+          ? ["no message.delta events"]
+          : streamed !== "" && reply.text.startsWith(streamed)
+            ? []
+            : [`the last stream's text ${JSON.stringify(streamed.slice(0, 60))} is not the start of the reply ${JSON.stringify(reply.text.slice(0, 60))}`],
+    );
+    await idle();
+
+    // 2. A longer task, stopped with run.stop after its first step.
+    const task =
+      "依次用 WebFetch 读这五页：https://en.wikipedia.org/wiki/Rome 、https://en.wikipedia.org/wiki/Paris 、https://en.wikipedia.org/wiki/London 、https://en.wikipedia.org/wiki/Vienna 、https://en.wikipedia.org/wiki/Prague ，每读完一页就把三行历史摘要保存到 notes/ 下以城市命名的 .md 文件里；全部读完后回复“完成”。";
+    const taskRun = await send("smoke-task", task);
+    const step = taskRun ? await waitFor(() => live.find((e) => e.type === "run.step" && e.data.runId === taskRun), 120_000) : undefined;
+    const stopAt = followed.length;
+    const stop = taskRun && step ? await post({ type: "run.stop", runId: taskRun }) : undefined;
+    const stopReply = await waitFor(() => messageOf((m) => m.direction === "out" && m.channel === "app" && m.text === "已停止当前任务。"), 30_000);
+    const stopped = taskRun ? await waitFor(() => runEvent(taskRun, "stopped"), 60_000) : undefined;
+    await sleep(5000);
+    const after = followed.slice(stopAt).flatMap((e) => (e.type === "message.created" && e.data.direction === "out" ? [e.data] : []));
+    const taskOut = followed.flatMap((e) => (e.type === "message.created" && e.data.direction === "out" && e.data.runId === taskRun ? [e.data] : []));
+    check(
+      "a longer task is stopped with run.stop after its first run.step: the stop reply arrives",
+      !taskRun || !step
+        ? [`no run (${taskRun ?? "none"}) or no run.step within 120 s`]
+        : stop?.status === 202 && stopReply
+          ? []
+          : [`run.stop answered ${stop?.status} ${stop?.body}; stop reply ${stopReply ? "arrived" : "missing"}`],
+    );
+    check("no error reply follows the stop", [
+      ...after.filter((m) => /执行出错|出错了/.test(m.text)).map((m) => `error line "${m.text.slice(0, 60)}"`),
+      ...taskOut.map((m) => `a reply of the stopped run: "${m.text.slice(0, 60)}"`),
+    ]);
+    check("the run ends stopped", stopped ? [] : [`no stopped event for run ${taskRun ?? "none"}`]);
+    const interrupted = logged.some((l) => l.includes(`agent turn done run=${taskRun}`) && l.includes("(interrupted)"));
+    const aborted = logged.some((l) => l.includes(`run ${taskRun}:`) && l.includes("aborting the run"));
+    check("it was the turn that was interrupted, not the run that was aborted", [
+      ...(interrupted ? [] : ["no interrupted result in the log"]),
+      ...(aborted ? ["the abort fallback fired"] : []),
+    ]);
+    await idle();
+
+    // 3. The next message starts a new turn in the same session and is answered.
+    const nextRun = await send("smoke-next", "刚才的任务已经停了，不用管它。现在只回答：2 的 5 次方是多少？");
+    const answer = nextRun ? await waitFor(() => messageOf((m) => m.direction === "out" && m.runId === nextRun && m.text !== ""), 180_000) : undefined;
+    await idle();
+    const sessionOf = (id: string | undefined) => listRunFiles().find((f) => f.id === id)?.sessionId;
+    check(
+      "a message sent after that starts a new turn in the same session and is answered",
+      !taskRun || !nextRun || !answer
+        ? [`no run (${nextRun ?? "none"}) or no answer`]
+        : /出错/.test(answer.text)
+          ? [`the answer is an error: ${answer.text.slice(0, 80)}`]
+          : sessionOf(nextRun) && sessionOf(nextRun) === sessionOf(taskRun)
+            ? []
+            : [`sessions differ: stopped run ${sessionOf(taskRun) ?? "-"}, new run ${sessionOf(nextRun) ?? "-"}`],
+    );
+    summary();
+    const tasks = listRunFiles().filter((f) => f.kind === "task");
+    console.log(`[spend] $${tasks.reduce((sum, f) => sum + f.costUsd, 0).toFixed(4)} across ${tasks.length} run(s)`);
   } finally {
     stopFollowing.abort();
     await follower;
@@ -403,8 +560,10 @@ if (scenario === "background") {
   failedRules = await channels();
 } else if (scenario === "api") {
   failedRules = await api();
+} else if (scenario === "stream") {
+  failedRules = await stream();
 } else {
-  console.error("usage: node scripts/handler-smoke.ts background|restart|undelivered|stop|nested|channels|api|prompt <text>");
+  console.error("usage: node scripts/handler-smoke.ts background|restart|undelivered|stop|nested|channels|api|stream|prompt <text>");
   process.exit(2);
 }
 process.exit(failedRules ? 1 : 0);

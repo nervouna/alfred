@@ -267,11 +267,14 @@ export class RunRecorder {
     return this.file.files.length > 0;
   }
 
+  /** A tool call of the run. Besides the timeline, it is published as a live run.step event (never stored in the log). */
   step(tool: string, detail: string, agent?: string): void {
+    const step: RunStep = { at: new Date().toISOString(), tool: toolName(tool), detail, ...(agent ? { agent } : {}) };
     this.file.toolCalls++;
-    this.file.steps.push({ at: new Date().toISOString(), tool: toolName(tool), detail, ...(agent ? { agent } : {}) });
+    this.file.steps.push(step);
     if (this.file.steps.length > MAX_STEPS) this.file.steps.splice(0, this.file.steps.length - MAX_STEPS);
     this.schedule();
+    this.events.publish("run.step", { runId: this.id, step: { ...step } });
   }
 
   /** A file the run created or changed (workspace-relative); a later write replaces the tool. */

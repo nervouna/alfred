@@ -10,13 +10,18 @@
 // steer it, and every result is sent back as its own reply. The query stays
 // open while background subagents run (see background.ts): Alfred keeps
 // answering, and each subagent's report starts a turn of its own. Messages that
-// arrive after the input closed are queued and start the next task.
+// arrive after the input closed are queued and start the next task. /stop
+// interrupts the main agent's current turn and nothing else: the messages
+// waiting for it and the background subagents go on.
+//
+// While a run works it also publishes live events (see events.ts): the main
+// agent's reply text as it is written, and every step the run records.
 
 import fs from "node:fs";
 import path from "node:path";
 
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import type { HookCallbackMatcher, Options, Query, SDKResultMessage } from "@anthropic-ai/claude-agent-sdk";
+import type { HookCallbackMatcher, Options, Query, SDKPartialAssistantMessage, SDKResultMessage } from "@anthropic-ai/claude-agent-sdk";
 
 import type { Channel } from "../api/schema.ts";
 import { SerialQueue, recordInbound, recorded } from "../channels.ts";
@@ -74,6 +79,8 @@ const PROGRESS_INTERVAL_MS = 3 * 60_000;
 const PRUNE_INTERVAL_MS = 24 * 3_600_000;
 /** On shutdown, how long running tasks get to stop and write their records. */
 const SHUTDOWN_STOP_MS = 10_000;
+/** After a stop interrupts a turn, how long the turn gets to end before the whole run is aborted. */
+const INTERRUPT_GRACE_MS = 10_000;
 const RUN_TITLE_CHARS = 60;
 /** Built-in tools whose file_path a run creates or changes. */
 const FILE_WRITE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
@@ -100,7 +107,7 @@ const HELP = `Alfred 调研助手
 
 /new  开始新会话（清空上下文${SESSION_IDLE_HOURS > 0 ? `；空闲超过 ${SESSION_IDLE_HOURS} 小时也会自动开始` : ""}）
 /resume  切回上一个会话
-/stop [运行 id]  停止当前任务（带 id 只停这个后台子任务）
+/stop [运行 id]  停止当前任务，后台子任务继续运行（带 id 只停这个后台子任务）
 /model [sonnet|opus|haiku]  查看或切换模型
 /memory  查看长期记忆（要记住、修改或忘记什么，直接说）
 /status  当前状态和花费
@@ -127,6 +134,12 @@ interface Run {
   /** Set while the main agent works on a turn: its start, and how to stop the typing indicator. */
   turnStartedAt?: number;
   stopTyping?: () => Promise<void>;
+  /** Set from a stop's interrupt until the turn ends: aborts the run if the turn does not (see interruptTurn). */
+  interruptTimer?: NodeJS.Timeout;
+  /** The last turn to end was one a stop interrupted: the run ends stopped when that was also its last. */
+  interrupted: boolean;
+  /** The API message the main agent is writing, for the stream ids of its text blocks. */
+  streamMessageId?: string;
   stopped: boolean;
   /** Stopped because Alfred is shutting down: the run and its subagents are lost, not stopped. */
   shutdown: boolean;
@@ -167,6 +180,8 @@ export interface AgentHandlerOptions {
   runQuery?: typeof query;
   /** How often a long turn on WeChat gets a progress note. */
   progressMs?: number;
+  /** How long a stop waits for the interrupted turn to end before it aborts the run; 10 s by default. */
+  interruptMs?: number;
 }
 
 /** What the handler offers: the intake queue and the stop for the channels, and a shutdown for the process. */
@@ -259,6 +274,11 @@ export function undeliveredNote(runs: RunRef[]): string {
       : "需要的话让我重发。";
   const head = runs.length === 1 ? `${named}的结果没送到微信，` : `有 ${runs.length} 个任务的结果没送到微信：${named}。`;
   return `${head}${where}`;
+}
+
+/** The result of a turn that an interrupt cut short (see stopRun): it has no reply. */
+function interruptedTurn(result: SDKResultMessage): boolean {
+  return result.subtype === "error_during_execution" && (result.terminal_reason === "aborted_streaming" || result.terminal_reason === "aborted_tools");
 }
 
 /** WeChat reply for one result. */
@@ -373,6 +393,8 @@ export function agentOptions(params: {
     },
     // An interrupt stops only the current turn; background subagents are stopped one by one (/stop <id>).
     perTaskStopAffordance: true,
+    // The reply text arrives as stream events, which the handler publishes as live events.
+    includePartialMessages: true,
     maxTurns: MAX_TURNS,
     maxBudgetUsd: MAX_BUDGET_USD,
     resume: params.resume,
@@ -451,6 +473,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
   const events = opts.events ?? sharedEventLog();
   const runQuery = opts.runQuery ?? query;
   const progressMs = opts.progressMs ?? PROGRESS_INTERVAL_MS;
+  const interruptMs = opts.interruptMs ?? INTERRUPT_GRACE_MS;
   agentEnv(); // Fail at startup, not on the first message, if the API key is missing.
   checkSessionIdleHours();
   checkMemoryScanSettings();
@@ -553,6 +576,8 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
           run.background.notified(m.task_id, m.status);
         } else if (m.type === "system" && m.subtype === "background_tasks_changed") {
           run.input.closeIfIdle();
+        } else if (m.type === "stream_event") {
+          publishDelta(run, m);
         } else if (m.type === "assistant") {
           // A background subagent's steps go on its own card; a foreground one's on the task's, with its role.
           const background = m.parent_tool_use_id ? run.background.byToolUse(m.parent_tool_use_id) : undefined;
@@ -574,14 +599,19 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
             run.recorder.step(block.name, detail, agent);
           }
         } else if (m.type === "result") {
-          if (resume && results === 0 && m.is_error && m.num_turns === 0) {
+          const interrupted = interruptedTurn(m);
+          if (resume && results === 0 && m.is_error && m.num_turns === 0 && !interrupted) {
             run.input.rewind(); // The retry in a new session gets the same messages.
             return { kind: "resume-failed", detail: m.subtype === "success" ? m.result : m.errors.join("; ") };
           }
           results++;
-          // A turn a subagent's report started answers no message; it carries no uuids.
+          // The turn ended, interrupted or not: its stop no longer needs the abort fallback.
+          clearTimeout(run.interruptTimer);
+          run.interruptTimer = undefined;
+          run.interrupted = interrupted;
+          // A turn a subagent's report started answers no message; it carries no uuids. Neither does an interrupted one that was such a turn.
           const uuids = answeredBy(m);
-          const notification = !uuids.length && m.subtype === "success";
+          const notification = !uuids.length && (m.subtype === "success" || interrupted);
           run.background.settleEnded(m.modelUsage ?? {});
           if (run.releaseUuid && !run.input.isPending(run.releaseUuid)) {
             // Answered without starting the handed-back brief: the agent dropped it.
@@ -606,6 +636,22 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
     if (run.stopped) return { kind: "stopped" };
     if (run.input.pending) throw new Error(`agent ended with ${run.input.pending} unanswered message(s)`);
     return { kind: "done" };
+  }
+
+  /**
+   * Publishes the text the main agent is writing, as it is written: one message.delta per text delta,
+   * with a stream id made of the API message's id and the index of the block, the same for all deltas
+   * of a block. A subagent's text, thinking and the input of tool calls are not streamed.
+   */
+  function publishDelta(run: Run, m: SDKPartialAssistantMessage): void {
+    if (m.parent_tool_use_id) return;
+    const { event } = m;
+    if (event.type === "message_start") {
+      run.streamMessageId = event.message.id;
+    } else if (event.type === "content_block_delta" && event.delta.type === "text_delta" && event.delta.text) {
+      const streamId = `${run.streamMessageId ?? run.recorder.id}.${event.index}`;
+      events.publish("message.delta", { runId: run.recorder.id, streamId, text: event.delta.text });
+    }
   }
 
   /** The main agent starts working on a turn: the typing indicator shows until the turn's result. */
@@ -637,6 +683,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
     start.recordInbound?.(recorder.id);
     const background: BackgroundRuns = new BackgroundRuns({
       parentRunId: recorder.id,
+      events,
       max: MAX_BACKGROUND_RUNS,
       overBudget: () => overBudget(userId),
       release: (brief) => {
@@ -660,6 +707,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
       subagents: new SubagentTracker(),
       recorder,
       background,
+      interrupted: false,
       stopped: false,
       shutdown: false,
     };
@@ -698,13 +746,17 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
         spendDayUsd: spentToday(user) + deltaUsd,
       });
       for (const [model, usd] of Object.entries(models.deltaUsd)) modelCosts.set(model, (modelCosts.get(model) ?? 0) + usd);
-      replies++;
       cost += deltaUsd;
       recorder.update({ costUsd: cost, modelCostUsd: Object.fromEntries(modelCosts) });
+      const interrupted = interruptedTurn(result);
       log.info(
         `agent turn done run=${recorder.id} subtype=${result.subtype} turns=${result.num_turns} cost=${usd(deltaUsd)}` +
-          `${notification ? " (subagent report)" : ""} background=${background.running.length} queued=${background.queued.length}`,
+          `${notification ? " (subagent report)" : ""}${interrupted ? " (interrupted)" : ""} background=${background.running.length} queued=${background.queued.length}`,
       );
+      // A turn a stop interrupted has no reply: the stop was answered when it was asked for, and the runs
+      // its reply would have named stay on the list for the next one.
+      if (interrupted) return;
+      replies++;
       const { dispatched, reported: reports } = background.takeForReply();
       // A reply after subagents ended is about them, whatever started its turn.
       const footer = (notification ? "" : runFooter(recorder)) + backgroundFooter(dispatched, reports);
@@ -748,6 +800,11 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
         return;
       }
       if (outcome.kind === "resume-failed") throw new Error(outcome.detail);
+      if (run.interrupted) {
+        // The interrupted turn was the last: nothing was pending, and no background subagent was left to report.
+        log.info(`agent run ${recorder.id} stopped by user (interrupted turn)`);
+        status = "stopped";
+      }
       log.info(
         `agent run done run=${recorder.id} replies=${replies} cost=${usd(cost)} ` +
           `time=${humanAge(Date.now() - run.startedAt)} tools=[${toolSummary(run.toolCounts)}] models=[${modelSummary(modelCosts)}]`,
@@ -764,6 +821,8 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
     } finally {
       run.input.close();
       clearInterval(progress);
+      clearTimeout(run.interruptTimer);
+      run.interruptTimer = undefined;
       // Stopped and failed tasks count as activity too, so the idle clock restarts after every task.
       // A failed write must not skip the cleanup below or escape from drain().
       try {
@@ -829,9 +888,9 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
   }
 
   /**
-   * Stops a run of the owner's: the live task (and with it its subagents and the messages queued behind it),
-   * one of its background subagents, or one waiting for a slot. The reply goes to `channel`.
-   * False when no such run is live, and then nothing is sent.
+   * Stops a run of the owner's: the live task's current turn (interrupted, so the run's background
+   * subagents and the messages waiting for it go on), one of its background subagents, or one waiting
+   * for a slot. The reply goes to `channel`. False when no such run is live, and then nothing is sent.
    */
   async function stopRun(runId: string, channel: Channel): Promise<boolean> {
     const rt = runtime(owner);
@@ -861,14 +920,48 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
       }
       return false;
     }
-    const dropped = rt.queue.splice(0).length + run.input.followUps;
-    const subagents = run.background.running.length + run.background.queued.length;
+    // Only the turn the main agent is on is stopped. The messages handed to the run and those queued behind it
+    // are answered afterwards, and the background subagents go on until they report or are stopped one by one.
+    const continuing = [...run.background.running, ...run.background.queued].map((b) => b.recorder.id);
+    await interruptTurn(run);
+    await out.text(
+      continuing.length ? `已停止当前任务。后台运行 ${continuing.join("、")} 仍在继续，发 /stop <id> 停止。` : "已停止当前任务。",
+    );
+    return true;
+  }
+
+  /** Ends a run the hard way: its query and the subagents in it go, and so do the follow-ups it has not answered. */
+  function abortRun(run: Run, why: string): void {
+    log.warn(`run ${run.recorder.id}: ${why}; aborting the run${run.input.followUps ? ` (${run.input.followUps} follow-up(s) unanswered are dropped)` : ""}`);
+    clearTimeout(run.interruptTimer);
+    run.interruptTimer = undefined;
     run.input.close();
     run.stopped = true;
     run.abort.abort();
-    const also = [subagents ? `${subagents} 个后台子任务` : "", dropped ? `排队的 ${dropped} 条消息` : ""].filter(Boolean);
-    await out.text(also.length ? `已停止当前任务，以及${also.join("和")}。` : "已停止当前任务。");
-    return true;
+  }
+
+  /**
+   * Interrupts the main agent's current turn. The turn ends with an interrupted result (see interruptedTurn);
+   * if it has not ended `interruptMs` later, or the interrupt cannot be sent, the run is aborted instead.
+   * A run whose query has not started has no turn to interrupt (it waits for the memory lock) and is aborted.
+   */
+  async function interruptTurn(run: Run): Promise<void> {
+    const q = run.query;
+    if (!q) return abortRun(run, "stopped before its query started");
+    // With no turn in progress there is nothing to wait for: the interrupt reaches the idle agent and does nothing.
+    if (run.turnStartedAt !== undefined && !run.interruptTimer) {
+      const timer = setTimeout(() => {
+        run.interruptTimer = undefined;
+        abortRun(run, `the interrupted turn did not end within ${interruptMs / 1000}s`);
+      }, interruptMs);
+      timer.unref();
+      run.interruptTimer = timer;
+    }
+    try {
+      await q.interrupt();
+    } catch (err) {
+      abortRun(run, `interrupting the turn failed (${describeError(err)})`);
+    }
   }
 
   async function handleCommand(userId: string, channel: Channel, cmd: string, arg: string): Promise<void> {
@@ -967,20 +1060,26 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
     const record = (runId?: string) => recordInbound(events, inbound, runId);
 
     // The user just wrote, so WeChat delivers again: say once what did not arrive or was cut short meanwhile.
+    // The notes, and the lines about media that could not be saved, answer this message: they go out once it is
+    // recorded, so the log shows the message before them.
     const { undeliveredRuns, lostRuns } = store.get(userId);
     const notes = [lostRuns?.length ? lostNote(lostRuns) : "", undeliveredRuns?.length ? undeliveredNote(undeliveredRuns) : ""].filter(Boolean);
-    if (notes.length) {
-      try {
-        await out.text(notes.join("\n"));
-        store.update(userId, { undeliveredRuns: undefined, lostRuns: undefined });
-      } catch (err) {
-        log.warn(`undelivered note failed: ${describeError(err)}`);
+    const sendNotes = async (): Promise<void> => {
+      if (notes.length) {
+        try {
+          await out.text(notes.join("\n"));
+          store.update(userId, { undeliveredRuns: undefined, lostRuns: undefined });
+        } catch (err) {
+          log.warn(`undelivered note failed: ${describeError(err)}`);
+        }
       }
-    }
+      for (const failure of inbound.failed ?? []) await out.text(failure);
+    };
 
     const hasMedia = inbound.files.length > 0 || inbound.voice || Boolean(inbound.failed?.length);
     if (trimmed.startsWith("/") && !hasMedia) {
       record();
+      await sendNotes();
       const [cmd = "", ...rest] = trimmed.split(/\s+/);
       await handleCommand(userId, channel, cmd.toLowerCase(), rest.join(" "));
       return;
@@ -989,10 +1088,10 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
     // Voice notes reach the agent through their transcript; other media is saved for the next prompt.
     const saved = inbound.files.map((f) => f.path);
     rt.attachments.push(...saved);
-    for (const failure of inbound.failed ?? []) await out.text(failure);
 
     if (!trimmed) {
       record();
+      await sendNotes();
       if (inbound.voice) await out.text("这条语音没有转写文字，请再说一遍或者打字。");
       else if (saved.length) await out.text(`已保存 ${saved.join("、")}，告诉我要怎么处理。`);
       return;
@@ -1004,16 +1103,20 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
     const live = rt.run;
     if (live?.input.push(prompt)) {
       record(live.recorder.id);
+      await sendNotes();
       await out.text("收到，会在当前步骤结束后转给 Alfred。");
       return;
     }
     if (rt.busy) {
       rt.queue.push({ prompt, channel });
       record();
+      await sendNotes();
       await out.text("收到，排在当前任务之后处理。发 /stop 可以停止当前任务。");
       return;
     }
+    // The run records the message as soon as it has its id, before drain() first yields.
     void drain(userId, { prompt, channel, recordInbound: record });
+    await sendNotes();
   }
 
   /**
