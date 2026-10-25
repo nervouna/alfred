@@ -3,3 +3,6 @@ node_modules/
 .DS_Store
 ios/**/.build/
 ios/**/.swiftpm/
+ios/Alfred.xcodeproj/
+ios/Config/Signing.xcconfig
+ios/build/
