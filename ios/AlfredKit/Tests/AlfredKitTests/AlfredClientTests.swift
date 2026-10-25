@@ -6,12 +6,11 @@ final class AlfredClientTests: XCTestCase {
     /// A client whose every request goes to `handler`, with the requests it saw.
     private func makeClient(_ handler: @escaping @Sendable (URLRequest) -> StubReply) throws -> (AlfredClient, RequestLog) {
         let log = RequestLog()
-        StubURLProtocol.handler.withLock { $0 = { request in
+        let client = try stubbedClient { request in
             log.record(request)
             return handler(request)
-        } }
-        addTeardownBlock { StubURLProtocol.handler.withLock { $0 = nil } }
-        return (AlfredClient(credentials: try pairedCredentials(), session: stubbedSession()), log)
+        }
+        return (client, log)
     }
 
     private func assertFails(
