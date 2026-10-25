@@ -43,6 +43,31 @@ test("an event is described on one line: id, type and a short summary", () => {
   assert.equal(describeEvent({ id: 5, type: "message", data: "not json" }), "5 message not json");
 });
 
+test("a live event comes without an id, and describeEvent calls it live", async (t) => {
+  const dir = path.join(tmp, "live");
+  const socket = path.join(dir, "api", "a.sock");
+  const events = new EventLog(path.join(dir, "events.jsonl"));
+  events.append("run.updated", run);
+  const close = await startApi({ socket, handler: { submit: async () => {}, stopRun: async () => false }, events });
+  t.after(close);
+
+  const frames: { id: number; type: string; data: string }[] = [];
+  const stop = new AbortController();
+  const reading = (async () => {
+    for await (const frame of streamEvents(socket, { signal: stop.signal })) frames.push(frame);
+  })();
+  while (frames.length < 1) await new Promise((resolve) => setTimeout(resolve, 5));
+  events.publish("message.delta", { runId: "k7m2qa", streamId: "msg_01.0", text: "你好" });
+  while (frames.length < 2) await new Promise((resolve) => setTimeout(resolve, 5));
+  stop.abort();
+  await assert.rejects(reading, /aborted/);
+
+  assert.deepEqual(frames.map((f) => [f.id, f.type]), [[1, "run.updated"], [Number.NaN, "message.delta"]]);
+  const live = frames[1];
+  assert.ok(live);
+  assert.ok(describeEvent(live).startsWith('live message.delta {"at":'));
+});
+
 test("streamEvents reads the backlog and live events, resumes by id and stops when asked", async (t) => {
   const dir = path.join(tmp, "stream");
   const socket = path.join(dir, "api", "a.sock");
