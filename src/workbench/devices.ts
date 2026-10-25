@@ -10,6 +10,8 @@ import path from "node:path";
 
 import { z } from "zod";
 
+import { PushRegistrationSchema } from "../api/schema.ts";
+import type { PushRegistration } from "../api/schema.ts";
 import { describeError, log } from "../log.ts";
 import { newRunId } from "../runs.ts";
 import { STATE_DIR, writeJson } from "../store.ts";
@@ -23,6 +25,8 @@ const DeviceSchema = z.object({
   tokenSha256: z.string().regex(/^[0-9a-f]{64}$/),
   createdAt: z.string(),
   revokedAt: z.string().optional(),
+  /** The app's APNs registration, set by POST /api/push and dropped when APNs reports its token dead. */
+  push: PushRegistrationSchema.optional(),
 });
 const DevicesFileSchema = z.object({ devices: z.array(DeviceSchema) });
 
@@ -78,6 +82,25 @@ export class DeviceStore {
       this.save(devices);
     }
     return device;
+  }
+
+  /** Stores a device's APNs registration in place of an earlier one. False when the device is unknown or revoked. */
+  setPush(id: string, push: PushRegistration): boolean {
+    const devices = this.list();
+    const device = devices.find((d) => d.id === id);
+    if (!device || device.revokedAt) return false;
+    device.push = push;
+    this.save(devices);
+    return true;
+  }
+
+  /** Drops a device's registration, but only while it still holds this token: a newer registration is kept. */
+  forgetPush(id: string, token: string): void {
+    const devices = this.list();
+    const device = devices.find((d) => d.id === id);
+    if (!device?.push || device.push.token !== token) return;
+    delete device.push;
+    this.save(devices);
   }
 
   /** The unrevoked device holding this token, if any. An unreadable file refuses everyone. */
