@@ -1,20 +1,24 @@
 // The command API: the owner's commands in, Alfred's events out, over a Unix
 // socket (no TCP listener). A process on the same host posts message.send and
-// run.stop to /commands and follows /events as server-sent events, resuming by
+// run.stop to /commands, uploads files to /uploads (into the workspace's inbox,
+// for a message to name) and follows /events as server-sent events, resuming by
 // event id. Every command is validated here by parseCommand. Live events (reply
 // text as it is written, the steps of a run) go out as frames without an id and
 // are never replayed.
 
+import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 
+import { resolveInside } from "../agent/guard.ts";
 import type { Intake } from "../channels.ts";
 import { type EventLog, isLiveEvent } from "../events.ts";
+import { localDate, localTime, sanitizeFileName, uniquePath } from "../files.ts";
 import { describeError, log } from "../log.ts";
-import { STATE_DIR } from "../store.ts";
-import { MAX_COMMAND_BYTES, parseCommand } from "./schema.ts";
-import type { Event, LiveEvent } from "./schema.ts";
+import { STATE_DIR, WORKSPACE_DIR } from "../store.ts";
+import { MAX_COMMAND_BYTES, MAX_UPLOAD_BYTES, parseCommand } from "./schema.ts";
+import type { Event, LiveEvent, UploadResult } from "./schema.ts";
 
 /** How often an event stream gets a `: ping` comment. */
 export const HEARTBEAT_MS = 30_000;
@@ -26,6 +30,10 @@ const MAX_UNREAD_BYTES = 8 * 1024 * 1024;
 const REMEMBERED_CLIENT_IDS = 1000;
 /** On close, how long a request in flight gets before its connection is cut. */
 const CLOSE_GRACE_MS = 2000;
+/** The longest file name an upload may ask for, in characters. */
+const MAX_NAME_CHARS = 255;
+const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic"]);
+const VIDEO_EXTS = new Set([".mp4", ".mov"]);
 
 /** The part of the event log the API reads. */
 export type ApiEvents = Pick<EventLog, "lastId" | "readSince" | "subscribe">;
@@ -95,6 +103,84 @@ function parseId(raw: string): number | undefined {
   return Number.isSafeInteger(id) ? id : undefined;
 }
 
+/** The file name an upload asks for, trimmed; undefined unless it is 1 to 255 characters, with no /, \ or NUL, and not . or .. */
+function uploadName(raw: string | null): string | undefined {
+  const name = raw?.trim() ?? "";
+  if (!name || [...name].length > MAX_NAME_CHARS || /[/\\\0]/.test(name) || name === "." || name === "..") return undefined;
+  return name;
+}
+
+/** The kind an upload is shown as, from its extension. */
+function uploadKind(fileName: string): UploadResult["file"]["kind"] {
+  const ext = path.extname(fileName).toLowerCase();
+  if (IMAGE_EXTS.has(ext)) return "image";
+  return VIDEO_EXTS.has(ext) ? "video" : "file";
+}
+
+/** Whether `rel` is a regular file inside the workspace's inbox, following symlinks: what a message may attach. */
+function inboxFile(rel: string): boolean {
+  const real = resolveInside(WORKSPACE_DIR, rel);
+  if (!real) return false;
+  const inbox = path.join(fs.realpathSync(WORKSPACE_DIR), "inbox") + path.sep;
+  try {
+    return real.startsWith(inbox) && fs.statSync(real).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Writes the request body to `file` as it arrives. Resolves to the bytes written, or to "too-large" when the body
+ * grows past MAX_UPLOAD_BYTES, or to "cut-short" when the client goes away first. Then `file` is gone: nothing
+ * is kept of an upload that did not complete. The request is not destroyed on "too-large": what is still sent
+ * is read and dropped, so the 413 can go out on its connection.
+ */
+function receiveUpload(req: http.IncomingMessage, file: string): Promise<number | "too-large" | "cut-short"> {
+  return new Promise((resolve, reject) => {
+    const out = fs.createWriteStream(file, { flags: "wx", mode: 0o600 });
+    let size = 0;
+    let ended = false;
+    let stopped: "too-large" | "cut-short" | undefined;
+    let failure: unknown;
+    const stop = (why: "too-large" | "cut-short") => {
+      stopped = why;
+      req.off("data", onData);
+      req.off("end", onEnd);
+      req.off("close", onClose);
+      out.destroy();
+    };
+    const onData = (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > MAX_UPLOAD_BYTES) return stop("too-large");
+      if (!out.write(chunk)) {
+        req.pause();
+        out.once("drain", () => req.resume());
+      }
+    };
+    const onEnd = () => {
+      ended = true;
+      out.end();
+    };
+    const onClose = () => {
+      if (!ended) stop("cut-short");
+    };
+    req.on("data", onData);
+    req.once("end", onEnd);
+    req.once("close", onClose);
+    out.on("error", (err) => {
+      // Writes still buffered when the upload is stopped fail with the destroyed stream: that is no failure.
+      if (stopped === undefined) failure = err;
+    });
+    // Closed once the file is complete, or at once when it is stopped or failed.
+    out.once("close", () => {
+      if (failure === undefined && stopped === undefined) return resolve(size);
+      fs.rmSync(file, { force: true });
+      if (failure !== undefined) reject(failure);
+      else resolve(stopped ?? "cut-short");
+    });
+  });
+}
+
 /** Start the API; resolves to a function that closes it. */
 export async function startApi(opts: ApiOptions): Promise<() => Promise<void>> {
   const { socket, handler, events } = opts;
@@ -136,16 +222,53 @@ export async function startApi(opts: ApiOptions): Promise<() => Promise<void>> {
       if (await handler.stopRun(command.runId, "app")) return sendJson(res, 202, { stopped: true });
       return sendJson(res, 404, { error: `no live or queued run ${command.runId}` });
     }
+    // A message's files are checked before anything is submitted: one that is not in the inbox refuses the message.
+    const files = command.files ?? [];
+    const missing = files.findIndex((file) => !inboxFile(file.path));
+    if (missing >= 0) return sendJson(res, 400, { error: `files.${missing}.path: no such file in the inbox` });
     if (accepted.has(command.clientId)) return sendJson(res, 200, { accepted: false, duplicate: true });
     // Remembered before the handler is awaited, so a second post of the same id meanwhile is a duplicate.
     remember(command.clientId);
     try {
-      await handler.submit({ channel: "app", text: command.text, clientId: command.clientId, files: [] });
+      await handler.submit({ channel: "app", text: command.text, clientId: command.clientId, files });
     } catch (err) {
       accepted.delete(command.clientId);
       throw err;
     }
     sendJson(res, 202, { accepted: true });
+  }
+
+  /**
+   * POST /uploads?name=<name>: the body is the file, saved in today's inbox under a sanitized, unique name.
+   * The upload records no event; the message that names the file does.
+   */
+  async function postUpload(req: http.IncomingMessage, res: http.ServerResponse, params: URLSearchParams): Promise<void> {
+    const name = uploadName(params.get("name"));
+    if (name === undefined) {
+      sendJson(res, 400, { error: `name must be 1 to ${MAX_NAME_CHARS} characters, with no /, \\ or NUL, and not . or ..` });
+      req.resume();
+      return;
+    }
+    if (Number(req.headers["content-length"]) > MAX_UPLOAD_BYTES) {
+      sendJson(res, 413, { error: `upload is over ${MAX_UPLOAD_BYTES} bytes` });
+      req.resume();
+      return;
+    }
+    const dir = path.join(WORKSPACE_DIR, "inbox", localDate());
+    fs.mkdirSync(dir, { recursive: true });
+    // Written under a temporary name and renamed once complete, so a cut-short upload leaves no file.
+    const temp = path.join(dir, `.upload-${crypto.randomUUID()}.part`);
+    const received = await receiveUpload(req, temp);
+    if (received === "cut-short") return;
+    if (received === "too-large") {
+      sendJson(res, 413, { error: `upload is over ${MAX_UPLOAD_BYTES} bytes` });
+      req.resume();
+      return;
+    }
+    const file = uniquePath(dir, sanitizeFileName(name, `file-${localTime()}.bin`));
+    fs.renameSync(temp, file);
+    const answer: UploadResult = { file: { path: path.relative(WORKSPACE_DIR, file), kind: uploadKind(file) } };
+    sendJson(res, 201, answer);
   }
 
   function getEvents(req: http.IncomingMessage, res: http.ServerResponse, params: URLSearchParams): void {
@@ -246,6 +369,8 @@ export async function startApi(opts: ApiOptions): Promise<() => Promise<void>> {
     switch (pathname) {
       case "/commands":
         return method === "POST" ? postCommand(req, res) : methodNotAllowed(res, "POST");
+      case "/uploads":
+        return method === "POST" ? postUpload(req, res, params) : methodNotAllowed(res, "POST");
       case "/events":
         return method === "GET" ? getEvents(req, res, params) : methodNotAllowed(res, "GET");
       case "/health":

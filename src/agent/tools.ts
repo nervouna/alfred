@@ -1,4 +1,4 @@
-// In-process MCP tools that let the agent act on WeChat and the workspace.
+// In-process MCP tools that let the agent act on the owner's channels and the workspace.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -34,20 +34,34 @@ function relPath(real: string): string {
   return path.relative(fs.realpathSync(WORKSPACE_DIR), real);
 }
 
+/** The signal the SDK gives a tool call, in the `extra` argument of its handler: aborted when the turn is interrupted. */
+function callSignal(extra: unknown): AbortSignal | undefined {
+  const own = (extra as { signal?: unknown } | undefined)?.signal;
+  return own instanceof AbortSignal ? own : undefined;
+}
+
+/** The run's signal and a call's own, together: a tool stops when either aborts. */
+function anySignal(run: AbortSignal | undefined, call: AbortSignal | undefined): AbortSignal | undefined {
+  if (!run) return call;
+  return call ? AbortSignal.any([run, call]) : run;
+}
+
 /**
- * Tools bound to the channel a run answers on, for the duration of the run;
- * `signal` aborts when the run is stopped, and `run` records the files they
- * write and failed sends.
+ * Alfred's tools, bound to the channel a run answers on, for the duration of the run. Each one stops when
+ * `signal` aborts (the run is stopped) or when its own call's signal does (the turn is interrupted). `run`
+ * records the files they write and failed sends.
  */
-export function createAlfredTools(out: Outbound, signal?: AbortSignal, run?: RunRecorder) {
+export function alfredToolDefinitions(out: Outbound, signal?: AbortSignal, run?: RunRecorder) {
   const sendFile = tool(
     "send_file",
-    "Send a file from the workspace to the user in WeChat. WeChat opens Markdown, PDF, images, video and Office files; it cannot open HTML.",
+    "Send a file from the workspace to the owner, on the channel this run answers on. WeChat opens Markdown, PDF, images, video and Office files; it cannot open HTML.",
     {
       path: z.string().describe("File path, relative to the workspace or absolute inside it"),
       caption: z.string().optional().describe("Short message sent just before the file"),
     },
-    async ({ path: p, caption }) => {
+    async ({ path: p, caption }, extra) => {
+      // Checked before anything is sent: a send that has started goes on to the end.
+      if (anySignal(signal, callSignal(extra))?.aborted) return fail("The task was stopped; the file was not sent.");
       const real = resolveInside(WORKSPACE_DIR, p);
       if (!real) return fail(`${p} is outside the workspace.`);
       let stat: fs.Stats;
@@ -83,7 +97,8 @@ export function createAlfredTools(out: Outbound, signal?: AbortSignal, run?: Run
       from: z.string().describe("Existing path, relative to the workspace"),
       to: z.string().describe("New path, relative to the workspace"),
     },
-    async ({ from, to }) => {
+    async ({ from, to }, extra) => {
+      if (anySignal(signal, callSignal(extra))?.aborted) return fail("The task was stopped; nothing was moved.");
       const src = resolveInside(WORKSPACE_DIR, from);
       const dst = resolveInside(WORKSPACE_DIR, to);
       if (!src || !dst) return fail("Both paths must be inside the workspace.");
@@ -105,7 +120,9 @@ export function createAlfredTools(out: Outbound, signal?: AbortSignal, run?: Run
       source: z.string().describe("Markdown (.md) or HTML (.html) file, relative to the workspace"),
       output: z.string().optional().describe("PDF path relative to the workspace; defaults to the source path with .pdf"),
     },
-    async ({ source, output }) => {
+    async ({ source, output }, extra) => {
+      const stop = anySignal(signal, callSignal(extra));
+      if (stop?.aborted) return fail("The task was stopped; the PDF was not rendered.");
       const src = resolveInside(WORKSPACE_DIR, source);
       if (!src) return fail(`${source} is outside the workspace.`);
       if (!fs.existsSync(src) || !fs.statSync(src).isFile()) return fail(`${source} is not an existing file.`);
@@ -115,12 +132,14 @@ export function createAlfredTools(out: Outbound, signal?: AbortSignal, run?: Run
       if (!out) return fail(`${outRel} is outside the workspace.`);
       if (path.extname(out).toLowerCase() !== ".pdf") return fail("The output must end in .pdf.");
       try {
-        const { bytes } = await renderPdf(src, out, { root: WORKSPACE_DIR });
+        const { bytes } = await renderPdf(src, out, { root: WORKSPACE_DIR, signal: stop });
         const rel = path.relative(WORKSPACE_DIR, out);
         log.info(`agent rendered ${rel} (${bytes} bytes)`);
         run?.wrote(relPath(out), "render_pdf");
         return ok(`Wrote ${rel} (${humanSize(bytes)}).`);
       } catch (err) {
+        // The browser was closed by the stop, so the error is the stop's and not the renderer's.
+        if (stop?.aborted) return fail("The task was stopped; the PDF was not rendered.");
         if (isRendererMissing(err)) return fail("PDF rendering is not set up on this machine (npm run setup:pdf). Send Markdown instead.");
         return fail(`Rendering failed: ${describeError(err)}`);
       }
@@ -131,7 +150,7 @@ export function createAlfredTools(out: Outbound, signal?: AbortSignal, run?: Run
   const generateImages = createImageGenerator({ root: WORKSPACE_DIR, signal });
   const generateImage = tool(
     "generate_image",
-    `Generate images from a text prompt with MiniMax image-01 and save them as JPEG in the workspace. Use it when the user asks for an image, or for illustrative visuals such as a report cover; never for charts or data, which you draw as inline SVG. Every call is billed, even when it fails or times out, so never retry a failed call on your own. At most ${MAX_IMAGES_PER_CALL} images per call and ${MAX_IMAGES_PER_TASK} per task. Read each image to check it before using it; send_file delivers .jpg files as WeChat image messages.`,
+    `Generate images from a text prompt with MiniMax image-01 and save them as JPEG in the workspace. Use it when the user asks for an image, or for illustrative visuals such as a report cover; never for charts or data, which you draw as inline SVG. Every call is billed, even when it fails or times out, so never retry a failed call on your own. At most ${MAX_IMAGES_PER_CALL} images per call and ${MAX_IMAGES_PER_TASK} per task. Read each image to check it before using it; send_file delivers .jpg files as images.`,
     {
       prompt: z.string().min(1).describe("What the image shows: subject, style, composition, lighting. English or Chinese"),
       aspect_ratio: z.enum(ASPECT_RATIOS).describe("16:9 for covers and wide illustrations, 1:1 or 3:4 for phone viewing"),
@@ -141,9 +160,10 @@ export function createAlfredTools(out: Outbound, signal?: AbortSignal, run?: Run
         .optional()
         .describe("JPEG path relative to the workspace (.jpg). With n > 1 the files are <stem>_001.jpg and so on. Defaults to images/<date>/<slug>.jpg"),
     },
-    async ({ prompt, aspect_ratio, n, output }) => {
+    async ({ prompt, aspect_ratio, n, output }, extra) => {
       try {
-        const { files, failed } = await generateImages({ prompt, aspectRatio: aspect_ratio, n, output });
+        // The generator stops on the run's signal (given when it was made) and on this call's.
+        const { files, failed } = await generateImages({ prompt, aspectRatio: aspect_ratio, n, output }, callSignal(extra));
         for (const f of files) run?.wrote(f, "generate_image");
         const note = failed ? ` ${failed} of ${files.length + failed} images failed.` : "";
         return ok(`Generated ${files.join(", ")}.${note}`);
@@ -153,10 +173,15 @@ export function createAlfredTools(out: Outbound, signal?: AbortSignal, run?: Run
     },
   );
 
+  return [sendFile, moveFile, renderPdfTool, generateImage];
+}
+
+/** Alfred's tools as the in-process MCP server the agent's query gets (see alfredToolDefinitions). */
+export function createAlfredTools(out: Outbound, signal?: AbortSignal, run?: RunRecorder) {
   return createSdkMcpServer({
     name: "alfred",
     version: "0.1.0",
-    tools: [sendFile, moveFile, renderPdfTool, generateImage],
+    tools: alfredToolDefinitions(out, signal, run),
     alwaysLoad: true,
   });
 }

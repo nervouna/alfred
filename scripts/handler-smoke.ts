@@ -23,6 +23,11 @@
 //                run.stop after its first run.step (an interrupt: the stop reply, no error reply,
 //                the run ends stopped), and the next message starts a new turn in the same
 //                session; ends with one pass or fail line per check and the spend
+//   attach       the real handler behind the command API on a temp socket, driven over HTTP: a
+//                text file with a made-up word is uploaded into the inbox, a message names it and
+//                asks for the word (the reply must contain it, and the message event lists the
+//                file), and a message naming a file never uploaded gets 400; ends with one pass or
+//                fail line per check and the spend
 //   prompt <text>  one message on the default model, then the spend per model
 // Every WeChat send and every message event is printed as it happens.
 
@@ -489,6 +494,95 @@ async function stream(): Promise<number> {
   return failed;
 }
 
+/** The attach scenario: an upload, a message that names it, and a message that names a file never uploaded. Returns the number of checks that failed. */
+async function attach(): Promise<number> {
+  const handler = newHandler();
+  // A short path: Unix socket paths are limited to about 100 bytes.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "alf-"));
+  const socket = path.join(dir, "api.sock");
+  const closeApi = await startApi({ socket, handler, events: sharedEventLog() });
+  let failed = 0;
+  const check = (name: string, problems: string[]) => {
+    if (problems.length) failed++;
+    console.log(`[${problems.length ? "fail" : "pass"}] ${name}${problems.length ? `: ${problems.join("; ")}` : ""}`);
+  };
+
+  const followed: Event[] = [];
+  const stopFollowing = new AbortController();
+  const follower = (async () => {
+    try {
+      for await (const frame of streamEvents(socket, { signal: stopFollowing.signal })) {
+        if (!Number.isNaN(frame.id)) followed.push(JSON.parse(frame.data) as Event); // a live event has no id and is not in the log
+      }
+    } catch (err) {
+      if (!stopFollowing.signal.aborted) console.log(`[follower] ended: ${err}`);
+    }
+  })();
+  const post = (command: unknown) => request(socket, "POST", "/commands", command);
+  const messageOf = (pick: (m: Message) => boolean) => followed.find((e) => e.type === "message.created" && pick(e.data));
+  const json = (value: unknown) => JSON.stringify(value);
+
+  try {
+    // The model stays on haiku, as in the other scenarios.
+    console.log(`[app] ${at()} /model haiku`);
+    await post({ type: "message.send", clientId: "smoke-model", text: "/model haiku" });
+    await waitFor(() => messageOf((m) => m.direction === "out" && m.channel === "app" && /^已切换到 haiku/.test(m.text)), 30_000);
+
+    // A text file with a made-up word that only the file holds.
+    const word = "quorvantle-4217";
+    const name = "attach-smoke.txt";
+    console.log(`[app] ${at()} upload ${name}`);
+    const uploaded = await request(socket, "POST", `/uploads?name=${encodeURIComponent(name)}`, Buffer.from(`这个文件里的暗号是 ${word}。\n`, "utf8"));
+    const uploadedPath = (JSON.parse(uploaded.body) as { file?: { path?: string } }).file?.path ?? "";
+    check(
+      "the upload is answered 201 with a file in the inbox",
+      uploaded.status === 201 && uploadedPath.startsWith("inbox/") ? [] : [`got ${uploaded.status} ${uploaded.body}`],
+    );
+
+    // A message that names the file and asks for the word.
+    const question = {
+      type: "message.send",
+      clientId: "smoke-attach",
+      text: "读一下附件，告诉我文件里的暗号，只回答那个暗号。",
+      files: [{ path: uploadedPath }],
+    };
+    console.log(`[app] ${at()} ${question.text} files=${uploadedPath}`);
+    const accepted = await post(question);
+    check("the message naming the file is answered 202", accepted.status === 202 ? [] : [`got ${accepted.status} ${accepted.body}`]);
+    const inbound = await waitFor(() => messageOf((m) => m.direction === "in" && m.clientId === "smoke-attach"), 30_000);
+    const runId = inbound?.type === "message.created" ? inbound.data.runId : undefined;
+    check(
+      "the message event lists the uploaded file and the run it started",
+      inbound?.type === "message.created" && inbound.data.channel === "app" && inbound.data.files.some((f) => f.path === uploadedPath) && runId
+        ? []
+        : ["no such message.created event"],
+    );
+    const reply = await waitFor(() => messageOf((m) => m.direction === "out" && m.runId === runId && m.channel === "app" && m.text.includes(word)), 180_000);
+    check("the reply contains the word that only the file holds", reply ? [] : [`no reply with ${word} within 180 s`]);
+    await idle();
+
+    // A message that names a file no upload made: refused before anything is submitted.
+    const never = { type: "message.send", clientId: "smoke-never", text: "看看这个", files: [{ path: "inbox/1999-01-01/never-uploaded.txt" }] };
+    const refused = await post(never);
+    check(
+      "a message naming a file that was never uploaded is answered 400, and no event is recorded for it",
+      refused.status === 400 && refused.body === json({ error: "files.0.path: no such file in the inbox" }) && !messageOf((m) => m.clientId === "smoke-never")
+        ? []
+        : [`got ${refused.status} ${refused.body}`],
+    );
+    summary();
+    const tasks = listRunFiles().filter((f) => f.kind === "task");
+    console.log(`[spend] $${tasks.reduce((sum, f) => sum + f.costUsd, 0).toFixed(4)} across ${tasks.length} run(s)`);
+  } finally {
+    stopFollowing.abort();
+    await follower;
+    await closeApi();
+    await handler.shutdown();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  return failed;
+}
+
 let failedRules = 0;
 if (scenario === "background") {
   const handler = newHandler();
@@ -562,8 +656,10 @@ if (scenario === "background") {
   failedRules = await api();
 } else if (scenario === "stream") {
   failedRules = await stream();
+} else if (scenario === "attach") {
+  failedRules = await attach();
 } else {
-  console.error("usage: node scripts/handler-smoke.ts background|restart|undelivered|stop|nested|channels|api|stream|prompt <text>");
+  console.error("usage: node scripts/handler-smoke.ts background|restart|undelivered|stop|nested|channels|api|stream|attach|prompt <text>");
   process.exit(2);
 }
 process.exit(failedRules ? 1 : 0);
