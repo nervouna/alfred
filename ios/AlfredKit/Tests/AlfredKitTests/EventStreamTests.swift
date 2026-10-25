@@ -129,23 +129,24 @@ final class EventStreamTests: XCTestCase {
             if reply.status == 200 { reply.headers["Content-Type"] = "text/event-stream" }
             return reply
         })
-        StubURLProtocol.handler.withLock { $0 = { request in
+        let client = try stubbedClient { request in
             log.record(request)
             return script.next()
-        } }
-        addTeardownBlock { StubURLProtocol.handler.withLock { $0 = nil } }
-        let client = AlfredClient(credentials: try pairedCredentials(), session: stubbedSession())
+        }
         return EventStream(client: client, sleep: { try await sleep.sleep($0) })
     }
 
-    /// Consumes the stream's updates into `log` until the stream finishes.
+    /// Consumes the stream's updates into `log` until the stream finishes. The consumer is cancelled when the test
+    /// ends, so a test that fails early does not leave a stream reconnecting behind it.
     private func consume(_ stream: EventStream, into log: UpdateLog) -> Task<Void, Never> {
-        Task {
+        let task = Task {
             for await update in await stream.updates() {
                 log.append(update)
             }
             log.finish()
         }
+        addTeardownBlock { task.cancel() }
+        return task
     }
 
     func testAReconnectResumesAfterTheLastStoredIDAndLiveEventsDoNotMoveIt() async throws {
@@ -224,11 +225,12 @@ final class EventStreamTests: XCTestCase {
         let task = consume(stream, into: updates)
 
         // The countdown is armed when the connection opens and armed again by the ping: two watchdog sleeps,
-        // of which the first was cancelled. Nothing has dropped the connection yet.
+        // of which the first was cancelled. Nothing has dropped the connection yet. The consumer has to have
+        // taken the update off the stream, which is not ordered against the sleeps.
         await eventually {
             let requests = await sleep.watchdogRequests
             let pending = await sleep.pendingWatchdogs
-            return requests == 2 && pending == 1
+            return requests == 2 && pending == 1 && updates.all.count >= 1
         }
         XCTAssertEqual(updates.all, [.connected])
 
@@ -297,7 +299,14 @@ final class EventStreamTests: XCTestCase {
         ], sleep: sleep, log: log)
         let updates = UpdateLog()
         let task = consume(stream, into: updates)
-        await eventually { await sleep.pendingWatchdogs == 1 }
+        // The countdown is armed when the connection opens and armed again by the ping; the first was cancelled.
+        // The consumer has to have logged the connection before the cancel: a cancelled consumer may leave
+        // what is still on the stream untaken.
+        await eventually {
+            let requests = await sleep.watchdogRequests
+            let pending = await sleep.pendingWatchdogs
+            return requests == 2 && pending == 1 && updates.all.count >= 1
+        }
 
         task.cancel()
         await task.value

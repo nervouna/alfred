@@ -14,10 +14,22 @@ struct StubReply: Sendable {
     var failure: URLError.Code?
 }
 
-/// Answers every request made through `stubbedSession()` with what `handler` returns. XCTest runs the tests of
-/// one process serially, so one handler at a time is enough; each test clears it when it finishes.
+/// Answers a request with what the handler registered for the request's host returns. Each test registers its
+/// handler under a host of its own (see `stubbedClient`) and only its own client sends there, so a request left
+/// over from an earlier test, such as the reconnect of a stream that was cancelled, finds no handler of the
+/// running test and cannot take a reply meant for it. A host without a handler gets a 599.
 final class StubURLProtocol: URLProtocol {
-    static let handler = Mutex<(@Sendable (URLRequest) -> StubReply)?>(nil)
+    typealias Handler = @Sendable (URLRequest) -> StubReply
+
+    private static let handlers = Mutex<[String: Handler]>([:])
+
+    static func register(_ handler: @escaping Handler, forHost host: String) {
+        handlers.withLock { $0[host] = handler }
+    }
+
+    static func unregister(host: String) {
+        handlers.withLock { $0[host] = nil }
+    }
 
     override class func canInit(with request: URLRequest) -> Bool {
         true
@@ -28,7 +40,7 @@ final class StubURLProtocol: URLProtocol {
     }
 
     override func startLoading() {
-        let answer = StubURLProtocol.handler.withLock { $0 }
+        let answer = request.url?.host.flatMap { host in StubURLProtocol.handlers.withLock { $0[host] } }
         let reply = answer?(request) ?? StubReply(status: 599)
         if let failure = reply.failure {
             client?.urlProtocol(self, didFailWithError: URLError(failure))
@@ -49,11 +61,19 @@ final class StubURLProtocol: URLProtocol {
     override func stopLoading() {}
 }
 
-/// A session whose requests all go to `StubURLProtocol`.
-func stubbedSession() -> URLSession {
-    let configuration = URLSessionConfiguration.ephemeral
-    configuration.protocolClasses = [StubURLProtocol.self]
-    return URLSession(configuration: configuration)
+extension XCTestCase {
+    /// A client whose every request is answered by `handler`. The handler is registered under a host that only
+    /// this client uses, and removed when the test ends. The session is not invalidated then: a stream that was
+    /// cancelled may still be winding down, and creating a task on an invalidated session raises an exception.
+    func stubbedClient(_ handler: @escaping StubURLProtocol.Handler) throws -> AlfredClient {
+        let host = UUID().uuidString.lowercased() + ".stub.test"
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [StubURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        StubURLProtocol.register(handler, forHost: host)
+        addTeardownBlock { StubURLProtocol.unregister(host: host) }
+        return AlfredClient(credentials: try pairedCredentials(server: "https://" + host), session: session)
+    }
 }
 
 /// The requests a stub saw, with their bodies, in arrival order.
@@ -96,9 +116,11 @@ func fixture(_ path: String) throws -> Data {
     try Data(contentsOf: Fixtures.directory.appending(path: path))
 }
 
-/// The credentials of the pairing fixture, which has made-up values.
-func pairedCredentials() throws -> Credentials {
-    let pairing = try JSONDecoder().decode(Pairing.self, from: fixture("pairing/pairing.json"))
+/// The credentials of the pairing fixture, which has made-up values, for `server` instead of the fixture's own if given.
+func pairedCredentials(server: String? = nil) throws -> Credentials {
+    var object = try XCTUnwrap(JSONSerialization.jsonObject(with: fixture("pairing/pairing.json")) as? [String: Any])
+    if let server { object["server"] = server }
+    let pairing = try JSONDecoder().decode(Pairing.self, from: JSONSerialization.data(withJSONObject: object))
     return Credentials(pairing: pairing)
 }
 
