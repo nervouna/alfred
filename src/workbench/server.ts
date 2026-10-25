@@ -1,7 +1,12 @@
 // The workbench: a read-only web view of Alfred's runs, files and state.
-// GET only, server-rendered, no build step. Two listeners share one handler:
-// TCP for the Cloudflare tunnel, where every request needs a valid Access JWT,
-// and a 0600 Unix socket for an SSH-tunnel fallback.
+// The pages are GET only, server-rendered, no build step. Two listeners share
+// one handler: TCP for the Cloudflare tunnel, where every request needs a valid
+// Access JWT, and a 0600 Unix socket for an SSH-tunnel fallback.
+//
+// /api/ is the native app's way in. It takes GET and POST, and on every listener
+// it wants a bearer token of a paired, unrevoked device (devices.ts). On the
+// tunnel the Access JWT comes first, and may be the owner's or the app's
+// service token's; the pages accept the owner's only.
 
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -10,9 +15,11 @@ import path from "node:path";
 
 import { resolveInside } from "../agent/guard.ts";
 import { loadMemories } from "../agent/memory.ts";
+import type { ErrorResponse } from "../api/schema.ts";
 import { describeError, log } from "../log.ts";
 import type { AccessVerifier } from "./access.ts";
 import { allRuns, alfredStatus, listSessions, readTranscript, runDetail, spendByDay, tailLog } from "./data.ts";
+import { DeviceStore } from "./devices.ts";
 import { html, trusted } from "./html.ts";
 import type { Html } from "./html.ts";
 import { renderMarkdown } from "./markdown.ts";
@@ -196,6 +203,18 @@ export interface HandlerOptions {
   workspace: string;
   /** Checks the Access JWT; undefined for the Unix socket and --dev. */
   access?: AccessVerifier;
+  /** The paired devices /api/ authenticates against; the default store when omitted. */
+  devices?: DeviceStore;
+}
+
+const API_PREFIX = "/api/";
+const BEARER = /^Bearer ([A-Za-z0-9_-]{1,256})$/i;
+
+/** The device token in an Authorization header, or why there is none. */
+function bearerToken(header: string | undefined): { token: string } | { reason: string } {
+  if (!header) return { reason: "no Authorization header" };
+  const token = BEARER.exec(header)?.[1];
+  return token ? { token } : { reason: "malformed Authorization header" };
 }
 
 async function route(url: URL, workspace: string): Promise<Response> {
@@ -258,7 +277,38 @@ async function route(url: URL, workspace: string): Promise<Response> {
   throw new HttpError(404, "没有这个页面。");
 }
 
+function accessToken(req: http.IncomingMessage): string | undefined {
+  const token = req.headers["cf-access-jwt-assertion"];
+  return Array.isArray(token) ? token[0] : token;
+}
+
+function jsonError(status: number, message: string, headers: Record<string, string> = {}): Response {
+  const body: ErrorResponse = { error: message };
+  return { status, headers: { "Content-Type": "application/json; charset=utf-8", ...headers }, body: JSON.stringify(body) };
+}
+
+/** The app's way in: the Access JWT (owner or service token) on the tunnel, then a paired device's bearer token everywhere. */
+async function apiRoute(req: http.IncomingMessage, url: URL, access: AccessVerifier | undefined, devices: DeviceStore): Promise<Response> {
+  const refuse = (status: number, reason: string, message: string, headers?: Record<string, string>) => {
+    log.warn(`workbench refused ${req.method ?? ""} ${url.pathname}: ${reason}`);
+    return jsonError(status, message, headers);
+  };
+  if (access) {
+    const verdict = await access.verify(accessToken(req));
+    if ("error" in verdict) return refuse(403, verdict.error, "Cloudflare Access sign-in is required.");
+  }
+  const bearer = bearerToken(req.headers.authorization);
+  const device = "token" in bearer ? devices.authenticate(bearer.token) : undefined;
+  if (!device) {
+    return refuse(401, "token" in bearer ? "not a paired device" : bearer.reason, "A paired device's token is required.", { "WWW-Authenticate": "Bearer" });
+  }
+  if (req.method !== "GET" && req.method !== "POST") return jsonError(405, "Only GET and POST are allowed.", { Allow: "GET, POST" });
+  if (req.method === "GET" && url.pathname === "/api/ping") return { status: 204, headers: {}, body: "" };
+  return jsonError(404, "There is no such endpoint.");
+}
+
 export function createHandler(opts: HandlerOptions): (req: http.IncomingMessage, res: http.ServerResponse) => Promise<void> {
+  const devices = opts.devices ?? new DeviceStore();
   return async (req, res) => {
     const send = (r: Response) => {
       res.writeHead(r.status ?? 200, { ...BASE_HEADERS, ...r.headers });
@@ -270,23 +320,38 @@ export function createHandler(opts: HandlerOptions): (req: http.IncomingMessage,
       }
     };
     const fail = (status: number, message: string) => send(htmlResponse(errorPage(status, message), pageCsp("none"), status));
+    // The path decides which rules apply, and it is the path that gets routed, so a dot-segment cannot slip between the two.
+    let url: URL | undefined;
     try {
+      url = new URL(req.url ?? "/", "http://workbench.invalid");
+    } catch {
+      // Answered as a page request below.
+    }
+    try {
+      if (url?.pathname.startsWith(API_PREFIX)) return send(await apiRoute(req, url, opts.access, devices));
       if (req.method !== "GET") {
         res.writeHead(405, { ...BASE_HEADERS, Allow: "GET", "Content-Type": "text/plain; charset=utf-8" });
         res.end("Only GET is allowed.\n");
         return;
       }
       if (opts.access) {
-        const token = req.headers["cf-access-jwt-assertion"];
-        const verdict = await opts.access.verify(Array.isArray(token) ? token[0] : token);
+        const verdict = await opts.access.verify(accessToken(req));
         if ("error" in verdict) {
           log.warn(`workbench refused ${req.url ?? ""}: ${verdict.error}`);
           return fail(403, "需要通过 Cloudflare Access 登录。");
         }
+        if (!("email" in verdict)) {
+          log.warn(`workbench refused ${req.url ?? ""}: pages are for the owner, not a service token`);
+          return fail(403, "这个页面只对所有者开放。");
+        }
       }
-      const url = new URL(req.url ?? "/", "http://workbench.invalid");
+      if (!url) throw new HttpError(400, "请求地址无效。");
       send(await route(url, opts.workspace));
     } catch (err) {
+      if (url?.pathname.startsWith(API_PREFIX)) {
+        log.error(`workbench ${url.pathname} failed: ${describeError(err)}`);
+        return send(jsonError(500, "Something went wrong; see the log."));
+      }
       if (err instanceof HttpError) return fail(err.status, err.message);
       log.error(`workbench ${req.url ?? ""} failed: ${describeError(err)}`);
       fail(500, "出错了，详情见日志。");
@@ -300,6 +365,8 @@ export interface WorkbenchOptions {
   tcp?: { host: string; port: number; access?: AccessVerifier };
   /** Unix socket for the SSH-tunnel fallback, created 0600. */
   socket?: string;
+  /** The paired devices, shared by both listeners; the default store when omitted. */
+  devices?: DeviceStore;
 }
 
 function listen(server: http.Server, target: { host: string; port: number } | string): Promise<void> {
@@ -317,8 +384,9 @@ function listen(server: http.Server, target: { host: string; port: number } | st
 /** Start the listeners; resolves to a function that closes them. */
 export async function startWorkbench(opts: WorkbenchOptions): Promise<() => Promise<void>> {
   const servers: http.Server[] = [];
+  const devices = opts.devices ?? new DeviceStore();
   if (opts.tcp) {
-    const server = http.createServer(createHandler({ workspace: opts.workspace, access: opts.tcp.access }));
+    const server = http.createServer(createHandler({ workspace: opts.workspace, access: opts.tcp.access, devices }));
     await listen(server, opts.tcp);
     servers.push(server);
     log.info(`workbench listening on ${opts.tcp.host}:${opts.tcp.port}${opts.tcp.access ? " (Cloudflare Access required)" : " WITHOUT an Access check"}`);
@@ -329,7 +397,7 @@ export async function startWorkbench(opts: WorkbenchOptions): Promise<() => Prom
     } catch {
       // No socket left over.
     }
-    const server = http.createServer(createHandler({ workspace: opts.workspace }));
+    const server = http.createServer(createHandler({ workspace: opts.workspace, devices }));
     // Created owner-only from the start, so no other user can connect in between.
     const umask = process.umask(0o177);
     try {

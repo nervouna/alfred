@@ -12,9 +12,18 @@ export interface AccessConfig {
   teamDomain: string;
   /** The Access application's AUD tag. */
   aud: string;
-  /** The only identity allowed in. */
+  /** The only person allowed in. */
   ownerEmail: string;
+  /**
+   * The client id of the Access service token the app uses. A request that passed
+   * a Service Auth policy carries a JWT signed like the owner's, with this id as
+   * `common_name` and no email. Without it, service tokens are refused.
+   */
+  serviceClientId?: string;
 }
+
+/** Who a verified token belongs to: the owner, or the service token. */
+export type AccessIdentity = { email: string } | { serviceClientId: string };
 
 interface Jwk {
   kid?: string;
@@ -57,8 +66,8 @@ export class AccessVerifier {
     return `https://${this.config.teamDomain}`;
   }
 
-  /** The verified email, or why the token is refused. */
-  async verify(token: string | undefined): Promise<{ email: string } | { error: string }> {
+  /** The verified identity, or why the token is refused. */
+  async verify(token: string | undefined): Promise<AccessIdentity | { error: string }> {
     if (!token) return { error: "no Access token" };
     const parts = token.split(".");
     if (parts.length !== 3) return { error: "malformed token" };
@@ -85,8 +94,12 @@ export class AccessVerifier {
     const aud = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
     if (!aud.includes(this.config.aud)) return { error: "wrong audience" };
     const email = typeof payload.email === "string" ? payload.email : "";
-    if (email.toLowerCase() !== this.config.ownerEmail.toLowerCase()) return { error: "not the owner" };
-    return { email };
+    if (email) return email.toLowerCase() === this.config.ownerEmail.toLowerCase() ? { email } : { error: "not the owner" };
+    // No email: a service token, whose JWT names its client id instead.
+    const clientId = typeof payload.common_name === "string" ? payload.common_name : "";
+    if (!clientId) return { error: "not the owner" };
+    if (clientId !== this.config.serviceClientId) return { error: "service token not accepted" };
+    return { serviceClientId: clientId };
   }
 
   private async key(kid: string): Promise<crypto.KeyObject | undefined> {
