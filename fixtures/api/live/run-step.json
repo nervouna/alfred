@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-25T08:31:02.000Z",
+  "type": "run.step",
+  "data": {
+    "runId": "k7m2qa",
+    "step": {
+      "at": "2026-10-25T08:31:02.000Z",
+      "tool": "WebFetch",
+      "detail": "https://example.com/pricing"
+    }
+  }
+}

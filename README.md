@@ -125,7 +125,7 @@ cd ~/alfred && git pull && podman build -t localhost/alfred:latest . && systemct
 
 ### Workbench
 
-A read-only web page for following Alfred's work: one card per run with live progress and the files it wrote, the workspace with Markdown, image and PDF preview, HTML reports, spend, session transcripts, memory and logs. You still talk to Alfred only in WeChat. The workbench never sends anything to Alfred, and Alfred never reads from it.
+A read-only web page for following Alfred's work: one card per run with live progress and the files it wrote, the workspace with Markdown, image and PDF preview, HTML reports, spend, session transcripts, memory and logs. You talk to Alfred in WeChat, or from the native app through `/api/` (below). The pages never send anything to Alfred, and Alfred never reads from the workbench.
 
 - **Runs.** Every task (and every memory scan that called the model) is a run with a short id such as `k7m2qa`.
   - The id shows on its card, with a button that copies it, in the 3-minute progress notes, in `/status` and in the logs.
@@ -133,25 +133,54 @@ A read-only web page for following Alfred's work: one card per run with live pro
   - Paste an id into a WeChat message ("把 k7m2qa 的报告改成英文") and the run's title, status and file list are added to the prompt.
 - **HTML reports** open in a sandboxed frame. Inline scripts, styles and SVG run, so charts draw, but the frame has an opaque origin and a policy that blocks every request, so a report can neither read the workbench nor send anything out. Workspace images are inlined as `data:` URIs. With `ALFRED_WORKBENCH=on` (or a URL), the agent is told that HTML reports can be read here and need a PDF only when you want one.
 - **Delivery is best effort.** A reply or `send_file` that WeChat refuses (for example `ret=-2` once the 24-hour push window has closed) is sent once, logged, and marked on the run's card as not delivered; nothing is retried or queued. Your next WeChat message first gets one line naming those runs.
-- **Read-only.** Every endpoint answers only `GET`. The workbench reads `$ALFRED_STATE_DIR/workbench/` (`runs.jsonl` for good, `runs/<id>.json` with the step timeline for 30 days, `status.json` as the heartbeat, `alfred.log`), the transcripts under `claude/projects/`, and the workspace. All output is escaped, Markdown renders without raw HTML, paths are confined to the workspace, and HTML and SVG files download instead of opening outside the report viewer.
-- **Two listeners.** TCP (`ALFRED_WORKBENCH_LISTEN`, default `127.0.0.1:8787`) is for a Cloudflare tunnel. Every request there needs a valid `Cf-Access-Jwt-Assertion`: an RS256 signature from the team's keys, the application's AUD tag, the team's issuer, a token that has not expired, and the owner's email. A Unix socket (`ALFRED_WORKBENCH_SOCKET`, created 0600) needs no token, for an SSH tunnel: `ssh -N -L 8787:/home/<user>/data/workbench-socket/workbench.sock <host>`, then open `http://localhost:8787`.
-- `node src/cli.ts workbench --dev` serves on loopback without the Access check, for local testing.
+- **Read-only.** Every page answers only `GET` (`/api/` is the app's way in, below). The workbench reads `$ALFRED_STATE_DIR/workbench/` (`runs.jsonl` for good, `runs/<id>.json` with the step timeline for 30 days, `status.json` as the heartbeat, `alfred.log`), the transcripts under `claude/projects/`, and the workspace. All output is escaped, Markdown renders without raw HTML, paths are confined to the workspace, and HTML and SVG files download instead of opening outside the report viewer.
+- **Two listeners.** TCP (`ALFRED_WORKBENCH_LISTEN`, default `127.0.0.1:8787`) is for a Cloudflare tunnel. Every request there needs a valid `Cf-Access-Jwt-Assertion`: an RS256 signature from the team's keys, the application's AUD tag, the team's issuer, a token that has not expired, and the owner's email. A Unix socket (`ALFRED_WORKBENCH_SOCKET`, created 0600) needs no Access token (`/api/` still wants a device token), for an SSH tunnel: `ssh -N -L 8787:/home/<user>/data/workbench-socket/workbench.sock <host>`, then open `http://localhost:8787`.
+- **App access.** The native app calls `/api/` on the workbench; the pages stay the owner's. `/api/` takes `GET` and `POST`, its errors are JSON (`{"error": "…"}`) and never cached. Two checks come first, in order:
+  - **Access.** On the tunnel, `/api/` takes the owner's `Cf-Access-Jwt-Assertion` or the one of the app's Access service token, whose `common_name` is the token's client id (`CF_ACCESS_SERVICE_CLIENT_ID`) and which has no email. Either must still pass the signature, AUD, issuer and expiry checks above; otherwise 403. A service-token JWT gets 403 on every page, and without `CF_ACCESS_SERVICE_CLIENT_ID` service tokens are refused.
+  - **Device token.** On every listener, the socket and `--dev` included, the request needs `Authorization: Bearer <device token>` of a paired, unrevoked device. A missing, malformed, unknown or revoked token gets 401 with `WWW-Authenticate: Bearer`. Refusals are logged with their reason, never with a token.
+
+  After those checks, the routes (a method a route does not take gets 405 with `Allow`; an unknown path gets 404):
+  - `GET /api/ping` answers 204.
+  - `POST /api/commands` takes a command as the Command API does (`message.send`, `run.stop`). It is checked with `parseCommand` first: a body that is not `application/json`, not JSON or not a valid command gets 400 `{"error": "…"}` and nothing is sent. A valid command goes to Alfred's socket, and Alfred's status and body come back unchanged. Over 65,536 bytes is 413.
+  - `GET /api/events` relays Alfred's event stream as it arrives, passing on `Last-Event-ID` or `?after=`. A client that goes away closes Alfred's request; when Alfred ends or breaks the stream, the response ends.
+  - `POST /api/uploads?name=<name>` streams the body to Alfred's `/uploads` and relays the answer. A declared length over 52,428,800 bytes is 413 before anything is sent; an undeclared one is cut with 413 once it passes that limit.
+  - `GET /api/runs` answers `RunList`: the 100 newest runs, newest first, with only the fields the client shows.
+  - `GET /api/runs/<id>` answers `RunDetail`: the run and its steps. An unknown or malformed id is 404.
+  - `GET /api/files/<path>` streams a workspace file's bytes, typed by extension as the pages type them, under `Content-Security-Policy: sandbox`. A missing path, a directory, a path outside the workspace and a `..` segment are all 404.
+  - `POST /api/push` takes the app's APNs registration, `{"token": "<hex>", "environment": "development" | "production"}`, and stores it on the device's record in `devices.json`, replacing an earlier one; it answers 204. A body that does not fit is 400 `{"error": "…"}`, and one over 4,096 bytes is 413.
+  - While Alfred's socket cannot be reached (Alfred restarting, or the API off), the three forwarding routes answer 503 `{"error": "…"}`, and the app retries.
+
+  The socket is `ALFRED_API_SOCKET` (`deploy/workbench.container` mounts its directory read-only). The workbench holds no Alfred secret and forwards only the command set.
+- **Pairing.** `node src/cli.ts pair [--name <name>]` (name default `iPhone`) creates a device and shows one QR code with the server URL (`ALFRED_WORKBENCH_URL`, an `https://` origin), the Access service token (`CF_ACCESS_SERVICE_CLIENT_ID` and `CF_ACCESS_SERVICE_CLIENT_SECRET`) and the new device's token, so one scan sets the app up. The tokens appear nowhere but in the QR code; `--json` prints the same pairing as JSON instead, for scripts. On the host: `podman exec -it workbench node src/cli.ts pair --name <name>`.
+- **Revoking.** `node src/cli.ts devices` lists the devices with their ids, names, creation and revocation times, and `devices revoke <id>` locks one out. The workbench re-reads `devices.json` when the file changes, so the next request from that device is refused, with no restart. The file keeps only a SHA-256 of each device token, so a token lost with its phone cannot be read back: revoke the device and pair again.
+- **Push.** A paired phone with a registration gets a notification through APNs when Alfred's reply in the app goes out, and when WeChat refuses a reply, even with the app closed. A reply WeChat delivered is not pushed. A `development` registration goes to APNs's sandbox, a `production` one to production. The title is `Alfred`, and the body is the text cut to its first 100 characters, with `…` after them when it is longer. A WeChat refusal starts with `微信未送达：`, and a file-only message reads `文件：<first file's name>`. The notification also carries `eventId`, and `runId` when the message has one, so the app can open the right place. Inside `workbench`, a dispatcher follows Alfred's `/events` from the cursor in `push-cursor.json`. With no cursor it starts after the latest event, so old events never push, and the cursor is saved after each event, so a restart pushes nothing twice. A token APNs reports dead (410, or 400 `BadDeviceToken`) is removed from its device's registration; any other refusal is logged and not retried. The provider token is an ES256 JWT signed with the `.p8` key and renewed every 50 minutes. With any one of the four `ALFRED_APNS_*` variables missing, push is off and the workbench logs which one. `node src/cli.ts apns-test [text]` sends one test notification to every registered device and prints each device's answer; on the host: `podman exec -it workbench node src/cli.ts apns-test`.
+- `node src/cli.ts workbench --dev` serves on loopback without the Access check, for local testing. `/api/` still wants a device token there.
 
 On the host, the workbench and a dedicated `cloudflared` run in their own pod (`deploy/workbench.pod`, `workbench.container`, `workbench-tunnel.container`). They use the Alfred image, so `deploy/update.sh` restarts the workbench after an update. In the Cloudflare dashboard, create a remotely managed tunnel whose public hostname points at `http://localhost:8787`, and an Access application on that hostname that allows only your email. Then:
 
 ```bash
-mkdir -p ~/data/state/workbench ~/data/state/claude/projects ~/data/workbench-socket ~/.config/alfred
+mkdir -p ~/data/state/workbench ~/data/state/api ~/data/state/claude/projects ~/data/workbench-socket ~/data/workbench-app ~/.config/alfred
 read -rs TOKEN && printf %s "$TOKEN" | podman secret create workbench_tunnel_token - && unset TOKEN   # the tunnel token
 cat > ~/.config/alfred/workbench.env <<'ENV'
 CF_ACCESS_TEAM_DOMAIN=<team>.cloudflareaccess.com
 CF_ACCESS_AUD=<the Access application's AUD tag>
 ALFRED_WORKBENCH_OWNER_EMAIL=<your email>
+# For the app:
+CF_ACCESS_SERVICE_CLIENT_ID=<the service token's client id, ending in .access>
+CF_ACCESS_SERVICE_CLIENT_SECRET=<its client secret>
+ALFRED_WORKBENCH_URL=https://<hostname>
+# For push (APNs), with the .p8 key below as the alfred_apns_key secret:
+ALFRED_APNS_KEY_ID=<the APNs key's id>
+ALFRED_APNS_TEAM_ID=<your Apple team id>
+ALFRED_APNS_TOPIC=<the app's bundle id>
 ENV
+podman secret create alfred_apns_key <path to AuthKey_<key id>.p8>
 install -m644 deploy/workbench.pod deploy/workbench.container deploy/workbench-tunnel.container ~/.config/containers/systemd/
 systemctl --user daemon-reload && systemctl --user start workbench-pod
 ```
 
-- The workbench container mounts only what it shows, read-only: `account.json`, the context tokens and the rest of the state dir are not mounted. Its root filesystem is read-only too, and the socket directory is its one writable path.
+- For the app, create a service token in Cloudflare Zero Trust (Access, Service Auth), add a policy with the Service Auth action that includes it to the Access application, and put its client id and secret in `workbench.env` as above. Then pair with `podman exec -it workbench node src/cli.ts pair --name <name>`.
+- The workbench container mounts only what it shows, read-only: `account.json`, the context tokens and the rest of the state dir are not mounted. The one exception is the directory of Alfred's command socket (`~/data/state/api`), which `/api/` forwards to. Its root filesystem is read-only too, and two directories are writable: the socket directory and `~/data/workbench-app`, where `devices.json` lives.
 - Once the workbench is up, set `Environment=ALFRED_WORKBENCH=on` for Alfred in a drop-in such as `~/.config/containers/systemd/alfred.container.d/workbench.conf` (under `[Container]`, as above), not in `alfred.container` itself, then `systemctl --user daemon-reload` and `deploy/update.sh --restart`. Add `Environment=ALFRED_WORKBENCH_URL=https://<hostname>` there when WeChat opens the link and gets through the Access sign-in; leave it unset if it does not, and replies carry the run id only.
 
 ### In WeChat
@@ -162,7 +191,7 @@ Send a task as text or voice. Files and images can come first; they are saved to
 | --- | --- |
 | `/new` | start a new session (drops the conversation context; `/resume` brings it back) |
 | `/resume` | switch back to the previous session for the next task; send it again to switch back |
-| `/stop [run id]` | stop the current task, its background subagents and queued ones, and drop pending follow-ups and queued messages; with a run id, stop only that background subagent or take it out of the queue |
+| `/stop [run id]` | interrupt the turn the agent is on (below); with a run id, stop only that background subagent or take it out of the queue |
 | `/model [sonnet\|opus\|haiku]` | show or switch the model; default `sonnet`. During a task the switch applies from its next turn (subagent roles keep their default models) |
 | `/memory` | list long-term memories |
 | `/status` | model, session age and idle time, when it rotates, spend today against the daily cap, current task, background and queued subagents, pending follow-ups |
@@ -174,6 +203,7 @@ One task runs at a time, and you can steer it while it runs ("别查 X 了，重
 - If the agent is still working through tool calls, the follow-up joins the current turn and one reply answers both. If it was already writing its final answer, the follow-up runs as its own turn right after, and each turn gets its own reply, sent as soon as it ends.
 - The typing indicator shows while the agent works on a turn, and a turn that runs longer than 3 minutes gets a progress note every 3 minutes (with the run id, see Workbench). While foreground subagents run, the note and `/status` list them with their role, brief title and age. Background subagents show their progress on their workbench cards instead.
 - Once every message has been answered and no background subagent is running or queued, the task ends. A message that arrives after that is queued and starts the next task, which resumes the same session.
+- `/stop` interrupts the turn the agent is on (`Query.interrupt()`) and does not abort the task. The turn ends without a reply: neither its text nor an error line. Alfred answers `已停止当前任务。`, and when background subagents are still running or queued, `已停止当前任务。后台运行 <id>、<id> 仍在继续，发 /stop <id> 停止。` Follow-ups already handed to the task and messages queued behind it are kept and answered afterwards. The task ends as stopped when the interrupted turn was its last, with nothing left to answer and no background subagent running; otherwise it goes on and ends as usual. If the turn has not ended 10 seconds after the interrupt, the task is aborted instead (logged), which also drops its subagents and the follow-ups it has not answered.
 
 ### Channels
 
@@ -182,6 +212,8 @@ The handler serves the owner over named channels: `wechat` and `app`. The app ch
 - One intake queue takes the owner's messages in arrival order, whatever their channel, with the same steer, queue and command rules as above: an app message during a run that WeChat started steers that run. App messages belong to the owner and share the session, state and timeline of WeChat ones.
 - A run answers on the channel of the message that started it: the final reply, files from `send_file` and background subagent reports (for messages queued behind a task, the channel of the first one queued). A command's reply and the notices a message triggers (acknowledgements, lost or undelivered runs, the daily cap, changed rules) go to that message's channel. Progress notes and the typing indicator exist on WeChat only.
 - Every message in either direction is recorded in the event log as `message.created`, except progress notes: channel, direction, text, files, the run it started, steered or came from, and for an app message its client id. A WeChat send that fails is recorded with its `error`. On the app channel the event is the delivery, so a reply shows in the app whichever channel it went out on. The timeline starts when this version first runs; older WeChat history is not backfilled.
+- The notes a message triggers (lost runs, undelivered results, media that could not be saved) are recorded after that message, so in the log the owner's `message.created` comes first. WeChat receives the same notes as before.
+- A run also publishes live events, which are told to whoever is following the stream and never stored (see Command API): the main agent's reply text as it is written (`message.delta`) and each step the run records (`run.step`). Nothing of this reaches WeChat, which still gets the reply when its turn ends.
 
 ### Command API
 
@@ -190,8 +222,11 @@ A process on the same host can send the owner's commands to Alfred and follow it
 - **Socket.** `ALFRED_API_SOCKET`, by default `$STATE_DIR/api/alfred.sock`; `off` disables the API. The socket is mode 0600, and a directory created for it is 0700 (one that exists is left as it is). A socket file left by a crash is removed at start.
 - **`POST /commands`** takes `Content-Type: application/json` and a body of at most 65,536 bytes, which gets 413 as soon as the limit is crossed. A wrong content type, invalid JSON or a command `parseCommand` (`src/api/schema.ts`) rejects gets 400 `{"error": "…"}`, and nothing reaches the handler.
   - `{"type": "message.send", "clientId": "…", "text": "…"}` submits the message on the app channel and answers 202 `{"accepted": true}`. A client id among the last 1000 accepted gets 200 `{"accepted": false, "duplicate": true}` and is not submitted again. Those ids are kept in memory: a restart forgets them.
-  - `{"type": "run.stop", "runId": "…"}` answers 202 `{"stopped": true}`, or 404 `{"error": "no live or queued run <id>"}`.
-- **`GET /events`** streams `text/event-stream`. It starts after the `Last-Event-ID` header if there is one, else after `?after=<id>`, else from the start; anything but a non-negative integer gets 400. It sends the backlog first, then live events, with no gap and no repeat across the switch. Each event is `id: <id>`, `event: <type>` and `data: <the event as one line of JSON>`, and `: ping` goes out every 30 seconds. A reconnecting client sends the last id it saw.
+  - `{"type": "run.stop", "runId": "…"}` answers 202 `{"stopped": true}`, or 404 `{"error": "no live or queued run <id>"}`. For the task it interrupts the current turn, like `/stop` (see In WeChat); the reply `已停止当前任务。` arrives as a `message.created` event.
+- **`GET /events`** streams `text/event-stream`. It starts after the `Last-Event-ID` header if there is one, else after `?after=<id>`, else from the start; anything but a non-negative integer gets 400. It sends the backlog first, then new events, with no gap and no repeat across the switch. Each durable event is `id: <id>`, `event: <type>` and `data: <the event as one line of JSON>`, and `: ping` goes out every 30 seconds. A reconnecting client sends the last id it saw.
+- **Live events** go out on the same stream as `event: <type>` and `data: <one line of JSON: at, type, data>`, with no `id:` line, so a client's last id stays that of the last durable event. They are never stored, and a stream never replays them: one that happens while a stream is still sending its backlog is dropped for that stream, and a client that reconnects misses what happened meanwhile (the final reply is a `message.created` event, so nothing durable is lost).
+  - `message.delta` (`runId`, `streamId`, `text`): a piece of the main agent's reply text. `streamId` is the API message's id and the index of the text block (`msg_01….1`): it is the same for every delta of one block and differs for the next. Subagents' text, thinking and tool input are not streamed.
+  - `run.step` (`runId`, `step`): a step as it is recorded on the run's card. It carries the id of the run that took it: the task's for its own and its foreground subagents' steps (with `agent` set for the latter), a background subagent's own for its steps.
 - **`GET /health`** answers `{"ok": true, "lastEventId": <n>}`. Other paths get 404, other methods 405.
 
 ```bash
@@ -284,7 +319,7 @@ Alfred can hand parts of a task to subagents through the SDK's `Agent` tool, for
 - **Review.** The system prompt says when to delegate and when not to, what a self-contained brief holds, and how Alfred checks a result before replying: it answers the brief, at least one cited source is opened to confirm it, and the files it names exist. A result that falls short gets one more round with the same role. If it still falls short, Alfred replies with what it has and says what is missing.
 - **Spend.** `ALFRED_MAX_BUDGET_USD` (per query, default $10) covers subagent calls too, and the image cap of `generate_image` is per task across subagents. `ALFRED_DAILY_BUDGET_USD` (default $20) is the budget: once the day's spend reaches it, no new task or background subagent starts until the next day in the owner's time zone, and running ones finish. At the end of each task the log line `agent run done` breaks the spend down per model (`models=[...]`), from the SDK's `modelUsage`. A background subagent's card shows its spend so far (`≈`), updated as it works: the usage of its own responses, read from its transcript, priced at the rate its model's `modelUsage` implies. Calls its tools make on another model (WebFetch summaries, for one) count only toward the task. The task's card and the spend totals already include its subagents.
 - **Tracking.** `/status` and the progress note list foreground subagents from the SDK's `task_started` and `task_notification` messages, so a forked skill shows up while it runs.
-- `/stop` ends the Claude Code process, and the subagents inside it with it. `/stop <run id>` stops one background subagent (`stopTask`, with `perTaskStopAffordance` so an interrupt never takes the others along) or drops it from the queue.
+- `/stop` interrupts the main agent's current turn only (`interrupt()`; `perTaskStopAffordance` makes an interrupt spare the background subagents), so they keep running and report as usual. The reply names them: `已停止当前任务。后台运行 <id>、<id> 仍在继续，发 /stop <id> 停止。` `/stop <run id>` stops one background subagent (`stopTask`) or drops it from the queue. Only the 10-second fallback (a turn that does not end after an interrupt) and a shutdown end the Claude Code process, and the subagents inside it with it.
 - **Restarts.** On SIGTERM Alfred stops every task before it exits, so the container never waits for `StopTimeout`. The task's run and its live or queued subagents are recorded as lost. After a crash, runs still marked live are marked lost at startup. Either way, the owner's next message gets one line naming them (`Alfred 重启时中断了 2 个任务：…`).
 
 ### Agent sandbox
@@ -318,6 +353,7 @@ Verified WeChat behavior (2026-10-10):
 | `$XDG_STATE_HOME/alfred/claude/` | isolated Claude Code config dir: agent session transcripts used for resume |
 | `$XDG_STATE_HOME/alfred/workspace-plugin/` | the `workspace` skills plugin: a manifest and the `skills` symlink into the workspace, recreated at startup |
 | `$XDG_STATE_HOME/alfred/workbench/` | what the workbench reads: `runs.jsonl` (one line per finished run, kept for good), `runs/<id>.json` (live and recent runs with their steps, kept 30 days), `status.json` (heartbeat), `alfred.log` (the log, rotated at 5 MB to `alfred.log.1`) |
+| `$ALFRED_WORKBENCH_STATE` (default `$XDG_STATE_HOME/alfred/app/`) | `devices.json`: the app's paired devices, each with its id, name, creation and revocation times and the SHA-256 of its token, never the token; a device that has registered for push also has `push`, its APNs registration (the APNs device token and the environment, as `POST /api/push` stored it); the directory is mode 700 and the file 600, rewritten atomically. The workbench re-reads it when it changes. `push-cursor.json`: the id of the last event the push dispatcher handled |
 | `~/Alfred/` (override with `ALFRED_WORKSPACE`) | `ALFRED.md` (workspace rules), `inbox/`, `reports/`, `notes/`, `images/`, `memory/` (long-term memory), `skills/` (the owner's skills), `.trash/` |
 | `$XDG_CACHE_HOME/alfred/ms-playwright/` (default `~/.cache/…`, override with `PLAYWRIGHT_BROWSERS_PATH`) | Chrome Headless Shell for PDF rendering |
 
@@ -333,10 +369,13 @@ Verified WeChat behavior (2026-10-10):
 | `ALFRED_MEMORY_SCAN_BUDGET_USD` | `0.1` | spend cap for one memory scan; must be a finite number > 0 |
 | `ALFRED_API_SOCKET` | `$STATE_DIR/api/alfred.sock` | the command API's Unix socket (see Command API); `off` disables the API |
 | `ALFRED_WORKBENCH` | off | `on` when a workbench is deployed: the agent is told HTML reports can be read there |
-| `ALFRED_WORKBENCH_URL` | none | the workbench's https base URL, for card links in WeChat replies; implies `ALFRED_WORKBENCH=on` |
+| `ALFRED_WORKBENCH_URL` | none | the workbench's https base URL, for card links in WeChat replies (implies `ALFRED_WORKBENCH=on`) and as the server in the pairing QR code, where it must be an origin with no path |
 | `ALFRED_WORKBENCH_LISTEN` | `127.0.0.1:8787` | the workbench's TCP listener (`host:port`, or `off`); needs the three Access variables below unless `--dev` |
 | `ALFRED_WORKBENCH_SOCKET` | none | the workbench's Unix socket for the SSH-tunnel fallback |
 | `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUD`, `ALFRED_WORKBENCH_OWNER_EMAIL` | none | the Access team domain, the application's AUD tag and the one email allowed in |
+| `CF_ACCESS_SERVICE_CLIENT_ID`, `CF_ACCESS_SERVICE_CLIENT_SECRET` | none | the Access service token the app uses: the workbench accepts its JWT on `/api/` when the client id matches (without it service tokens are refused), and `pair` puts both in the QR code |
+| `ALFRED_WORKBENCH_STATE` | `$ALFRED_STATE_DIR/app` | the directory of `devices.json`, the app's paired devices |
+| `ALFRED_APNS_KEY_FILE`, `ALFRED_APNS_KEY_ID`, `ALFRED_APNS_TEAM_ID`, `ALFRED_APNS_TOPIC` | none | push: the `.p8` key file, its key id, the Apple team id and the app's bundle id (the topic). With any one missing, push is off and the workbench logs which; the key is read at startup and never logged |
 
 ## Layout
 

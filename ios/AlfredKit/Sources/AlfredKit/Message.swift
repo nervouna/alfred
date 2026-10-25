@@ -1,7 +1,7 @@
 import Foundation
 
 /// A file attached to a message, relative to the workspace.
-public struct FileRef: Decodable, Hashable, Sendable {
+public struct FileRef: Codable, Hashable, Sendable {
     public let path: String
     public let kind: FileKind?
 }

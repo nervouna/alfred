@@ -1,0 +1,36 @@
+{
+  "run": {
+    "id": "k7m2qa",
+    "kind": "task",
+    "title": "调研 VPS 价格",
+    "status": "done",
+    "model": "claude-sonnet-5-5",
+    "startedAt": "2026-10-25T08:30:05.000Z",
+    "endedAt": "2026-10-25T08:34:41.902Z",
+    "costUsd": 0.2513,
+    "files": [
+      {
+        "path": "reports/vps.md",
+        "tool": "Write"
+      }
+    ]
+  },
+  "steps": [
+    {
+      "at": "2026-10-25T08:30:12.000Z",
+      "tool": "WebSearch",
+      "detail": "VPS 价格 2026"
+    },
+    {
+      "at": "2026-10-25T08:31:30.000Z",
+      "tool": "Task",
+      "detail": "核对供应商 A 的带宽",
+      "agent": "reviewer"
+    },
+    {
+      "at": "2026-10-25T08:34:40.100Z",
+      "tool": "Write",
+      "detail": "reports/vps.md"
+    }
+  ]
+}

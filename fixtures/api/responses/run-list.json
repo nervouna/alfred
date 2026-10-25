@@ -1,0 +1,43 @@
+{
+  "runs": [
+    {
+      "id": "d8j3sx",
+      "kind": "task",
+      "title": "抓取定价页",
+      "status": "failed",
+      "model": "claude-sonnet-5-5",
+      "startedAt": "2026-10-25T08:34:53.000Z",
+      "endedAt": "2026-10-25T08:35:10.661Z",
+      "costUsd": 0.0117,
+      "files": [],
+      "error": "WebFetch: 403 Forbidden"
+    },
+    {
+      "id": "h6w4tz",
+      "kind": "subagent",
+      "parentRunId": "k7m2qa",
+      "title": "核对供应商 A 的带宽",
+      "status": "running",
+      "model": "claude-sonnet-5-5",
+      "startedAt": "2026-10-25T08:31:30.000Z",
+      "costUsd": 0,
+      "files": []
+    },
+    {
+      "id": "k7m2qa",
+      "kind": "task",
+      "title": "调研 VPS 价格",
+      "status": "done",
+      "model": "claude-sonnet-5-5",
+      "startedAt": "2026-10-25T08:30:05.000Z",
+      "endedAt": "2026-10-25T08:34:41.902Z",
+      "costUsd": 0.2513,
+      "files": [
+        {
+          "path": "reports/vps.md",
+          "tool": "Write"
+        }
+      ]
+    }
+  ]
+}
