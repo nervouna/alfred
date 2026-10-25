@@ -15,7 +15,8 @@ Developed with the `orchestrate` skill: issues are specs, implementers deliver o
 
 ## Architecture in brief
 
-- `src/bot.ts` long-polls iLink and hands each owner message to a `MessageHandler`; `src/agent/handler.ts` is the Agent SDK handler (sessions, live input, stop, background subagents, delivery).
+- The owner talks to Alfred over channels (`src/channels.ts`): WeChat (`src/channels/wechat.ts`, fed by `src/bot.ts`'s long-poll loop) and the app. Both go through one intake queue into `src/agent/handler.ts`, the Agent SDK handler (sessions, live input, stop, background subagents, delivery); a reply goes back to the channel its message came from.
+- `src/events.ts` is the append-only event log (messages, run lifecycle) the client resumes from by id; `src/api/schema.ts` is the client contract, tested against `fixtures/api/` on both the Node and the Swift side; `src/api/server.ts` serves commands and the event stream on a local Unix socket.
 - `src/runs.ts` records runs (one execution of the agent) under `$STATE_DIR/workbench/`; `src/workbench/` serves them read-only.
 - The workspace (`ALFRED_WORKSPACE`) is the only place the agent may read and write; `src/agent/guard.ts` enforces it per tool call.
 - `ios/` (from #27) holds the native client.
