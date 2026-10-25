@@ -14,11 +14,21 @@
 //   channels     a WeChat message starts a run, an app message steers it and /status
 //                comes from the app, then a second run starts from the app; ends with one
 //                pass or fail line per routing rule
+//   api          the real handler behind the command API on a socket in a temp dir, driven over
+//                HTTP only: a question and its reply, a task stopped with run.stop, a duplicate
+//                client id and a reconnect with Last-Event-ID; ends with one pass or fail line
+//                per check
 //   prompt <text>  one message on the default model, then the spend per model
 // Every WeChat send and every message event is printed as it happens.
 
-import type { Message } from "../src/api/schema.ts";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+import type { Event, Message } from "../src/api/schema.ts";
 import { createAgentHandler } from "../src/agent/handler.ts";
+import { request, streamEvents } from "../src/api/client.ts";
+import { startApi } from "../src/api/server.ts";
 import type { BotContext } from "../src/bot.ts";
 import { appOutbound } from "../src/channels.ts";
 import { WeChatChannel } from "../src/channels/wechat.ts";
@@ -188,6 +198,140 @@ async function channels(): Promise<number> {
   return rules.filter((r) => r.problems.length).length;
 }
 
+/** Polls until `find` returns something; undefined once `ms` have passed. */
+async function waitFor<T>(find: () => T | undefined, ms: number): Promise<T | undefined> {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    const found = find();
+    if (found !== undefined || Date.now() > deadline) return found;
+    await sleep(250);
+  }
+}
+
+/** The api scenario: the real handler behind the command API, driven over HTTP only. Returns the number of checks that failed. */
+async function api(): Promise<number> {
+  const handler = newHandler();
+  // A short path: Unix socket paths are limited to about 100 bytes.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "alf-"));
+  const socket = path.join(dir, "api.sock");
+  const closeApi = await startApi({ socket, handler, events: sharedEventLog() });
+  let failed = 0;
+  const check = (name: string, problems: string[]) => {
+    if (problems.length) failed++;
+    console.log(`[${problems.length ? "fail" : "pass"}] ${name}${problems.length ? `: ${problems.join("; ")}` : ""}`);
+  };
+
+  // A client that follows the stream from the start, as the app does.
+  const followed: Event[] = [];
+  const stopFollowing = new AbortController();
+  const follower = (async () => {
+    try {
+      for await (const frame of streamEvents(socket, { signal: stopFollowing.signal })) followed.push(JSON.parse(frame.data) as Event);
+    } catch (err) {
+      if (!stopFollowing.signal.aborted) console.log(`[follower] ended: ${err}`);
+    }
+  })();
+  const post = (command: unknown) => request(socket, "POST", "/commands", command);
+  const messageOf = (pick: (m: Message) => boolean) => followed.find((e) => e.type === "message.created" && pick(e.data));
+  const runEvent = (runId: string, status: string) => followed.find((e) => e.type === "run.updated" && e.data.id === runId && e.data.status === status);
+  const health = async () => JSON.parse((await request(socket, "GET", "/health")).body) as { ok: boolean; lastEventId: number };
+  const json = (value: unknown) => JSON.stringify(value);
+
+  try {
+    const h = await health();
+    check("GET /health answers ok with the last event id", h.ok === true && Number.isInteger(h.lastEventId) ? [] : [`got ${json(h)}`]);
+
+    // The model stays on haiku, as in the other scenarios. The command goes in as an ordinary message.
+    console.log(`[app] ${at()} /model haiku`);
+    await post({ type: "message.send", clientId: "smoke-model", text: "/model haiku" });
+    await waitFor(() => messageOf((m) => m.direction === "out" && m.channel === "app" && /^已切换到 haiku/.test(m.text)), 30_000);
+
+    // A short question and its reply.
+    const question = { type: "message.send", clientId: "smoke-question", text: "2 的 10 次方是多少？只回答数字。" };
+    console.log(`[app] ${at()} ${question.text}`);
+    const accepted = await post(question);
+    check("message.send is answered 202 accepted", accepted.status === 202 && accepted.body === json({ accepted: true }) ? [] : [`got ${accepted.status} ${accepted.body}`]);
+    const inbound = await waitFor(() => messageOf((m) => m.direction === "in" && m.clientId === "smoke-question"), 30_000);
+    const questionRun = inbound?.type === "message.created" ? inbound.data.runId : undefined;
+    check(
+      "the message is an app event with its client id and the run it started",
+      inbound?.type === "message.created" && inbound.data.channel === "app" && questionRun ? [] : ["no such message.created event"],
+    );
+    const reply = await waitFor(() => messageOf((m) => m.direction === "out" && m.runId === questionRun && m.channel === "app" && m.text !== ""), 180_000);
+    check("the reply arrives as a message.created event on the app channel", reply ? [] : ["no reply within 180 s"]);
+    await idle();
+
+    // A task that runs for a while, stopped with run.stop.
+    const task = {
+      type: "message.send",
+      clientId: "smoke-task",
+      text: "依次用 WebFetch 读这五页：https://en.wikipedia.org/wiki/Rome 、https://en.wikipedia.org/wiki/Paris 、https://en.wikipedia.org/wiki/London 、https://en.wikipedia.org/wiki/Vienna 、https://en.wikipedia.org/wiki/Prague ，每读完一页就把三行历史摘要保存到 notes/ 下以城市命名的 .md 文件里；全部读完后回复“完成”。",
+    };
+    console.log(`[app] ${at()} ${task.text.slice(0, 40)}…`);
+    await post(task);
+    const started = await waitFor(() => messageOf((m) => m.direction === "in" && m.clientId === "smoke-task"), 30_000);
+    const taskRun = started?.type === "message.created" ? started.data.runId : undefined;
+    const running = taskRun ? await waitFor(() => runEvent(taskRun, "running"), 30_000) : undefined;
+    await sleep(8000);
+    const unknown = await post({ type: "run.stop", runId: "zzzzzz" });
+    check(
+      "run.stop for an unknown run is answered 404",
+      unknown.status === 404 && unknown.body === json({ error: "no live or queued run zzzzzz" }) ? [] : [`got ${unknown.status} ${unknown.body}`],
+    );
+    const stop = taskRun ? await post({ type: "run.stop", runId: taskRun }) : undefined;
+    check(
+      "run.stop for the task is answered 202 stopped",
+      running && stop?.status === 202 && stop.body === json({ stopped: true }) ? [] : [`run=${taskRun ?? "none"} running=${Boolean(running)} got ${stop?.status} ${stop?.body}`],
+    );
+    const stopped = taskRun ? await waitFor(() => runEvent(taskRun, "stopped"), 60_000) : undefined;
+    check("the stopped run arrives as a run.updated event with status stopped", stopped ? [] : [`no stopped event for run ${taskRun ?? "none"}`]);
+    await idle();
+
+    // The same client id again.
+    const withClientId = () => followed.filter((e) => e.type === "message.created" && e.data.clientId === "smoke-question").length;
+    const before = withClientId();
+    const again = await post(question);
+    await sleep(1500);
+    check(
+      "a client id sent again is answered as a duplicate and not submitted",
+      again.status === 200 && again.body === json({ accepted: false, duplicate: true }) && withClientId() === before
+        ? []
+        : [`got ${again.status} ${again.body}; events with that client id ${before} -> ${withClientId()}`],
+    );
+
+    // Everything is in the log now. The events the follower got and a reconnect from the middle must match it exactly.
+    const last = (await health()).lastEventId;
+    const all = sharedEventLog().readSince(0, 100_000);
+    await waitFor(() => (followed.at(-1)?.id === last ? true : undefined), 10_000);
+    const ids = (events: Event[]) => events.map((e) => e.id).join(",").slice(0, 80);
+    check(
+      "the stream followed from the start matches the event log, with no gap and no duplicate",
+      json(followed) === json(all) ? [] : [`stream ${followed.length} events, log ${all.length}; stream ids ${ids(followed)}`],
+    );
+    const middle = all[Math.floor(all.length / 2)]?.id ?? 0;
+    const resumed: Event[] = [];
+    for await (const frame of streamEvents(socket, { lastEventId: middle })) {
+      resumed.push(JSON.parse(frame.data) as Event);
+      if (frame.id >= last) break;
+    }
+    const expected = all.filter((e) => e.id > middle);
+    check(
+      `a reconnect with Last-Event-ID ${middle} receives exactly the events after it`,
+      json(resumed) === json(expected) && resumed.every((e, i) => e.id === middle + 1 + i)
+        ? []
+        : [`got ${resumed.length} events (ids ${ids(resumed)}), the log has ${expected.length} after ${middle}`],
+    );
+    summary();
+  } finally {
+    stopFollowing.abort();
+    await follower;
+    await closeApi();
+    await handler.shutdown();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  return failed;
+}
+
 let failedRules = 0;
 if (scenario === "background") {
   const handler = newHandler();
@@ -257,8 +401,10 @@ if (scenario === "background") {
   summary();
 } else if (scenario === "channels") {
   failedRules = await channels();
+} else if (scenario === "api") {
+  failedRules = await api();
 } else {
-  console.error("usage: node scripts/handler-smoke.ts background|restart|undelivered|stop|nested|channels|prompt <text>");
+  console.error("usage: node scripts/handler-smoke.ts background|restart|undelivered|stop|nested|channels|api|prompt <text>");
   process.exit(2);
 }
 process.exit(failedRules ? 1 : 0);

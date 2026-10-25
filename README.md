@@ -177,11 +177,30 @@ One task runs at a time, and you can steer it while it runs ("别查 X 了，重
 
 ### Channels
 
-The handler serves the owner over named channels: `wechat` and `app`. The app channel has no client in this version (the command API comes next); the handler already treats it like WeChat, and its `submit` and `stopRun` (see `src/channels.ts`) are what that API calls.
+The handler serves the owner over named channels: `wechat` and `app`. The app channel's only client so far is the command API below, which calls the handler's `submit` and `stopRun` (see `src/channels.ts`); the handler treats the app like WeChat.
 
 - One intake queue takes the owner's messages in arrival order, whatever their channel, with the same steer, queue and command rules as above: an app message during a run that WeChat started steers that run. App messages belong to the owner and share the session, state and timeline of WeChat ones.
 - A run answers on the channel of the message that started it: the final reply, files from `send_file` and background subagent reports (for messages queued behind a task, the channel of the first one queued). A command's reply and the notices a message triggers (acknowledgements, lost or undelivered runs, the daily cap, changed rules) go to that message's channel. Progress notes and the typing indicator exist on WeChat only.
 - Every message in either direction is recorded in the event log as `message.created`, except progress notes: channel, direction, text, files, the run it started, steered or came from, and for an app message its client id. A WeChat send that fails is recorded with its `error`. On the app channel the event is the delivery, so a reply shows in the app whichever channel it went out on. The timeline starts when this version first runs; older WeChat history is not backfilled.
+
+### Command API
+
+A process on the same host can send the owner's commands to Alfred and follow its events over a Unix socket. `node src/cli.ts run` serves it (not with `--echo`) and closes it at shutdown before the handler stops its runs. There is no TCP listener.
+
+- **Socket.** `ALFRED_API_SOCKET`, by default `$STATE_DIR/api/alfred.sock`; `off` disables the API. The socket is mode 0600, and a directory created for it is 0700 (one that exists is left as it is). A socket file left by a crash is removed at start.
+- **`POST /commands`** takes `Content-Type: application/json` and a body of at most 65,536 bytes, which gets 413 as soon as the limit is crossed. A wrong content type, invalid JSON or a command `parseCommand` (`src/api/schema.ts`) rejects gets 400 `{"error": "…"}`, and nothing reaches the handler.
+  - `{"type": "message.send", "clientId": "…", "text": "…"}` submits the message on the app channel and answers 202 `{"accepted": true}`. A client id among the last 1000 accepted gets 200 `{"accepted": false, "duplicate": true}` and is not submitted again. Those ids are kept in memory: a restart forgets them.
+  - `{"type": "run.stop", "runId": "…"}` answers 202 `{"stopped": true}`, or 404 `{"error": "no live or queued run <id>"}`.
+- **`GET /events`** streams `text/event-stream`. It starts after the `Last-Event-ID` header if there is one, else after `?after=<id>`, else from the start; anything but a non-negative integer gets 400. It sends the backlog first, then live events, with no gap and no repeat across the switch. Each event is `id: <id>`, `event: <type>` and `data: <the event as one line of JSON>`, and `: ping` goes out every 30 seconds. A reconnecting client sends the last id it saw.
+- **`GET /health`** answers `{"ok": true, "lastEventId": <n>}`. Other paths get 404, other methods 405.
+
+```bash
+node src/cli.ts api send "text"                 # POST message.send with a fresh client id; prints the status and body
+node src/cli.ts api stop k7m2qa                 # POST run.stop
+node src/cli.ts api events --after 120          # the events after id 120, then exit
+node src/cli.ts api events --follow             # all of them, then new ones as they come
+curl --unix-socket "$STATE_DIR/api/alfred.sock" -N http://localhost/events
+```
 
 ### Sessions and context
 
@@ -295,7 +314,7 @@ Verified WeChat behavior (2026-10-10):
 
 | Path | Content |
 | --- | --- |
-| `$XDG_STATE_HOME/alfred/` (default `~/.local/state/alfred/`, override with `ALFRED_STATE_DIR`) | `account.json` (bot token), `sync.json` (poll cursor), `context-tokens.json`, `agent-state.json` (active and previous session, model and spend per user), `memory-scan.json` (transcript offsets and extraction spend), `memory.lock` (held while a task or memory scan runs), `events/events.jsonl` (the append-only event log for clients: one line per durable event, ids increase, kept for good); files are mode 600 |
+| `$XDG_STATE_HOME/alfred/` (default `~/.local/state/alfred/`, override with `ALFRED_STATE_DIR`) | `account.json` (bot token), `sync.json` (poll cursor), `context-tokens.json`, `agent-state.json` (active and previous session, model and spend per user), `memory-scan.json` (transcript offsets and extraction spend), `memory.lock` (held while a task or memory scan runs), `events/events.jsonl` (the append-only event log for clients: one line per durable event, ids increase, kept for good), `api/alfred.sock` (the command API's socket while Alfred runs); files are mode 600 |
 | `$XDG_STATE_HOME/alfred/claude/` | isolated Claude Code config dir: agent session transcripts used for resume |
 | `$XDG_STATE_HOME/alfred/workspace-plugin/` | the `workspace` skills plugin: a manifest and the `skills` symlink into the workspace, recreated at startup |
 | `$XDG_STATE_HOME/alfred/workbench/` | what the workbench reads: `runs.jsonl` (one line per finished run, kept for good), `runs/<id>.json` (live and recent runs with their steps, kept 30 days), `status.json` (heartbeat), `alfred.log` (the log, rotated at 5 MB to `alfred.log.1`) |
@@ -312,6 +331,7 @@ Verified WeChat behavior (2026-10-10):
 | `ALFRED_MMX_BIN` | `$CLAUDE_CONFIG_DIR/skills/mmx/bin/mmx` (`~/.claude/…` when unset) | `mmx` executable for `generate_image`; if it is missing, the tool returns an error |
 | `ALFRED_MEMORY_SCAN_MINUTES` | `60` | interval between background memory scans; `0` turns automatic scans off (`npm run memory-scan` still works); empty means the default, anything else that is not a finite number of minutes from 0 to 35791 fails at startup |
 | `ALFRED_MEMORY_SCAN_BUDGET_USD` | `0.1` | spend cap for one memory scan; must be a finite number > 0 |
+| `ALFRED_API_SOCKET` | `$STATE_DIR/api/alfred.sock` | the command API's Unix socket (see Command API); `off` disables the API |
 | `ALFRED_WORKBENCH` | off | `on` when a workbench is deployed: the agent is told HTML reports can be read there |
 | `ALFRED_WORKBENCH_URL` | none | the workbench's https base URL, for card links in WeChat replies; implies `ALFRED_WORKBENCH=on` |
 | `ALFRED_WORKBENCH_LISTEN` | `127.0.0.1:8787` | the workbench's TCP listener (`host:port`, or `off`); needs the three Access variables below unless `--dev` |
@@ -326,13 +346,14 @@ src/bot.ts          long-poll loop, owner filter, typing indicator
 src/channels.ts     the channel boundary (`Outbound`, `Inbound`), the app channel, and the recording of every message as an event
 src/channels/wechat.ts  the WeChat channel: iLink messages in (media saved), replies, files and typing out
 src/events.ts       the append-only event log clients read
+src/api/            the client API: schema (events and commands), the command API server on a Unix socket, and the client behind the `api` commands
 src/agent/          Agent SDK handler (intake queue, routing, stop), live task input, options, workspace guard, ALFRED.md rules, skill plugins, custom tools, image generation, session lifecycle, long-term memory, persisted state
 src/echo.ts         PoC handler and protocol test commands
 src/files.ts        inbound media storage and file helpers
 src/pdf.ts          Markdown/HTML to PDF rendering
 src/runs.ts         run ids and records, the heartbeat: what the workbench reads
 src/workbench/      the read-only workbench: server, Access check, pages, safe Markdown
-src/cli.ts          login | run | push | status | setup-pdf | pdf | memory-scan | workbench
+src/cli.ts          login | run | push | status | setup-pdf | pdf | memory-scan | workbench | api
 plugin/             the baked skills plugin `alfred`
 scripts/agent-smoke.ts  local agent run without WeChat
 ```
@@ -353,6 +374,7 @@ node scripts/handler-smoke.ts undelivered      # replies fail as after the push 
 node scripts/handler-smoke.ts stop             # two background collectors, then /stop <run id> for one of them
 node scripts/handler-smoke.ts nested           # a general-purpose subagent starts three background collectors
 node scripts/handler-smoke.ts channels         # WeChat starts a run, the app steers it and starts the next; a pass or fail line per routing rule
+node scripts/handler-smoke.ts api              # the real handler behind the command API on a temp socket, driven over HTTP only; a pass or fail line per check
 node scripts/handler-smoke.ts prompt "text"    # one message through the real handler, then the spend per model
 ```
 
