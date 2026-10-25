@@ -63,8 +63,52 @@ final class EventFixtureTests: XCTestCase {
     }
 }
 
+final class QuestionFixtureTests: XCTestCase {
+    private func decode(_ name: String) throws -> Event {
+        try JSONDecoder().decode(Event.self, from: Data(contentsOf: Fixtures.directory.appending(path: name)))
+    }
+
+    func testQuestionAskedFixtureFieldsAreDecoded() throws {
+        let event = try decode("events/question-asked.json")
+        XCTAssertEqual(event.id, 9)
+        guard case let .questionAsked(asked) = event.payload else {
+            return XCTFail("expected a question.asked event, got \(event.payload)")
+        }
+        XCTAssertEqual(asked.id, "q-8f2a41c0")
+        XCTAssertEqual(asked.runId, "k7m2qa")
+        XCTAssertEqual(asked.questions.map(\.question), ["报告用哪种格式？", "要对比哪些供应商？"])
+        XCTAssertEqual(asked.questions.map(\.header), ["报告格式", "供应商"])
+        XCTAssertEqual(asked.questions.map(\.multiSelect), [false, true])
+        XCTAssertEqual(asked.questions[0].options, [
+            QuestionOption(label: "短表格", description: "一张对比表加一句结论"),
+            QuestionOption(label: "长文章", description: "逐项展开的完整分析"),
+        ])
+        XCTAssertEqual(asked.questions[1].options.map(\.label), ["Hetzner", "Vultr", "DigitalOcean"])
+    }
+
+    func testQuestionAnsweredFixtureCarriesAnswersByQuestionText() throws {
+        let event = try decode("events/question-answered.json")
+        guard case let .questionAnswered(answered) = event.payload else {
+            return XCTFail("expected a question.answered event, got \(event.payload)")
+        }
+        XCTAssertEqual(answered.id, "q-8f2a41c0")
+        XCTAssertEqual(answered.runId, "k7m2qa")
+        XCTAssertEqual(answered.answers, ["报告用哪种格式？": "短表格", "要对比哪些供应商？": "Hetzner, Vultr"])
+        XCTAssertFalse(answered.cancelled, "no cancelled key means it was answered")
+    }
+
+    func testACancelledQuestionHasNoAnswers() throws {
+        let event = try decode("events/question-answered-cancelled.json")
+        guard case let .questionAnswered(answered) = event.payload else {
+            return XCTFail("expected a question.answered event, got \(event.payload)")
+        }
+        XCTAssertTrue(answered.cancelled)
+        XCTAssertEqual(answered.answers, [:])
+    }
+}
+
 final class FutureFixtureTests: XCTestCase {
-    private static let knownTypes: Set<String> = ["message.created", "run.updated"]
+    private static let knownTypes: Set<String> = ["message.created", "run.updated", "question.asked", "question.answered"]
 
     func testEveryFutureFixtureDecodesWithoutError() throws {
         let files = try Fixtures.jsonFiles(in: "future")

@@ -14,17 +14,24 @@
 // interrupts the main agent's current turn and nothing else: the messages
 // waiting for it and the background subagents go on.
 //
+// The main agent can ask the owner a question with a few options (the
+// AskUserQuestion tool, see questions.ts). The call waits, with no timeout, in a
+// hook until the owner answers; while it waits, any message from the owner that
+// is not a slash command answers it, on either channel. /stop, an interrupt and
+// shutdown cancel it.
+//
 // While a run works it also publishes live events (see events.ts): the main
 // agent's reply text as it is written, and every step the run records.
 
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { HookCallbackMatcher, Options, Query, SDKPartialAssistantMessage, SDKResultMessage } from "@anthropic-ai/claude-agent-sdk";
 
-import type { Channel } from "../api/schema.ts";
-import { SerialQueue, recordInbound, recorded } from "../channels.ts";
+import type { Channel, Question } from "../api/schema.ts";
+import { InvalidAnswer, SerialQueue, recordInbound, recorded } from "../channels.ts";
 import type { Inbound, Intake, Outbound } from "../channels.ts";
 import { type EventLog, sharedEventLog } from "../events.ts";
 import { humanAge, localDate } from "../files.ts";
@@ -65,6 +72,8 @@ import { TaskInput, answeredBy } from "./input.ts";
 import { EXTRACT_MODEL, MEMORY_LOCK_FILE, MemoryScanScheduler, SCAN_TIMEOUT_MS, scanTranscripts, transcriptDirs } from "./memory-scan.ts";
 import type { ScanReport } from "./memory-scan.ts";
 import { MemoryLock, capIndex, loadMemories, syncMemoryIndex } from "./memory.ts";
+import { QUESTION_TOOL, answersFromReply, denyPermissionPrompts, questionHook, questionText } from "./questions.ts";
+import type { AskOwner, QuestionOutcome } from "./questions.ts";
 import { RULES_FILE, RulesTracker, rulesChangeNotice, rulesDisclosure, seedRules, snapshotRules } from "./rules.ts";
 import { NO_SESSION, accountModels, accountRun, resumePrevious, retire, rotationDueAt, shouldRotate } from "./session.ts";
 import type { RetireReason } from "./session.ts";
@@ -98,6 +107,7 @@ const TOOL_LABELS: Record<string, string> = {
   Grep: "查内容",
   Skill: "用技能",
   Agent: "派子任务",
+  AskUserQuestion: "提问",
 };
 
 const HELP = `Alfred 调研助手
@@ -145,10 +155,21 @@ interface Run {
   shutdown: boolean;
 }
 
+/** A question the main agent asked and the owner has not answered: its tool call is held until it settles. */
+interface OpenQuestion {
+  id: string;
+  runId: string;
+  questions: Question[];
+  /** Records how it ended and releases the held tool call; a question settles once. */
+  settle(outcome: QuestionOutcome): void;
+}
+
 interface UserRuntime {
   /** True from the start of a task until the queue is drained. */
   busy: boolean;
   run?: Run;
+  /** The questions the live run is waiting on, by id. Any message from the owner answers them. */
+  questions: Map<string, OpenQuestion>;
   /** Messages received after the running task stopped taking follow-ups; together they start the next task. */
   queue: { prompt: string; channel: Channel }[];
   /** Files received since the last text message, relative to the workspace. */
@@ -359,6 +380,8 @@ export function agentOptions(params: {
   subagentRun?: (agentId: string) => RunRecorder | undefined;
   /** The run id of a background subagent by its Agent call's tool_use id, which the agent is told. */
   subagentRunId?: (toolUseId: string) => string | undefined;
+  /** Holds the main agent's AskUserQuestion calls for the owner; without it the tool is not offered. */
+  ask?: AskOwner;
 }): Options {
   const memory = capIndex(syncMemoryIndex(WORKSPACE_DIR));
   if (memory.lines.length < memory.total) {
@@ -367,7 +390,9 @@ export function agentOptions(params: {
   const rules = new RulesTracker(WORKSPACE_DIR);
   const disclosure = rulesDisclosure(rules);
   const subagents = params.subagents !== false;
-  const tools = subagents ? BUILTIN_TOOLS : BUILTIN_TOOLS.filter((t) => t !== "Agent");
+  const builtin = subagents ? BUILTIN_TOOLS : BUILTIN_TOOLS.filter((t) => t !== "Agent");
+  // AskUserQuestion is offered but not allowed: dontAsk denies it, except where the hook answers it.
+  const tools = params.ask ? [...builtin, QUESTION_TOOL] : builtin;
   const postToolUse = params.run ? [disclosure, runFilesHook(params.run, params.subagentRun)] : [disclosure];
   if (params.subagentRunId) postToolUse.push(runIdHook(params.subagentRunId));
   const postToolUseFailure = params.admission ? [disclosure, agentFailureHook(params.admission)] : [disclosure];
@@ -377,16 +402,18 @@ export function agentOptions(params: {
     env: agentEnv(),
     settingSources: [],
     settings: AGENT_SETTINGS,
-    systemPrompt: systemPrompt(new Date(), { rootRules: rules.loadRoot(), memory, subagents }),
+    systemPrompt: systemPrompt(new Date(), { rootRules: rules.loadRoot(), memory, subagents, questions: Boolean(params.ask) }),
     tools,
-    allowedTools: [...tools, ...ALFRED_TOOL_NAMES],
+    allowedTools: [...builtin, ...ALFRED_TOOL_NAMES],
     plugins: skillPlugins(),
     skills: "all",
     agents: subagents ? subagentDefinitions() : undefined,
     permissionMode: "dontAsk",
+    // Not a way to grant anything: the CLI enables AskUserQuestion only when a canUseTool is set (see questions.ts).
+    canUseTool: params.ask ? denyPermissionPrompts : undefined,
     mcpServers: { alfred: createAlfredTools(params.out, params.abortController?.signal, params.run) },
     hooks: {
-      PreToolUse: [workspaceGuard(WORKSPACE_DIR), subagentGuard(WORKSPACE_DIR, params.admission)],
+      PreToolUse: [workspaceGuard(WORKSPACE_DIR), subagentGuard(WORKSPACE_DIR, params.admission), ...(params.ask ? [questionHook(params.ask)] : [])],
       PostToolUse: postToolUse,
       PostToolUseFailure: postToolUseFailure,
       SubagentStart: [subagentRulesHook()],
@@ -510,7 +537,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
   const overBudget = (userId: string): boolean => spentToday(store.get(userId)) >= DAILY_BUDGET_USD;
   const runtime = (userId: string): UserRuntime => {
     let rt = runtimes.get(userId);
-    if (!rt) runtimes.set(userId, (rt = { busy: false, queue: [], attachments: [] }));
+    if (!rt) runtimes.set(userId, (rt = { busy: false, queue: [], attachments: [], questions: new Map() }));
     return rt;
   };
 
@@ -555,6 +582,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
         admission: run.background,
         subagentRun: (agentId) => run.background.recorderOf(agentId),
         subagentRunId: (toolUseId) => run.background.runIdFor(toolUseId),
+        ask: (questions, signal) => askOwner(userId, run, questions, signal),
       }),
     });
     run.query = q;
@@ -667,6 +695,62 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
     await stop?.();
   }
 
+  /**
+   * Holds the main agent's AskUserQuestion call for the owner. The question is recorded (the app shows it from that
+   * event; on WeChat it is also sent as text, in a run that WeChat started) and stays open, with no timeout, until
+   * an answer settles it: a reply to it, question.answer, or a cancel: a stop, the call's signal aborting, the
+   * run ending, or shutdown. Every ending is recorded as question.answered.
+   */
+  function askOwner(userId: string, run: Run, questions: Question[], signal: AbortSignal): Promise<QuestionOutcome> {
+    if (signal.aborted || run.stopped) return Promise.resolve({ cancelled: true });
+    const rt = runtime(userId);
+    const id = crypto.randomUUID();
+    const runId = run.recorder.id;
+    return new Promise((resolve) => {
+      let settled = false;
+      const open: OpenQuestion = {
+        id,
+        runId,
+        questions,
+        settle(outcome) {
+          if (settled) return;
+          settled = true;
+          signal.removeEventListener("abort", onAbort);
+          rt.questions.delete(id);
+          events.append("question.answered", "answers" in outcome ? { id, runId, answers: outcome.answers } : { id, runId, answers: {}, cancelled: true });
+          log.info(`question ${id} of run ${runId} ${"answers" in outcome ? "answered" : "cancelled"}`);
+          resolve(outcome);
+        },
+      };
+      const onAbort = () => open.settle({ cancelled: true });
+      signal.addEventListener("abort", onAbort, { once: true });
+      // Open before anything is sent, so a quick reply finds it.
+      rt.questions.set(id, open);
+      events.append("question.asked", { id, runId, questions });
+      log.info(`run ${runId} asks question ${id}: ${questions.map((q) => q.question).join(" / ")}`);
+      // On the app the event is the delivery. A WeChat send that fails is recorded with its error, and the event still pushes.
+      if (run.channel === "wechat") {
+        run.out.text(questionText(questions)).catch((err) => log.warn(`sending question ${id} failed: ${describeError(err)}`));
+      }
+    });
+  }
+
+  /** Cancels every question the owner has open: a stop, the end of the run, or shutdown. */
+  function cancelQuestions(rt: UserRuntime): void {
+    for (const open of [...rt.questions.values()]) open.settle({ cancelled: true });
+  }
+
+  /** question.answer: answers an open question with the given answers; see Intake.answerQuestion. */
+  async function answerQuestion(id: string, answers: Record<string, string>): Promise<boolean> {
+    const open = runtime(owner).questions.get(id);
+    if (!open) return false;
+    const texts = new Set(open.questions.map((q) => q.question));
+    const stray = Object.keys(answers).find((key) => !texts.has(key));
+    if (stray !== undefined) throw new InvalidAnswer(`answers: ${JSON.stringify(stray.slice(0, 80))} is not the text of one of the question's questions`);
+    open.settle({ answers });
+    return true;
+  }
+
   async function runAgent(userId: string, start: Start): Promise<void> {
     const { prompt } = start;
     const rt = runtime(userId);
@@ -722,7 +806,8 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
       run.channel === "wechat"
         ? setInterval(() => {
             const now = Date.now();
-            if (!run.turnStartedAt || now - run.turnStartedAt < progressMs) return;
+            // A run waiting for the owner's answer is not working: no note.
+            if (!run.turnStartedAt || now - run.turnStartedAt < progressMs || rt.questions.size > 0) return;
             channels.wechat
               .text(`仍在处理（${humanAge(now - run.turnStartedAt)}，运行 ${recorder.id}）：${runSummary(run, now)}`)
               .catch((err) => log.warn(`progress note failed: ${describeError(err)}`));
@@ -821,6 +906,8 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
     } finally {
       run.input.close();
       clearInterval(progress);
+      // A question still open when the run ends can never be answered: it is cancelled before the run is recorded as ended.
+      cancelQuestions(rt);
       clearTimeout(run.interruptTimer);
       run.interruptTimer = undefined;
       // Stopped and failed tasks count as activity too, so the idle clock restarts after every task.
@@ -923,6 +1010,8 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
     // Only the turn the main agent is on is stopped. The messages handed to the run and those queued behind it
     // are answered afterwards, and the background subagents go on until they report or are stopped one by one.
     const continuing = [...run.background.running, ...run.background.queued].map((b) => b.recorder.id);
+    // A held question is cancelled first: its tool call is denied with the reason, then the turn is interrupted.
+    cancelQuestions(rt);
     await interruptTurn(run);
     await out.text(
       continuing.length ? `已停止当前任务。后台运行 ${continuing.join("、")} 仍在继续，发 /stop <id> 停止。` : "已停止当前任务。",
@@ -1097,6 +1186,14 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
       return;
     }
 
+    // A question is waiting: this message is its answer. It is recorded with the run's id and is not a follow-up.
+    if (rt.questions.size > 0) {
+      record(rt.run?.recorder.id);
+      for (const open of [...rt.questions.values()]) open.settle({ answers: answersFromReply(trimmed, open.questions) });
+      await sendNotes();
+      return;
+    }
+
     const { quotedText } = inbound;
     const runs = runIdCandidates(`${trimmed}\n${quotedText ?? ""}`).flatMap((id) => findRun(id) ?? []);
     const prompt = buildPrompt(trimmed, { attachments: rt.attachments.splice(0), quotedText, voice: Boolean(inbound.voice), runs });
@@ -1130,6 +1227,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
       rt.run.shutdown = true;
       rt.run.stopped = true;
       rt.run.input.close();
+      cancelQuestions(rt);
       rt.run.abort.abort();
     }
     scheduler.stop();
@@ -1140,6 +1238,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
   return {
     submit: (source) => intakeQueue.run(async () => intake(typeof source === "function" ? await source() : source)),
     stopRun,
+    answerQuestion,
     shutdown,
   };
 }

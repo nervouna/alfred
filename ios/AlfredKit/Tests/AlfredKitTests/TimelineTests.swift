@@ -121,6 +121,56 @@ final class TimelineTests: XCTestCase {
         XCTAssertEqual(timeline.latestStep["k7m2qa"]?.detail, "https://example.com/pricing")
     }
 
+    func testAQuestionIsOpenFromItsEventUntilItIsAnswered() throws {
+        var timeline = Timeline()
+        XCTAssertEqual(timeline.openQuestions, [:])
+
+        timeline.apply(try streamEvent("events/question-asked.json"))
+        XCTAssertEqual(timeline.openQuestions.keys.sorted(), ["q-8f2a41c0"])
+        XCTAssertEqual(timeline.openQuestions["q-8f2a41c0"]?.runId, "k7m2qa")
+        XCTAssertEqual(timeline.openQuestions["q-8f2a41c0"]?.questions.count, 2)
+        XCTAssertEqual(timeline.lastEventId, 9)
+
+        timeline.apply(try streamEvent("events/question-answered.json"))
+        XCTAssertEqual(timeline.openQuestions, [:])
+        XCTAssertEqual(timeline.lastEventId, 10)
+    }
+
+    func testACancelledQuestionIsNoLongerOpen() throws {
+        var timeline = Timeline()
+        timeline.apply(try streamEvent("events/question-asked.json"))
+        timeline.apply(try streamEvent("events/question-answered-cancelled.json"))
+        XCTAssertEqual(timeline.openQuestions, [:])
+    }
+
+    func testOpenQuestionsAreKeptById() throws {
+        var timeline = Timeline()
+        timeline.apply(try streamEvent("events/question-asked.json"))
+        let second = #"{"id":10,"at":"2026-10-25T08:38:00Z","type":"question.asked","data":{"id":"q-second","runId":"k7m2qa","questions":[{"question":"继续吗？","header":"确认","options":[{"label":"继续","description":"接着做"},{"label":"停","description":"到此为止"}],"multiSelect":false}]}}"#
+        timeline.apply(try JSONDecoder().decode(StreamEvent.self, from: Data(second.utf8)))
+        XCTAssertEqual(timeline.openQuestions.keys.sorted(), ["q-8f2a41c0", "q-second"])
+
+        let answer = #"{"id":11,"at":"2026-10-25T08:38:30Z","type":"question.answered","data":{"id":"q-8f2a41c0","runId":"k7m2qa","answers":{"报告用哪种格式？":"短表格"}}}"#
+        timeline.apply(try JSONDecoder().decode(StreamEvent.self, from: Data(answer.utf8)))
+        XCTAssertEqual(timeline.openQuestions.keys.sorted(), ["q-second"], "answering one leaves the other open")
+    }
+
+    func testAReplayedQuestionEventChangesNothing() throws {
+        var timeline = Timeline()
+        timeline.apply(try streamEvent("events/question-asked.json"))
+        timeline.apply(try streamEvent("events/question-answered.json"))
+        timeline.apply(try streamEvent("events/question-asked.json"))
+        XCTAssertEqual(timeline.openQuestions, [:], "an id already applied is not applied again")
+        XCTAssertEqual(timeline.lastEventId, 10)
+    }
+
+    func testAnAnswerForAQuestionNeverSeenChangesNothing() throws {
+        var timeline = Timeline()
+        timeline.apply(try streamEvent("events/question-answered.json"))
+        XCTAssertEqual(timeline.openQuestions, [:])
+        XCTAssertEqual(timeline.lastEventId, 10)
+    }
+
     func testUnknownEventsChangeNothingButTheResumePoint() throws {
         var timeline = Timeline()
         timeline.apply(try streamEvent("events/message-created-app-in.json"))

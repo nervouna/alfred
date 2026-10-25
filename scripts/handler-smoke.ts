@@ -28,6 +28,12 @@
 //                asks for the word (the reply must contain it, and the message event lists the
 //                file), and a message naming a file never uploaded gets 400; ends with one pass or
 //                fail line per check and the spend
+//   ask          the real handler behind the command API on a temp socket, driven over HTTP: the agent
+//                asks a question (a question.asked event), a question.answer with one label gets a reply
+//                naming it (a key that is no question's text is 400, an unknown question 404); a question
+//                answered with a plain message.send gets a reply using the text; run.stop with a question
+//                open records it as cancelled and the run ends stopped; ends with one pass or fail line
+//                per check and the spend
 //   prompt <text>  one message on the default model, then the spend per model
 // Every WeChat send and every message event is printed as it happens.
 
@@ -558,6 +564,160 @@ async function attach(): Promise<number> {
   return failed;
 }
 
+
+/** The ask scenario: structured questions on the real handler, driven over HTTP only. Returns the number of checks that failed. */
+async function ask(): Promise<number> {
+  const handler = newHandler();
+  // A short path: Unix socket paths are limited to about 100 bytes.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "alf-"));
+  const socket = path.join(dir, "api.sock");
+  const closeApi = await startApi({ socket, handler, events: sharedEventLog() });
+  let failed = 0;
+  const check = (name: string, problems: string[]) => {
+    if (problems.length) failed++;
+    console.log(`[${problems.length ? "fail" : "pass"}] ${name}${problems.length ? `: ${problems.join("; ")}` : ""}`);
+  };
+
+  // A client that follows the stream from the start, as the app does.
+  const followed: Event[] = [];
+  const stopFollowing = new AbortController();
+  const follower = (async () => {
+    try {
+      for await (const frame of streamEvents(socket, { signal: stopFollowing.signal })) {
+        if (Number.isNaN(frame.id)) continue; // a live event has no id and is not in the log
+        const event = JSON.parse(frame.data) as Event;
+        followed.push(event);
+        if (event.type === "question.asked") console.log(`[question] ${at()} ${event.data.id} run=${event.data.runId} ${event.data.questions.map((q) => q.question).join(" / ")}`);
+        if (event.type === "question.answered") console.log(`[answered] ${at()} ${event.data.id} ${event.data.cancelled ? "cancelled" : JSON.stringify(event.data.answers)}`);
+      }
+    } catch (err) {
+      if (!stopFollowing.signal.aborted) console.log(`[follower] ended: ${err}`);
+    }
+  })();
+  const post = (command: unknown) => request(socket, "POST", "/commands", command);
+  const json = (value: unknown) => JSON.stringify(value);
+  const messageOf = (pick: (m: Message) => boolean) => {
+    const found = followed.find((e) => e.type === "message.created" && pick(e.data));
+    return found?.type === "message.created" ? found.data : undefined;
+  };
+  const askedOf = (runId: string | undefined) => {
+    const found = followed.find((e) => e.type === "question.asked" && e.data.runId === runId);
+    return found?.type === "question.asked" ? found.data : undefined;
+  };
+  const answeredOf = (id: string) => {
+    const found = followed.find((e) => e.type === "question.answered" && e.data.id === id);
+    return found?.type === "question.answered" ? found.data : undefined;
+  };
+  const runEvent = (runId: string, status: string) => followed.find((e) => e.type === "run.updated" && e.data.id === runId && e.data.status === status);
+  /** Sends a message and waits for the run it started and for the question that run asks. */
+  const sendAndWaitForQuestion = async (clientId: string, text: string) => {
+    console.log(`[app] ${at()} ${text.slice(0, 70)}`);
+    await post({ type: "message.send", clientId, text });
+    const runId = (await waitFor(() => messageOf((m) => m.direction === "in" && m.clientId === clientId), 30_000))?.runId;
+    const asked = runId ? await waitFor(() => askedOf(runId), 120_000) : undefined;
+    return { runId, asked };
+  };
+
+  try {
+    // The model stays on haiku, as in the other scenarios.
+    console.log(`[app] ${at()} /model haiku`);
+    await post({ type: "message.send", clientId: "smoke-model", text: "/model haiku" });
+    await waitFor(() => messageOf((m) => m.direction === "out" && m.channel === "app" && /^已切换到 haiku/.test(m.text)), 30_000);
+
+    // 1. The agent asks; the answer comes by question.answer with one label.
+    const first = await sendAndWaitForQuestion(
+      "smoke-ask-1",
+      "封面要用一个代号，我自己定不了。请用 AskUserQuestion 工具问我，选项的 label 分别是 Maple、Cedar、Birch（各配一句说明）。拿到我的答案后，只回复一句话，里面要有我选的那个代号。",
+    );
+    const q1 = first.asked?.questions[0];
+    check(
+      "the agent asks: a question.asked event arrives with the run's id, one question and its options",
+      first.asked && q1 && first.asked.questions.length === 1 && q1.options.length >= 2 && q1.options.length <= 4
+        ? []
+        : [`run=${first.runId ?? "none"} asked=${json(first.asked)?.slice(0, 160)}`],
+    );
+    if (first.asked && q1) {
+      const label = q1.options.find((o) => /cedar/i.test(o.label))?.label ?? q1.options[1]?.label ?? "";
+      const stray = await post({ type: "question.answer", questionId: first.asked.id, answers: { "不是这个问题的原文": label } });
+      check(
+        "a key that is not one of the question's texts is answered 400, and the question stays open",
+        stray.status === 400 && !answeredOf(first.asked.id) ? [] : [`got ${stray.status} ${stray.body}; answered=${Boolean(answeredOf(first.asked.id))}`],
+      );
+      const unknown = await post({ type: "question.answer", questionId: "q-unknown", answers: { [q1.question]: label } });
+      check(
+        "question.answer for a question that is not open is answered 404",
+        unknown.status === 404 && unknown.body === json({ error: "no open question q-unknown" }) ? [] : [`got ${unknown.status} ${unknown.body}`],
+      );
+      const answer = await post({ type: "question.answer", questionId: first.asked.id, answers: { [q1.question]: label } });
+      check("question.answer with one label is answered 202", answer.status === 202 && answer.body === json({ answered: true }) ? [] : [`got ${answer.status} ${answer.body}`]);
+      const answered = await waitFor(() => answeredOf(first.asked?.id ?? ""), 30_000);
+      check(
+        "a question.answered event records the label against the question's text",
+        answered && !answered.cancelled && answered.answers[q1.question] === label ? [] : [`got ${json(answered)}`],
+      );
+      const reply = await waitFor(() => messageOf((m) => m.direction === "out" && m.runId === first.runId && m.channel === "app" && m.text.includes(label)), 180_000);
+      check("the reply names the label that was chosen", reply ? [] : [`no reply containing ${label} within 180 s`]);
+    }
+    await idle();
+
+    // 2. The next question is answered by a plain message.
+    const word = "quorvantle-4217";
+    const second = await sendAndWaitForQuestion(
+      "smoke-ask-2",
+      "摘要的口吻我定不了。请用 AskUserQuestion 工具问我，选项的 label 是“正式”和“轻松”（各配一句说明）。拿到我的答案后，只回复一句话，原样包含我给你的答案原文。",
+    );
+    if (!second.asked) {
+      check("a question answered with a plain message.send gets a reply that uses the text", [`run=${second.runId ?? "none"} asked nothing`]);
+    } else {
+      console.log(`[app] ${at()} ${word}`);
+      await post({ type: "message.send", clientId: "smoke-answer", text: word });
+      const answered = await waitFor(() => answeredOf(second.asked?.id ?? ""), 30_000);
+      const inbound = messageOf((m) => m.direction === "in" && m.clientId === "smoke-answer");
+      const reply = await waitFor(() => messageOf((m) => m.direction === "out" && m.runId === second.runId && m.channel === "app" && m.text.includes(word)), 180_000);
+      const problems: string[] = [];
+      if (!answered || Object.values(answered.answers).join("") !== word) problems.push(`question.answered ${json(answered)}`);
+      if (inbound?.runId !== second.runId) problems.push(`the message is recorded with run ${inbound?.runId ?? "none"}, not ${second.runId}`);
+      if (messageOf((m) => m.direction === "out" && m.text === "收到，会在当前步骤结束后转给 Alfred。")) problems.push("the answer was also acknowledged as a follow-up");
+      if (!reply) problems.push(`no reply containing ${word} within 180 s`);
+      check("a question answered with a plain message.send gets a reply that uses the text", problems);
+    }
+    await idle();
+
+    // 3. run.stop with a question open cancels it.
+    const third = await sendAndWaitForQuestion(
+      "smoke-ask-3",
+      "标题我定不了。请用 AskUserQuestion 工具问我，选项的 label 是“长”和“短”（各配一句说明）。拿到答案之前什么都不要做。",
+    );
+    if (!third.runId || !third.asked) {
+      check("run.stop with a question open records it as cancelled, and the run ends stopped", [`run=${third.runId ?? "none"} asked nothing`]);
+    } else {
+      const stop = await post({ type: "run.stop", runId: third.runId });
+      const cancelled = await waitFor(() => answeredOf(third.asked?.id ?? ""), 30_000);
+      const stopped = await waitFor(() => runEvent(third.runId ?? "", "stopped"), 60_000);
+      const errors = followed.flatMap((e) => (e.type === "message.created" && e.data.direction === "out" && e.data.runId === third.runId && /执行出错|出错了/.test(e.data.text) ? [e.data.text] : []));
+      const problems: string[] = [];
+      if (stop.status !== 202) problems.push(`run.stop answered ${stop.status} ${stop.body}`);
+      if (!cancelled?.cancelled || Object.keys(cancelled.answers).length > 0) problems.push(`question.answered ${json(cancelled)}`);
+      if (!stopped) problems.push("no stopped run.updated event");
+      if (errors.length) problems.push(`error reply "${errors[0]?.slice(0, 60)}"`);
+      check("run.stop with a question open records it as cancelled, and the run ends stopped", problems);
+      const late = await post({ type: "question.answer", questionId: third.asked.id, answers: { [third.asked.questions[0]?.question ?? ""]: "长" } });
+      check("a cancelled question is closed: question.answer for it is answered 404", late.status === 404 ? [] : [`got ${late.status} ${late.body}`]);
+    }
+    await idle();
+    summary();
+    const tasks = listRunFiles().filter((f) => f.kind === "task");
+    console.log(`[spend] $${tasks.reduce((sum, f) => sum + f.costUsd, 0).toFixed(4)} across ${tasks.length} run(s)`);
+  } finally {
+    stopFollowing.abort();
+    await follower;
+    await closeApi();
+    await handler.shutdown();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  return failed;
+}
+
 let failedRules = 0;
 if (scenario === "background") {
   const handler = newHandler();
@@ -633,8 +793,10 @@ if (scenario === "background") {
   failedRules = await stream();
 } else if (scenario === "attach") {
   failedRules = await attach();
+} else if (scenario === "ask") {
+  failedRules = await ask();
 } else {
-  console.error("usage: node scripts/handler-smoke.ts background|restart|undelivered|stop|nested|channels|api|stream|attach|prompt <text>");
+  console.error("usage: node scripts/handler-smoke.ts background|restart|undelivered|stop|nested|channels|api|stream|attach|ask|prompt <text>");
   process.exit(2);
 }
 process.exit(failedRules ? 1 : 0);

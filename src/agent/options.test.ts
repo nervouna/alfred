@@ -107,3 +107,42 @@ test("the system prompt does not depend on which skills exist", () => {
     fs.rmSync(skill, { recursive: true, force: true });
   }
 });
+
+test("a run that can ask offers AskUserQuestion, answered in a hook that waits as long as the owner takes, with dontAsk kept", async () => {
+  const { QUESTION_HOOK_TIMEOUT_SECONDS } = await import("./questions.ts");
+  prepareWorkspace();
+  const ask = async () => ({ cancelled: true as const });
+  const options = agentOptions({ out: appOutbound(), model: "sonnet", ask });
+  assert.ok(Array.isArray(options.tools) && options.tools.includes("AskUserQuestion"));
+  assert.ok(!options.allowedTools?.includes("AskUserQuestion"), "the hook decides, not an allow rule");
+  assert.equal(options.permissionMode, "dontAsk");
+  // The CLI offers AskUserQuestion only when there is a permission prompt surface. The hook answers the tool before it
+  // is asked, so the callback is a stop for anything that would otherwise ask: it denies everything.
+  assert.equal(typeof options.canUseTool, "function");
+  const denied = await options.canUseTool?.("AskUserQuestion", {}, { signal: new AbortController().signal, toolUseID: "toolu_1", requestId: "r1" });
+  assert.equal(denied?.behavior, "deny");
+  assert.equal((await options.canUseTool?.("Bash", { command: "ls" }, { signal: new AbortController().signal, toolUseID: "toolu_2", requestId: "r2" }))?.behavior, "deny");
+  const matchers = options.hooks?.PreToolUse ?? [];
+  const asking = matchers.filter((m) => m.timeout !== undefined);
+  assert.equal(asking.length, 1, "one matcher carries the question hook");
+  assert.equal(asking[0]?.timeout, QUESTION_HOOK_TIMEOUT_SECONDS);
+  assert.ok(QUESTION_HOOK_TIMEOUT_SECONDS > 86_400);
+});
+
+test("a run that cannot ask, such as the smoke test's, does not offer AskUserQuestion", () => {
+  prepareWorkspace();
+  const options = agentOptions({ out: appOutbound(), model: "sonnet" });
+  assert.ok(Array.isArray(options.tools) && !options.tools.includes("AskUserQuestion"));
+  assert.ok(!options.hooks?.PreToolUse?.some((m) => m.timeout !== undefined));
+  assert.equal(options.canUseTool, undefined);
+  assert.doesNotMatch(String(options.systemPrompt), /AskUserQuestion/);
+});
+
+test("the system prompt says the owner talks through WeChat or the app, and when to ask: a choice that blocks progress", () => {
+  prepareWorkspace();
+  const prompt = String(agentOptions({ out: appOutbound(), model: "sonnet", ask: async () => ({ cancelled: true as const }) }).systemPrompt);
+  assert.match(prompt, /through WeChat or the app/);
+  assert.doesNotMatch(prompt, /talk to you through WeChat on their phone/);
+  assert.match(prompt, /AskUserQuestion/);
+  assert.match(prompt, /never for things you can decide/);
+});

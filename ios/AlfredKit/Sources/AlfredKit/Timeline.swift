@@ -29,6 +29,8 @@ public struct Timeline: Hashable, Sendable {
     public private(set) var runs: [String: Run] = [:]
     /// The latest step of each run, by run id. A run that ends loses its step.
     public private(set) var latestStep: [String: Step] = [:]
+    /// The questions Alfred has asked and nobody has answered, by question id.
+    public private(set) var openQuestions: [String: QuestionAsked] = [:]
     /// The id of the last stored event applied: where a stream resumes.
     public private(set) var lastEventId: Int64 = 0
 
@@ -69,6 +71,10 @@ public struct Timeline: Hashable, Sendable {
                 drafts[run.id] = nil
                 latestStep[run.id] = nil
             }
+        case let .questionAsked(asked):
+            openQuestions[asked.id] = asked
+        case let .questionAnswered(answered):
+            openQuestions[answered.id] = nil
         case .unknown:
             break
         }

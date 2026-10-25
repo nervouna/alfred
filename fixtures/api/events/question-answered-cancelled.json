@@ -1,0 +1,11 @@
+{
+  "id": 11,
+  "at": "2026-10-25T08:37:05.120Z",
+  "type": "question.answered",
+  "data": {
+    "id": "q-8f2a41c0",
+    "runId": "k7m2qa",
+    "answers": {},
+    "cancelled": true
+  }
+}

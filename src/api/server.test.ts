@@ -30,6 +30,7 @@ const { EventLog } = await import("../events.ts");
 const { localDate } = await import("../files.ts");
 const { MAX_COMMAND_BYTES, MAX_UPLOAD_BYTES, parseCommand } = await import("./schema.ts");
 const { HEARTBEAT_MS, apiSocketPath, startApi } = await import("./server.ts");
+const { InvalidAnswer } = await import("../channels.ts");
 
 const run: Run = { id: "k7m2qa", kind: "task", title: "调研 VPS 价格", status: "running", startedAt: "2026-10-25T08:30:05.000Z", costUsd: 0, files: [] };
 const JSON_TYPE = { "Content-Type": "application/json" };
@@ -63,6 +64,9 @@ function stubHandler() {
     submitted: [] as InboundSource[],
     stopped: [] as [string, Channel][],
     live: new Set(["k7m2qa"]),
+    answered: [] as [string, Record<string, string>][],
+    /** The open questions: an id and the texts of its questions. */
+    open: new Map([["q-open", ["报告用哪种格式？"]]]),
     /** While set, submit() waits for it. */
     hold: undefined as Promise<void> | undefined,
     fail: false,
@@ -74,6 +78,14 @@ function stubHandler() {
     async stopRun(runId: string, channel: Channel) {
       handler.stopped.push([runId, channel]);
       return handler.live.has(runId);
+    },
+    async answerQuestion(id: string, answers: Record<string, string>) {
+      handler.answered.push([id, answers]);
+      const texts = handler.open.get(id);
+      if (!texts) return false;
+      const key = Object.keys(answers).find((k) => !texts.includes(k));
+      if (key !== undefined) throw new InvalidAnswer(`answers.${key}: not the text of one of the question's questions`);
+      return true;
     },
   };
   return handler;
@@ -382,6 +394,43 @@ test("run.stop stops a live run with 202 and answers 404 for any other", async (
   assert.equal(unknown.status, 404);
   assert.deepEqual(unknown.json(), { error: "no live or queued run zzzzzz" });
   assert.deepEqual(handler.stopped, [["k7m2qa", "app"], ["zzzzzz", "app"]]);
+});
+
+test("question.answer answers an open question with 202, and the handler gets the id and the answers", async (t) => {
+  const { socket, handler } = await start(t);
+  const answers = { "报告用哪种格式？": "短表格" };
+  const reply = await post(socket, { type: "question.answer", questionId: "q-open", answers });
+  assert.equal(reply.status, 202);
+  assert.deepEqual(reply.json(), { answered: true });
+  assert.deepEqual(handler.answered, [["q-open", answers]]);
+});
+
+test("question.answer for a question that is not open gets 404", async (t) => {
+  const { socket } = await start(t);
+  const reply = await post(socket, { type: "question.answer", questionId: "q-gone", answers: { "报告用哪种格式？": "短表格" } });
+  assert.equal(reply.status, 404);
+  assert.deepEqual(reply.json(), { error: "no open question q-gone" });
+});
+
+test("question.answer with a key that is not one of the question's texts gets 400 with the handler's reason", async (t) => {
+  const { socket } = await start(t);
+  const reply = await post(socket, { type: "question.answer", questionId: "q-open", answers: { 别的问题: "x" } });
+  assert.equal(reply.status, 400);
+  assert.deepEqual(reply.json(), { error: "answers.别的问题: not the text of one of the question's questions" });
+});
+
+test("a question.answer that does not fit the schema gets 400 and never reaches the handler", async (t) => {
+  const { socket, handler } = await start(t);
+  for (const bad of [
+    { type: "question.answer", questionId: "q-open", answers: {} },
+    { type: "question.answer", questionId: "q-open", answers: { "报告用哪种格式？": "" } },
+    { type: "question.answer", questionId: "q-open", answers: { "报告用哪种格式？": "x".repeat(2001) } },
+    { type: "question.answer", questionId: "not an id", answers: { "报告用哪种格式？": "x" } },
+    { type: "question.answer", answers: { "报告用哪种格式？": "x" } },
+  ]) {
+    assert.equal((await post(socket, bad)).status, 400, JSON.stringify(bad).slice(0, 80));
+  }
+  assert.deepEqual(handler.answered, []);
 });
 
 test("GET /events streams the backlog, then live events, as server-sent events", async (t) => {

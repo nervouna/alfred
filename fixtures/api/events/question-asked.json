@@ -1,0 +1,45 @@
+{
+  "id": 9,
+  "at": "2026-10-25T08:36:00.000Z",
+  "type": "question.asked",
+  "data": {
+    "id": "q-8f2a41c0",
+    "runId": "k7m2qa",
+    "questions": [
+      {
+        "question": "报告用哪种格式？",
+        "header": "报告格式",
+        "options": [
+          {
+            "label": "短表格",
+            "description": "一张对比表加一句结论"
+          },
+          {
+            "label": "长文章",
+            "description": "逐项展开的完整分析"
+          }
+        ],
+        "multiSelect": false
+      },
+      {
+        "question": "要对比哪些供应商？",
+        "header": "供应商",
+        "options": [
+          {
+            "label": "Hetzner",
+            "description": "欧洲，价格最低"
+          },
+          {
+            "label": "Vultr",
+            "description": "节点多，按小时计费"
+          },
+          {
+            "label": "DigitalOcean",
+            "description": "文档好，价格中等"
+          }
+        ],
+        "multiSelect": true
+      }
+    ]
+  }
+}
