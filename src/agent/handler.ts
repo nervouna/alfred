@@ -1,7 +1,10 @@
-// WeChat message handler backed by the Claude Agent SDK.
+// The owner's message handler, backed by the Claude Agent SDK.
 //
-// Intake runs inside the bot's per-user queue and returns quickly; the agent
-// runs in the background so /stop and /status stay responsive. One task runs
+// Messages reach it through submit(), from whichever channel the owner wrote on
+// (see channels.ts): one intake queue takes them in arrival order. Intake
+// returns quickly; the agent runs in the background so /stop and /status stay
+// responsive. A run answers on the channel of the message that started it, and
+// every message in either direction is recorded as an event. One task runs
 // per user at a time. A task is one query() in streaming input mode: messages
 // that arrive while it runs are pushed into its live input (see input.ts) and
 // steer it, and every result is sent back as its own reply. The query stays
@@ -15,14 +18,15 @@ import path from "node:path";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { HookCallbackMatcher, Options, Query, SDKResultMessage } from "@anthropic-ai/claude-agent-sdk";
 
-import { reply } from "../bot.ts";
-import type { BotContext, MessageHandler } from "../bot.ts";
-import { humanAge, localDate, saveInboundMedia } from "../files.ts";
-import { parseMessage } from "../ilink/inbound.ts";
+import type { Channel } from "../api/schema.ts";
+import { SerialQueue, recordInbound, recorded } from "../channels.ts";
+import type { Inbound, Intake, Outbound } from "../channels.ts";
+import { type EventLog, sharedEventLog } from "../events.ts";
+import { humanAge, localDate } from "../files.ts";
 import { describeError, log } from "../log.ts";
 import { RunRecorder, findRun, markLostRuns, pruneRunFiles, runIdCandidates, stepDetail } from "../runs.ts";
 import type { RunRecord, RunStatus } from "../runs.ts";
-import { WORKSPACE_DIR, loadAccount } from "../store.ts";
+import { WORKSPACE_DIR } from "../store.ts";
 import {
   AGENT_CONFIG_DIR,
   AGENT_SETTINGS,
@@ -103,6 +107,10 @@ const HELP = `Alfred 调研助手
 /help  显示帮助`;
 
 interface Run {
+  /** The channel the run answers on: that of the message that started it. */
+  channel: Channel;
+  /** Everything the run says to the owner goes through this: recorded, with the run's id. */
+  out: Outbound;
   abort: AbortController;
   /** Live input of the task's query: the prompt and follow-ups sent while it runs. */
   input: TaskInput;
@@ -128,8 +136,8 @@ interface UserRuntime {
   /** True from the start of a task until the queue is drained. */
   busy: boolean;
   run?: Run;
-  /** Prompts received after the running task stopped taking follow-ups; they start the next task. */
-  queue: string[];
+  /** Messages received after the running task stopped taking follow-ups; together they start the next task. */
+  queue: { prompt: string; channel: Channel }[];
   /** Files received since the last text message, relative to the workspace. */
   attachments: string[];
 }
@@ -138,6 +146,34 @@ type ExecOutcome =
   | { kind: "done" }
   | { kind: "stopped" }
   | { kind: "resume-failed"; detail: string };
+
+/** What starts a task. */
+interface Start {
+  prompt: string;
+  /** Where the task answers: the channel of the message that started it, of the first one for a batch of queued messages. */
+  channel: Channel;
+  /** Records the message that started the task, once the task has its run id (undefined when none starts). */
+  recordInbound?: (runId: string | undefined) => void;
+}
+
+export interface AgentHandlerOptions {
+  /** The owner's id: their state is keyed by it, and a message from any channel is theirs. */
+  owner: string;
+  /** Where each channel's output goes. */
+  channels: Record<Channel, Outbound>;
+  /** The log message and run events go to; the shared event log by default. */
+  events?: EventLog;
+  /** Starts the agent; the SDK's query() by default. Tests pass a fake. */
+  runQuery?: typeof query;
+  /** How often a long turn on WeChat gets a progress note. */
+  progressMs?: number;
+}
+
+/** What the handler offers: the intake queue and the stop for the channels, and a shutdown for the process. */
+export interface AgentHandler extends Intake {
+  /** Stop the work the handler started, before the process exits. */
+  shutdown(): Promise<void>;
+}
 
 function usd(n: number): string {
   return `$${n.toFixed(n < 1 ? 3 : 2)}`;
@@ -279,17 +315,17 @@ export function prepareWorkspace(): void {
 }
 
 /** Reply listing the ALFRED.md files and skills a run created, changed or removed, so such changes never go unnoticed. */
-async function notifyRuleChanges(ctx: BotContext, userId: string, before: Map<string, string>): Promise<void> {
+async function notifyRuleChanges(out: Outbound, before: Map<string, string>): Promise<void> {
   const notice = rulesChangeNotice(before, snapshotRules(WORKSPACE_DIR));
   if (!notice) return;
   log.info(`workspace rules or skills changed: ${notice.replace(/\n/g, "; ")}`);
-  await reply(ctx, userId, notice).catch((err) => log.warn(`rules notice failed: ${describeError(err)}`));
+  await out.text(notice).catch((err) => log.warn(`rules notice failed: ${describeError(err)}`));
 }
 
 /** SDK options for one run; shared with scripts/agent-smoke.ts so local tests match production. */
 export function agentOptions(params: {
-  ctx: BotContext;
-  userId: string;
+  /** Where the agent's own tools deliver files: the channel the run answers on. */
+  out: Outbound;
   model: ModelKey;
   resume?: string;
   abortController?: AbortController;
@@ -328,7 +364,7 @@ export function agentOptions(params: {
     skills: "all",
     agents: subagents ? subagentDefinitions() : undefined,
     permissionMode: "dontAsk",
-    mcpServers: { alfred: createAlfredTools(params.ctx, params.userId, params.abortController?.signal, params.run) },
+    mcpServers: { alfred: createAlfredTools(params.out, params.abortController?.signal, params.run) },
     hooks: {
       PreToolUse: [workspaceGuard(WORKSPACE_DIR), subagentGuard(WORKSPACE_DIR, params.admission)],
       PostToolUse: postToolUse,
@@ -410,7 +446,11 @@ function runFilesHook(run: RunRecorder, subagentRun?: (agentId: string) => RunRe
   };
 }
 
-export function createAgentHandler(): MessageHandler {
+export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
+  const { owner, channels } = opts;
+  const events = opts.events ?? sharedEventLog();
+  const runQuery = opts.runQuery ?? query;
+  const progressMs = opts.progressMs ?? PROGRESS_INTERVAL_MS;
   agentEnv(); // Fail at startup, not on the first message, if the API key is missing.
   checkSessionIdleHours();
   checkMemoryScanSettings();
@@ -423,8 +463,7 @@ export function createAgentHandler(): MessageHandler {
   // them as lost, and the owner's next message gets a note naming them.
   const lost = markLostRuns();
   for (const r of lost) log.warn(`run ${r.id} was lost: it was live when Alfred last stopped`);
-  const owner = loadAccount()?.ownerUserId;
-  if (owner && lost.length) {
+  if (lost.length) {
     const named = lost.filter((r) => r.kind !== "scan").map((r) => ({ id: r.id, title: r.title }));
     if (named.length) store.update(owner, { lostRuns: [...(store.get(owner).lostRuns ?? []), ...named] });
   }
@@ -438,6 +477,11 @@ export function createAgentHandler(): MessageHandler {
   const runtimes = new Map<string, UserRuntime>();
   /** Tasks in progress, so a shutdown can wait for them to write their records. */
   const inFlight = new Set<Promise<void>>();
+  /** The owner's messages, from every channel, in the order they arrived. */
+  const intakeQueue = new SerialQueue();
+
+  /** What is said on a channel is recorded as events, with the run it belongs to if any. */
+  const outbound = (channel: Channel, runId?: string): Outbound => recorded(channels[channel], events, { workspace: WORKSPACE_DIR, runId });
 
   const spentToday = (user: AgentUserState): number => (user.spendDay === localDate() ? (user.spendDayUsd ?? 0) : 0);
   const overBudget = (userId: string): boolean => spentToday(store.get(userId)) >= DAILY_BUDGET_USD;
@@ -469,7 +513,6 @@ export function createAgentHandler(): MessageHandler {
 
   /** Runs the task's query until every message in its input is answered; each result goes to onResult. */
   async function execute(
-    ctx: BotContext,
     userId: string,
     run: Run,
     resume: string | undefined,
@@ -478,11 +521,10 @@ export function createAgentHandler(): MessageHandler {
     const user = store.get(userId);
     let sessionId: string | undefined;
     let results = 0;
-    const q = query({
+    const q = runQuery({
       prompt: run.input,
       options: agentOptions({
-        ctx,
-        userId,
+        out: run.out,
         model: user.model,
         resume,
         abortController: run.abort,
@@ -498,7 +540,7 @@ export function createAgentHandler(): MessageHandler {
         if (run.stopped) break;
         run.subagents.observe(m);
         if (m.type === "system" && m.subtype === "init") {
-          await startTurn(ctx, userId, run);
+          await startTurn(run);
           // Every turn of a streaming query starts with an init message, so compare with the stored session.
           sessionId = m.session_id;
           if (run.recorder.record.sessionId !== sessionId) run.recorder.update({ sessionId });
@@ -567,9 +609,9 @@ export function createAgentHandler(): MessageHandler {
   }
 
   /** The main agent starts working on a turn: the typing indicator shows until the turn's result. */
-  async function startTurn(ctx: BotContext, userId: string, run: Run): Promise<void> {
+  async function startTurn(run: Run): Promise<void> {
     run.turnStartedAt ??= Date.now();
-    run.stopTyping ??= await ctx.typing.start(userId);
+    run.stopTyping ??= await run.out.typing();
   }
 
   async function endTurn(run: Run): Promise<void> {
@@ -579,15 +621,20 @@ export function createAgentHandler(): MessageHandler {
     await stop?.();
   }
 
-  async function runAgent(ctx: BotContext, userId: string, prompt: string): Promise<void> {
+  async function runAgent(userId: string, start: Start): Promise<void> {
+    const { prompt } = start;
     const rt = runtime(userId);
     if (overBudget(userId)) {
       const spent = spentToday(store.get(userId));
       log.warn(`daily spend cap reached (${usd(spent)} of ${usd(DAILY_BUDGET_USD)}); not starting a task`);
-      await reply(ctx, userId, `今天的花费已到每日上限 ${usd(DAILY_BUDGET_USD)}（已花 ${usd(spent)}），新任务明天再开始。`).catch(() => {});
+      start.recordInbound?.(undefined);
+      await outbound(start.channel)
+        .text(`今天的花费已到每日上限 ${usd(DAILY_BUDGET_USD)}（已花 ${usd(spent)}），新任务明天再开始。`)
+        .catch(() => {});
       return;
     }
-    const recorder = new RunRecorder({ kind: "task", title: runTitle(prompt), model: MODELS[store.get(userId).model] });
+    const recorder = new RunRecorder({ kind: "task", title: runTitle(prompt), model: MODELS[store.get(userId).model], events });
+    start.recordInbound?.(recorder.id);
     const background: BackgroundRuns = new BackgroundRuns({
       parentRunId: recorder.id,
       max: MAX_BACKGROUND_RUNS,
@@ -603,6 +650,8 @@ export function createAgentHandler(): MessageHandler {
       },
     });
     const run: Run = {
+      channel: start.channel,
+      out: outbound(start.channel, recorder.id),
       abort: new AbortController(),
       // The run id rides with the first message, not the system prompt, which then stays cacheable across runs.
       input: new TaskInput(WORKBENCH_ON ? `${runIdNote(recorder.id)}\n\n${prompt}` : prompt, { keepOpen: () => !background.idle }),
@@ -618,15 +667,19 @@ export function createAgentHandler(): MessageHandler {
     let failure: string | undefined;
     rt.run = run;
     const rulesBefore = snapshotRules(WORKSPACE_DIR);
-    await startTurn(ctx, userId, run);
+    await startTurn(run);
     // Notes cover the main agent's long turns only; background subagents show their progress on their cards.
-    const progress = setInterval(() => {
-      const now = Date.now();
-      if (!run.turnStartedAt || now - run.turnStartedAt < PROGRESS_INTERVAL_MS) return;
-      reply(ctx, userId, `仍在处理（${humanAge(now - run.turnStartedAt)}，运行 ${recorder.id}）：${runSummary(run, now)}`).catch((err) =>
-        log.warn(`progress note failed: ${describeError(err)}`),
-      );
-    }, PROGRESS_INTERVAL_MS);
+    // They exist on WeChat alone: the app shows a run's progress on its card, and a note is never an event.
+    const progress =
+      run.channel === "wechat"
+        ? setInterval(() => {
+            const now = Date.now();
+            if (!run.turnStartedAt || now - run.turnStartedAt < progressMs) return;
+            channels.wechat
+              .text(`仍在处理（${humanAge(now - run.turnStartedAt)}，运行 ${recorder.id}）：${runSummary(run, now)}`)
+              .catch((err) => log.warn(`progress note failed: ${describeError(err)}`));
+          }, progressMs)
+        : undefined;
 
     let locked = false;
     let replies = 0;
@@ -657,7 +710,7 @@ export function createAgentHandler(): MessageHandler {
       const footer = (notification ? "" : runFooter(recorder)) + backgroundFooter(dispatched, reports);
       // WeChat is best effort: one send, and a failure is recorded on the run's card, not retried.
       // A failed send must not end the query while later turns are still coming.
-      await reply(ctx, userId, resultReply(result) + footer).catch((err) => {
+      await run.out.text(resultReply(result) + footer).catch((err) => {
         const error = describeError(err);
         log.error(`reply failed run=${recorder.id}: ${error}`);
         recorder.undelivered({ kind: "reply", error });
@@ -678,16 +731,16 @@ export function createAgentHandler(): MessageHandler {
         const idle = humanAge(run.startedAt - Date.parse(before.lastRunAt ?? ""));
         before = store.update(userId, retire(before));
         retired(userId, idleSession, "idle", `idle ${idle} > ${SESSION_IDLE_HOURS}h`);
-        await reply(ctx, userId, `距上次对话已超过 ${SESSION_IDLE_HOURS} 小时，已开始新会话（发 /resume 接回上一个会话）。`);
+        await run.out.text(`距上次对话已超过 ${SESSION_IDLE_HOURS} 小时，已开始新会话（发 /resume 接回上一个会话）。`);
       }
       log.info(`agent run start run=${recorder.id} model=${before.model} resume=${before.sessionId ?? "none"}`);
-      let outcome: ExecOutcome = await execute(ctx, userId, run, before.sessionId, onResult);
+      let outcome: ExecOutcome = await execute(userId, run, before.sessionId, onResult);
       if (outcome.kind === "resume-failed") {
         log.warn(`resume of ${before.sessionId} failed (${outcome.detail}); starting a new session`);
         store.update(userId, NO_SESSION);
         if (before.sessionId) retired(userId, before.sessionId, "resume-failed", outcome.detail);
-        await reply(ctx, userId, "之前的会话无法恢复，已开始新会话。");
-        outcome = await execute(ctx, userId, run, undefined, onResult);
+        await run.out.text("之前的会话无法恢复，已开始新会话。");
+        outcome = await execute(userId, run, undefined, onResult);
       }
       if (outcome.kind === "stopped") {
         log.info(`agent run ${recorder.id} stopped by user`);
@@ -707,7 +760,7 @@ export function createAgentHandler(): MessageHandler {
       log.error(`agent run ${recorder.id} failed: ${failure}`);
       const missed = run.input.followUps;
       const note = missed ? `\n期间追加的 ${missed} 条消息没有处理，需要的话请重发。` : "";
-      await reply(ctx, userId, `执行出错：${describeError(err)}${note}`).catch(() => {});
+      await run.out.text(`执行出错：${describeError(err)}${note}`).catch(() => {});
     } finally {
       run.input.close();
       clearInterval(progress);
@@ -750,23 +803,24 @@ export function createAgentHandler(): MessageHandler {
         log.error(`saving the run's notices failed: ${describeError(err)}`);
       }
       // Also after a stop or an error: the run may have changed rules before it ended.
-      if (!run.shutdown) await notifyRuleChanges(ctx, userId, rulesBefore);
+      if (!run.shutdown) await notifyRuleChanges(run.out, rulesBefore);
       await endTurn(run);
       rt.run = undefined;
     }
   }
 
-  async function drain(ctx: BotContext, userId: string, first: string): Promise<void> {
+  async function drain(userId: string, first: Start): Promise<void> {
     const rt = runtime(userId);
     rt.busy = true;
     try {
-      let prompt: string | undefined = first;
-      while (prompt) {
-        const task = runAgent(ctx, userId, prompt);
+      let start: Start | undefined = first;
+      while (start) {
+        const task = runAgent(userId, start);
         inFlight.add(task);
         await task.finally(() => inFlight.delete(task));
         const queued = rt.queue.splice(0);
-        prompt = queued.length ? queued.join("\n\n---\n\n") : undefined;
+        // The batch answers where its first message came from.
+        start = queued[0] && { prompt: queued.map((q) => q.prompt).join("\n\n---\n\n"), channel: queued[0].channel };
       }
     } finally {
       rt.busy = false;
@@ -774,88 +828,104 @@ export function createAgentHandler(): MessageHandler {
     }
   }
 
-  async function handleCommand(ctx: BotContext, userId: string, cmd: string, arg: string): Promise<void> {
+  /**
+   * Stops a run of the owner's: the live task (and with it its subagents and the messages queued behind it),
+   * one of its background subagents, or one waiting for a slot. The reply goes to `channel`.
+   * False when no such run is live, and then nothing is sent.
+   */
+  async function stopRun(runId: string, channel: Channel): Promise<boolean> {
+    const rt = runtime(owner);
+    const run = rt.run;
+    if (!run) return false;
+    const out = outbound(channel);
+    if (runId !== run.recorder.id) {
+      // The agent learns it was the user, so it neither restarts the run nor wonders who stopped it.
+      const title = [...run.background.running.map((b) => b.recorder), ...run.background.queued.map((b) => b.recorder)].find(
+        (r) => r.id === runId,
+      )?.record.title;
+      const tell = (what: string) =>
+        run.input.pushSystem(
+          `[Alfred] The user ${what} run ${runId}${title ? ` ("${title}")` : ""} with /stop. Do not start it again unless they ask; acknowledge in one line at most.`,
+        );
+      const agentId = run.background.agentIdOf(runId);
+      if (agentId && run.query) {
+        tell("stopped background");
+        await run.query.stopTask(agentId);
+        await out.text(`已停止后台运行 ${runId}。`);
+        return true;
+      }
+      if (run.background.dropQueued(runId)) {
+        tell("took queued");
+        await out.text(`已取消排队的运行 ${runId}。`);
+        return true;
+      }
+      return false;
+    }
+    const dropped = rt.queue.splice(0).length + run.input.followUps;
+    const subagents = run.background.running.length + run.background.queued.length;
+    run.input.close();
+    run.stopped = true;
+    run.abort.abort();
+    const also = [subagents ? `${subagents} 个后台子任务` : "", dropped ? `排队的 ${dropped} 条消息` : ""].filter(Boolean);
+    await out.text(also.length ? `已停止当前任务，以及${also.join("和")}。` : "已停止当前任务。");
+    return true;
+  }
+
+  async function handleCommand(userId: string, channel: Channel, cmd: string, arg: string): Promise<void> {
     const rt = runtime(userId);
     const user = store.get(userId);
+    const out = outbound(channel);
     switch (cmd) {
       case "/help":
-        return reply(ctx, userId, HELP);
+        return out.text(HELP);
 
       case "/new":
-        if (rt.busy) return reply(ctx, userId, "当前任务还在进行，先发 /stop 或等它完成。");
-        if (!user.sessionId) return reply(ctx, userId, "已经是新会话。");
+        if (rt.busy) return out.text("当前任务还在进行，先发 /stop 或等它完成。");
+        if (!user.sessionId) return out.text("已经是新会话。");
         store.update(userId, retire(user));
         retired(userId, user.sessionId, "new", "/new");
-        return reply(ctx, userId, "已开始新会话。发 /resume 可以接回上一个会话。");
+        return out.text("已开始新会话。发 /resume 可以接回上一个会话。");
 
       case "/resume": {
-        if (rt.busy) return reply(ctx, userId, "当前任务还在进行，先发 /stop 或等它完成。");
+        if (rt.busy) return out.text("当前任务还在进行，先发 /stop 或等它完成。");
         const patch = resumePrevious(user, Date.now());
-        if (!patch?.sessionId) return reply(ctx, userId, "没有可以接回的会话。");
+        if (!patch?.sessionId) return out.text("没有可以接回的会话。");
         store.update(userId, patch);
         if (user.sessionId) retired(userId, user.sessionId, "resume", `/resume to ${patch.sessionId}`);
         else log.info(`session ${patch.sessionId} resumed`);
-        return reply(
-          ctx,
-          userId,
+        return out.text(
           `已切回上一个会话 ${patch.sessionId.slice(0, 8)}，下一个任务接着它继续。${user.sessionId ? "再发 /resume 可以换回来。" : ""}`,
         );
       }
 
       case "/stop": {
-        if (!rt.run) return reply(ctx, userId, "当前没有进行中的任务。");
+        if (!rt.run) return out.text("当前没有进行中的任务。");
         const target = arg.trim().toLowerCase();
-        if (target && target !== rt.run.recorder.id) {
-          // The agent learns it was the user, so it neither restarts the run nor wonders who stopped it.
-          const title = [...rt.run.background.running.map((b) => b.recorder), ...rt.run.background.queued.map((b) => b.recorder)].find(
-            (r) => r.id === target,
-          )?.record.title;
-          const tell = (what: string) =>
-            rt.run?.input.pushSystem(
-              `[Alfred] The user ${what} run ${target}${title ? ` ("${title}")` : ""} with /stop. Do not start it again unless they ask; acknowledge in one line at most.`,
-            );
-          const agentId = rt.run.background.agentIdOf(target);
-          if (agentId && rt.run.query) {
-            tell("stopped background");
-            await rt.run.query.stopTask(agentId);
-            return reply(ctx, userId, `已停止后台运行 ${target}。`);
-          }
-          if (rt.run.background.dropQueued(target)) {
-            tell("took queued");
-            return reply(ctx, userId, `已取消排队的运行 ${target}。`);
-          }
-          return reply(ctx, userId, `没有进行中或排队的运行 ${target}。发 /status 查看。`);
-        }
-        const dropped = rt.queue.splice(0).length + rt.run.input.followUps;
-        const subagents = rt.run.background.running.length + rt.run.background.queued.length;
-        rt.run.input.close();
-        rt.run.stopped = true;
-        rt.run.abort.abort();
-        const also = [subagents ? `${subagents} 个后台子任务` : "", dropped ? `排队的 ${dropped} 条消息` : ""].filter(Boolean);
-        return reply(ctx, userId, also.length ? `已停止当前任务，以及${also.join("和")}。` : "已停止当前任务。");
+        if (await stopRun(target || rt.run.recorder.id, channel)) return;
+        return out.text(`没有进行中或排队的运行 ${target}。发 /status 查看。`);
       }
 
       case "/model": {
-        if (!arg) return reply(ctx, userId, `当前模型：${user.model}（${MODELS[user.model]}）\n可选：sonnet、opus、haiku`);
+        if (!arg) return out.text(`当前模型：${user.model}（${MODELS[user.model]}）\n可选：sonnet、opus、haiku`);
         const key = arg.toLowerCase();
-        if (!isModelKey(key)) return reply(ctx, userId, "可选模型：sonnet、opus、haiku");
+        if (!isModelKey(key)) return out.text("可选模型：sonnet、opus、haiku");
         store.update(userId, { model: key });
         if (rt.run?.query) {
           // An open query switches at once: the main agent's next turn runs on the new model; subagent roles keep theirs.
           await rt.run.query.setModel(MODELS[key]);
           rt.run.recorder.update({ model: MODELS[key] });
-          return reply(ctx, userId, `已切换到 ${key}（${MODELS[key]}），当前任务的下一轮起生效。`);
+          return out.text(`已切换到 ${key}（${MODELS[key]}），当前任务的下一轮起生效。`);
         }
-        return reply(ctx, userId, `已切换到 ${key}（${MODELS[key]}）。`);
+        return out.text(`已切换到 ${key}（${MODELS[key]}）。`);
       }
 
       case "/memory": {
         syncMemoryIndex(WORKSPACE_DIR);
         const memories = loadMemories(WORKSPACE_DIR);
-        if (!memories.length) return reply(ctx, userId, "还没有长期记忆。说“记住……”就会记下来。");
+        if (!memories.length) return out.text("还没有长期记忆。说“记住……”就会记下来。");
         const lines = memories.slice(0, MEMORY_REPLY_LINES).map((m) => `• ${m.name}${m.description ? `：${m.description}` : ""}`);
         if (memories.length > MEMORY_REPLY_LINES) lines.push(`……还有 ${memories.length - MEMORY_REPLY_LINES} 条，见 memory/MEMORY.md`);
-        return reply(ctx, userId, `长期记忆（${memories.length} 条）：\n${lines.join("\n")}\n\n要修改或忘记哪条，直接告诉我。`);
+        return out.text(`长期记忆（${memories.length} 条）：\n${lines.join("\n")}\n\n要修改或忘记哪条，直接告诉我。`);
       }
 
       case "/status": {
@@ -875,78 +945,82 @@ export function createAgentHandler(): MessageHandler {
         if (rt.queue.length) lines.push(`排队：${rt.queue.length} 条`);
         if (rt.attachments.length) lines.push(`待处理附件：${rt.attachments.join("、")}`);
         if (WORKBENCH_URL) lines.push(`工作台：${WORKBENCH_URL}`);
-        return reply(ctx, userId, lines.join("\n"));
+        return out.text(lines.join("\n"));
       }
 
       default:
-        return reply(ctx, userId, `不认识的命令 ${cmd}\n\n${HELP}`);
+        return out.text(`不认识的命令 ${cmd}\n\n${HELP}`);
     }
   }
 
-  const handler: MessageHandler = async (ctx, msg) => {
-    const userId = msg.from_user_id ?? "";
+  /**
+   * Takes one message of the owner's, from any channel. Each message is recorded once what it does is known:
+   * a command, a message to keep for later, a follow-up to the live task (with its run id), a message queued
+   * behind the task, or the one that starts a task (with the new run id).
+   */
+  async function intake(inbound: Inbound): Promise<void> {
+    const userId = owner;
+    const { channel } = inbound;
     const rt = runtime(userId);
-    const { text, media, quotedText } = parseMessage(msg);
-    const trimmed = text.trim();
+    const out = outbound(channel);
+    const trimmed = inbound.text.trim();
+    const record = (runId?: string) => recordInbound(events, inbound, runId);
 
     // The user just wrote, so WeChat delivers again: say once what did not arrive or was cut short meanwhile.
     const { undeliveredRuns, lostRuns } = store.get(userId);
     const notes = [lostRuns?.length ? lostNote(lostRuns) : "", undeliveredRuns?.length ? undeliveredNote(undeliveredRuns) : ""].filter(Boolean);
     if (notes.length) {
       try {
-        await reply(ctx, userId, notes.join("\n"));
+        await out.text(notes.join("\n"));
         store.update(userId, { undeliveredRuns: undefined, lostRuns: undefined });
       } catch (err) {
         log.warn(`undelivered note failed: ${describeError(err)}`);
       }
     }
 
-    if (trimmed.startsWith("/") && media.length === 0) {
+    const hasMedia = inbound.files.length > 0 || inbound.voice || Boolean(inbound.failed?.length);
+    if (trimmed.startsWith("/") && !hasMedia) {
+      record();
       const [cmd = "", ...rest] = trimmed.split(/\s+/);
-      await handleCommand(ctx, userId, cmd.toLowerCase(), rest.join(" "));
+      await handleCommand(userId, channel, cmd.toLowerCase(), rest.join(" "));
       return;
     }
 
     // Voice notes reach the agent through their transcript; other media is saved for the next prompt.
-    const voice = media.some((m) => m.kind === "voice");
-    const saved: string[] = [];
-    for (const m of media) {
-      if (m.kind === "voice") continue;
-      try {
-        const file = await saveInboundMedia(m, ctx.cdnBaseUrl);
-        rt.attachments.push(file.relPath);
-        saved.push(file.relPath);
-      } catch (err) {
-        log.error(`saving ${m.kind} failed: ${describeError(err)}`);
-        await reply(ctx, userId, `${m.kind} 保存失败：${describeError(err)}`);
-      }
-    }
+    const saved = inbound.files.map((f) => f.path);
+    rt.attachments.push(...saved);
+    for (const failure of inbound.failed ?? []) await out.text(failure);
 
     if (!trimmed) {
-      if (voice) await reply(ctx, userId, "这条语音没有转写文字，请再说一遍或者打字。");
-      else if (saved.length) await reply(ctx, userId, `已保存 ${saved.join("、")}，告诉我要怎么处理。`);
+      record();
+      if (inbound.voice) await out.text("这条语音没有转写文字，请再说一遍或者打字。");
+      else if (saved.length) await out.text(`已保存 ${saved.join("、")}，告诉我要怎么处理。`);
       return;
     }
 
+    const { quotedText } = inbound;
     const runs = runIdCandidates(`${trimmed}\n${quotedText ?? ""}`).flatMap((id) => findRun(id) ?? []);
-    const prompt = buildPrompt(trimmed, { attachments: rt.attachments.splice(0), quotedText, voice, runs });
-    if (rt.run?.input.push(prompt)) {
-      await reply(ctx, userId, "收到，会在当前步骤结束后转给 Alfred。");
+    const prompt = buildPrompt(trimmed, { attachments: rt.attachments.splice(0), quotedText, voice: Boolean(inbound.voice), runs });
+    const live = rt.run;
+    if (live?.input.push(prompt)) {
+      record(live.recorder.id);
+      await out.text("收到，会在当前步骤结束后转给 Alfred。");
       return;
     }
     if (rt.busy) {
-      rt.queue.push(prompt);
-      await reply(ctx, userId, "收到，排在当前任务之后处理。发 /stop 可以停止当前任务。");
+      rt.queue.push({ prompt, channel });
+      record();
+      await out.text("收到，排在当前任务之后处理。发 /stop 可以停止当前任务。");
       return;
     }
-    void drain(ctx, userId, prompt);
-  };
+    void drain(userId, { prompt, channel, recordInbound: record });
+  }
 
   /**
    * Stop every task before the process exits: their queries end, their runs and
    * subagents are recorded as lost, and the owner's next message names them.
    */
-  handler.shutdown = async () => {
+  async function shutdown(): Promise<void> {
     for (const rt of runtimes.values()) {
       if (!rt.run) continue;
       log.info(`stopping run ${rt.run.recorder.id} for shutdown`);
@@ -958,6 +1032,11 @@ export function createAgentHandler(): MessageHandler {
     scheduler.stop();
     const timeout = new Promise<void>((resolve) => setTimeout(resolve, SHUTDOWN_STOP_MS).unref());
     await Promise.race([Promise.allSettled([...inFlight]), timeout]);
+  }
+
+  return {
+    submit: (source) => intakeQueue.run(async () => intake(typeof source === "function" ? await source() : source)),
+    stopRun,
+    shutdown,
   };
-  return handler;
 }

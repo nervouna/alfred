@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
 
-import type { BotContext } from "../bot.ts";
+import { appOutbound } from "../channels.ts";
 
 // store.ts reads these at import time, so set them before loading the modules under test.
 const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "alfred-options-")));
@@ -18,9 +18,8 @@ const { extractionOptions } = await import("./memory-scan.ts");
 
 test("tasks and memory scans turn off Claude Code's own auto memory, bundled skills and every hook or shell command a skill declares", () => {
   prepareWorkspace();
-  const ctx = {} as BotContext;
   const runs = {
-    task: agentOptions({ ctx, userId: "owner", model: "sonnet" }),
+    task: agentOptions({ out: appOutbound(), model: "sonnet" }),
     scan: extractionOptions(0.1, new AbortController()),
   };
   for (const [kind, options] of Object.entries(runs)) {
@@ -42,7 +41,7 @@ test("tasks and memory scans turn off Claude Code's own auto memory, bundled ski
 test("tasks offer the subagent roles with their default models, and no role can send files or start subagents", async () => {
   const { MODELS, SUBAGENT_ROLES, SUBAGENT_RULES } = await import("./config.ts");
   prepareWorkspace();
-  const options = agentOptions({ ctx: {} as BotContext, userId: "owner", model: "sonnet" });
+  const options = agentOptions({ out: appOutbound(), model: "sonnet" });
   assert.ok(options.tools && Array.isArray(options.tools) && options.tools.includes("Agent"));
   assert.ok(options.allowedTools?.includes("Agent"));
   const agents = options.agents ?? {};
@@ -65,7 +64,7 @@ test("tasks offer the subagent roles with their default models, and no role can 
 
 test("tasks without subagents drop the Agent tool, the roles and the delegation rules", () => {
   prepareWorkspace();
-  const options = agentOptions({ ctx: {} as BotContext, userId: "owner", model: "sonnet", subagents: false });
+  const options = agentOptions({ out: appOutbound(), model: "sonnet", subagents: false });
   assert.ok(Array.isArray(options.tools) && !options.tools.includes("Agent"));
   assert.ok(!options.allowedTools?.includes("Agent"));
   assert.equal(options.agents, undefined);
@@ -76,7 +75,7 @@ test("tasks load the baked and workspace skill plugins and offer every skill the
   const { BAKED_PLUGIN_DIR, WORKSPACE_PLUGIN_DIR } = await import("./skills.ts");
   for (const subagents of [true, false]) {
     prepareWorkspace();
-    const options = agentOptions({ ctx: {} as BotContext, userId: "owner", model: "sonnet", subagents });
+    const options = agentOptions({ out: appOutbound(), model: "sonnet", subagents });
     assert.deepEqual(options.plugins, [
       { type: "local", path: BAKED_PLUGIN_DIR },
       { type: "local", path: WORKSPACE_PLUGIN_DIR, skipMcpDiscovery: true },
@@ -90,14 +89,14 @@ test("tasks load the baked and workspace skill plugins and offer every skill the
 
 test("the writer starts with the html-report skill", () => {
   prepareWorkspace();
-  const options = agentOptions({ ctx: {} as BotContext, userId: "owner", model: "sonnet" });
+  const options = agentOptions({ out: appOutbound(), model: "sonnet" });
   assert.deepEqual(options.agents?.writer?.skills, ["alfred:html-report"]);
   assert.equal(options.agents?.researcher?.skills, undefined);
 });
 
 test("the system prompt does not depend on which skills exist", () => {
   prepareWorkspace();
-  const prompt = () => String(agentOptions({ ctx: {} as BotContext, userId: "owner", model: "sonnet" }).systemPrompt).replace(/^Today is .*$/m, "");
+  const prompt = () => String(agentOptions({ out: appOutbound(), model: "sonnet" }).systemPrompt).replace(/^Today is .*$/m, "");
   const before = prompt();
   const skill = path.join(tmp, "workspace", "skills", "weekly-brief");
   fs.mkdirSync(skill, { recursive: true });

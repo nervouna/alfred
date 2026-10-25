@@ -7,7 +7,10 @@ import { resolveInside } from "./agent/guard.ts";
 import { createAgentHandler } from "./agent/handler.ts";
 import { MEMORY_LOCK_FILE, describeScan, scanTranscripts } from "./agent/memory-scan.ts";
 import { MemoryLock } from "./agent/memory.ts";
-import { runBot } from "./bot.ts";
+import { createBotContext, runBot } from "./bot.ts";
+import type { BotContext, MessageHandler } from "./bot.ts";
+import { SerialQueue, appOutbound } from "./channels.ts";
+import { WeChatChannel, wechatHandler } from "./channels/wechat.ts";
 import { echoHandler } from "./echo.ts";
 import { DEFAULT_CDN_BASE_URL, IlinkClient } from "./ilink/client.ts";
 import { login } from "./ilink/login.ts";
@@ -48,7 +51,8 @@ async function cmdLogin(): Promise<void> {
 
 async function cmdRun(args: string[]): Promise<void> {
   logToFile(LOG_FILE);
-  const handler = args.includes("--echo") ? echoHandler : createAgentHandler();
+  const ctx = createBotContext();
+  const handler = args.includes("--echo") ? inOrder(echoHandler) : agentHandler(ctx);
   const controller = new AbortController();
   const stop = (sig: string) => {
     if (controller.signal.aborted) process.exit(1);
@@ -57,7 +61,21 @@ async function cmdRun(args: string[]): Promise<void> {
   };
   process.on("SIGINT", () => stop("SIGINT"));
   process.on("SIGTERM", () => stop("SIGTERM"));
-  await runBot(handler, controller.signal);
+  await runBot(ctx, handler, controller.signal);
+}
+
+/** The assistant: the agent handler, with WeChat and the app as its channels. */
+function agentHandler(ctx: BotContext): MessageHandler {
+  const wechat = new WeChatChannel(ctx);
+  const owner = ctx.account.ownerUserId;
+  const agent = createAgentHandler({ owner, channels: { wechat: wechat.outbound(owner), app: appOutbound() } });
+  return wechatHandler(wechat, agent);
+}
+
+/** The PoC echo handler takes messages one at a time, as the bot used to hand them over. */
+function inOrder(handler: MessageHandler): MessageHandler {
+  const queue = new SerialQueue();
+  return (ctx, msg) => queue.run(() => handler(ctx, msg));
 }
 
 async function cmdPush(args: string[]): Promise<void> {

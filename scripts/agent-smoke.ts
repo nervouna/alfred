@@ -22,7 +22,7 @@ import { TaskInput, answeredBy } from "../src/agent/input.ts";
 import { rulesChangeNotice, snapshotRules } from "../src/agent/rules.ts";
 import { SubagentTracker } from "../src/agent/subagents.ts";
 import { RunRecorder, stepDetail } from "../src/runs.ts";
-import type { BotContext } from "../src/bot.ts";
+import type { Outbound } from "../src/channels.ts";
 import { WORKSPACE_DIR } from "../src/store.ts";
 
 const USAGE =
@@ -56,8 +56,8 @@ for (let i = 0; i < args.length; i++) {
 const prompt = words.join(" ");
 if (!prompt) throw new Error(USAGE);
 
-const stub = new Proxy({}, { get: () => { throw new Error("WeChat is not available in the smoke test"); } });
-const ctx = stub as BotContext;
+const unavailable = () => Promise.reject(new Error("WeChat is not available in the smoke test"));
+const out: Outbound = { channel: "wechat", text: unavailable, file: unavailable, typing: unavailable };
 
 prepareWorkspace();
 const rulesBefore = snapshotRules(WORKSPACE_DIR);
@@ -81,7 +81,7 @@ const stopTimer = stopAfterMs !== undefined && setTimeout(() => {
 let results = 0;
 let firstRequest = true;
 let modelUsage: Record<string, { costUSD: number }> = {};
-const options = agentOptions({ ctx, userId: "smoke", model, resume, abortController: abort, subagents, run });
+const options = agentOptions({ out, model, resume, abortController: abort, subagents, run });
 const q = query({ prompt: input, options });
 try {
   for await (const m of q) {

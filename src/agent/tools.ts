@@ -6,11 +6,9 @@ import path from "node:path";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 
-import { reply } from "../bot.ts";
-import type { BotContext } from "../bot.ts";
+import type { Outbound } from "../channels.ts";
 import { humanSize } from "../files.ts";
 import { MEDIA_MAX_BYTES } from "../ilink/inbound.ts";
-import { sendMedia } from "../ilink/send.ts";
 import { describeError, log } from "../log.ts";
 import { PDF_SOURCE_EXTS, isRendererMissing, renderPdf } from "../pdf.ts";
 import type { RunRecorder } from "../runs.ts";
@@ -37,10 +35,11 @@ function relPath(real: string): string {
 }
 
 /**
- * Tools bound to one WeChat user for the duration of a run; `signal` aborts when
- * the run is stopped, and `run` records the files they write and failed sends.
+ * Tools bound to the channel a run answers on, for the duration of the run;
+ * `signal` aborts when the run is stopped, and `run` records the files they
+ * write and failed sends.
  */
-export function createAlfredTools(ctx: BotContext, userId: string, signal?: AbortSignal, run?: RunRecorder) {
+export function createAlfredTools(out: Outbound, signal?: AbortSignal, run?: RunRecorder) {
   const sendFile = tool(
     "send_file",
     "Send a file from the workspace to the user in WeChat. WeChat opens Markdown, PDF, images, video and Office files; it cannot open HTML.",
@@ -63,15 +62,7 @@ export function createAlfredTools(ctx: BotContext, userId: string, signal?: Abor
         return fail("WeChat cannot open HTML files. Send Markdown or PDF instead.");
       }
       try {
-        if (caption) await reply(ctx, userId, caption);
-        const kind = await sendMedia({
-          client: ctx.client,
-          cdnBaseUrl: ctx.cdnBaseUrl,
-          to: userId,
-          data: fs.readFileSync(real),
-          fileName: path.basename(real),
-          contextToken: ctx.tokens.get(userId)?.token,
-        });
+        const kind = await out.file(real, caption);
         log.info(`agent sent ${path.relative(WORKSPACE_DIR, real)} as ${kind}`);
         return ok(`Sent ${path.basename(real)} (${humanSize(stat.size)}) to the user as ${kind}.`);
       } catch (err) {
