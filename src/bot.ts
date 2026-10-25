@@ -28,6 +28,7 @@ export interface BotContext {
   startedAt: number;
 }
 
+/** Called for each message from the owner, in arrival order, without waiting for the one before it to finish. */
 export interface MessageHandler {
   (ctx: BotContext, msg: WeixinMessage): Promise<void>;
   /** Stop the work the handler started, before the process exits. */
@@ -45,7 +46,7 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 /**
- * Waits up to `ms` for the per-user queues to finish. The timer is cleared as
+ * Waits up to `ms` for the handlers still running to finish. The timer is cleared as
  * soon as they do: a pending timer keeps Node alive, and a container stop that
  * waits on it gets the process killed instead.
  */
@@ -105,20 +106,21 @@ export class Typing {
   }
 }
 
-/** Long-poll loop. Messages from the owner are handled sequentially per user. */
-export async function runBot(handler: MessageHandler, signal: AbortSignal): Promise<void> {
+/** The connection to WeChat for the bound account: the iLink client, the context tokens and the typing indicator. */
+export function createBotContext(): BotContext {
   const account = requireAccount();
   const client = new IlinkClient({ baseUrl: account.baseUrl, token: account.botToken });
   const tokens = new ContextTokenStore();
-  const ctx: BotContext = {
-    client,
-    account,
-    cdnBaseUrl: DEFAULT_CDN_BASE_URL,
-    tokens,
-    typing: new Typing(client, tokens),
-    startedAt: Date.now(),
-  };
-  const queues = new Map<string, Promise<void>>();
+  return { client, account, cdnBaseUrl: DEFAULT_CDN_BASE_URL, tokens, typing: new Typing(client, tokens), startedAt: Date.now() };
+}
+
+/**
+ * Long-poll loop. Each message from the owner goes to the handler as it arrives;
+ * a handler that must take them one at a time queues them itself.
+ */
+export async function runBot(ctx: BotContext, handler: MessageHandler, signal: AbortSignal): Promise<void> {
+  const { client, account, tokens } = ctx;
+  const running = new Set<Promise<void>>();
 
   const beat: Heartbeat = { pid: process.pid, startedAt: new Date(ctx.startedAt).toISOString(), updatedAt: "", memory: memoryUsage() };
   const heartbeat = (patch: Partial<Heartbeat> = {}) => {
@@ -147,10 +149,10 @@ export async function runBot(handler: MessageHandler, signal: AbortSignal): Prom
     }
     log.info(`inbound message types=${types} id=${msg.message_id ?? "?"}`);
     if (msg.context_token) tokens.set(from, msg.context_token);
-    const next = (queues.get(from) ?? Promise.resolve())
-      .then(() => handler(ctx, msg))
-      .catch((err) => log.error(`handler failed: ${describeError(err)}`));
-    queues.set(from, next);
+    const done: Promise<void> = handler(ctx, msg)
+      .catch((err) => log.error(`handler failed: ${describeError(err)}`))
+      .finally(() => running.delete(done));
+    running.add(done);
   };
 
   try {
@@ -197,7 +199,7 @@ export async function runBot(handler: MessageHandler, signal: AbortSignal): Prom
 
   log.info("Shutting down...");
   clearInterval(heartbeatTimer);
-  await drain(queues.values(), SHUTDOWN_DRAIN_MS);
+  await drain(running, SHUTDOWN_DRAIN_MS);
   // Running tasks would keep their Claude Code processes alive until the container is killed.
   await handler.shutdown?.();
   heartbeat({ stoppedAt: new Date().toISOString() });

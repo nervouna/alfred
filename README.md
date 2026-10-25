@@ -175,6 +175,14 @@ One task runs at a time, and you can steer it while it runs ("别查 X 了，重
 - The typing indicator shows while the agent works on a turn, and a turn that runs longer than 3 minutes gets a progress note every 3 minutes (with the run id, see Workbench). While foreground subagents run, the note and `/status` list them with their role, brief title and age. Background subagents show their progress on their workbench cards instead.
 - Once every message has been answered and no background subagent is running or queued, the task ends. A message that arrives after that is queued and starts the next task, which resumes the same session.
 
+### Channels
+
+The handler serves the owner over named channels: `wechat` and `app`. The app channel has no client in this version (the command API comes next); the handler already treats it like WeChat, and its `submit` and `stopRun` (see `src/channels.ts`) are what that API calls.
+
+- One intake queue takes the owner's messages in arrival order, whatever their channel, with the same steer, queue and command rules as above: an app message during a run that WeChat started steers that run. App messages belong to the owner and share the session, state and timeline of WeChat ones.
+- A run answers on the channel of the message that started it: the final reply, files from `send_file` and background subagent reports (for messages queued behind a task, the channel of the first one queued). A command's reply and the notices a message triggers (acknowledgements, lost or undelivered runs, the daily cap, changed rules) go to that message's channel. Progress notes and the typing indicator exist on WeChat only.
+- Every message in either direction is recorded in the event log as `message.created`, except progress notes: channel, direction, text, files, the run it started, steered or came from, and for an app message its client id. A WeChat send that fails is recorded with its `error`. On the app channel the event is the delivery, so a reply shows in the app whichever channel it went out on. The timeline starts when this version first runs; older WeChat history is not backfilled.
+
 ### Sessions and context
 
 - Each user has one active Claude Code session, and every task resumes it, so the agent remembers earlier tasks. The session id is stored in `agent-state.json`; the transcript lives in the isolated config dir.
@@ -314,8 +322,11 @@ Verified WeChat behavior (2026-10-10):
 
 ```
 src/ilink/          iLink protocol client: HTTP, QR login, CDN crypto, message shapes
-src/bot.ts          long-poll loop, owner filter, per-user intake queue, typing indicator
-src/agent/          Agent SDK handler, live task input, options, workspace guard, ALFRED.md rules, skill plugins, custom tools, image generation, session lifecycle, long-term memory, persisted state
+src/bot.ts          long-poll loop, owner filter, typing indicator
+src/channels.ts     the channel boundary (`Outbound`, `Inbound`), the app channel, and the recording of every message as an event
+src/channels/wechat.ts  the WeChat channel: iLink messages in (media saved), replies, files and typing out
+src/events.ts       the append-only event log clients read
+src/agent/          Agent SDK handler (intake queue, routing, stop), live task input, options, workspace guard, ALFRED.md rules, skill plugins, custom tools, image generation, session lifecycle, long-term memory, persisted state
 src/echo.ts         PoC handler and protocol test commands
 src/files.ts        inbound media storage and file helpers
 src/pdf.ts          Markdown/HTML to PDF rendering
@@ -339,11 +350,13 @@ npm run smoke -- --skills "prompt"             # also print the skills the sessi
 node scripts/handler-smoke.ts background       # the real message handler with a fake WeChat client: three parallel collectors
 node scripts/handler-smoke.ts restart          # a shutdown while a subagent runs, then the lost-runs note
 node scripts/handler-smoke.ts undelivered      # replies fail as after the push window closes, then the note
+node scripts/handler-smoke.ts stop             # two background collectors, then /stop <run id> for one of them
 node scripts/handler-smoke.ts nested           # a general-purpose subagent starts three background collectors
+node scripts/handler-smoke.ts channels         # WeChat starts a run, the app steers it and starts the next; a pass or fail line per routing rule
 node scripts/handler-smoke.ts prompt "text"    # one message through the real handler, then the spend per model
 ```
 
-The smoke script marks lines from inside a subagent with `[sub <id>]`, prints the SDK's `task_*` messages and the subagents still running after each tool result, and ends with the spend per model. `[first-request]` gives the first request's input tokens, to compare the prompt prefix across changes.
+The handler smoke script prints every WeChat send (`[wechat]`) and every message event (`[event]`: channel, direction, run id, the start of the text). The agent smoke script marks lines from inside a subagent with `[sub <id>]`, prints the SDK's `task_*` messages and the subagents still running after each tool result, and ends with the spend per model. `[first-request]` gives the first request's input tokens, to compare the prompt prefix across changes.
 
 - The smoke script uses the real workspace and agent config dir. Point `ALFRED_WORKSPACE` and `ALFRED_STATE_DIR` at scratch directories to keep test runs out of them. Like the bot, it seeds the workspace and the workspace skills plugin, and prints the change notice for `ALFRED.md` files and skills (`[notice]`); rule disclosures show up as `disclosed … after <tool>` log lines. `npm run memory-scan` also reads transcripts from `$ALFRED_STATE_DIR/claude/projects/` and writes into `$ALFRED_WORKSPACE/memory/`, so point it at scratch directories the same way.
 - Do not start a second `npm start` against the same state dir while the bot is running. Both processes would long-poll the same cursor and take messages from each other.
