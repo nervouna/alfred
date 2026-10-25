@@ -1,0 +1,15 @@
+{
+  "id": 10,
+  "at": "2026-10-25T08:41:00.000Z",
+  "type": "message.created",
+  "data": {
+    "id": "m1005",
+    "channel": "app",
+    "direction": "out",
+    "text": "好的。",
+    "files": [],
+    "at": "2026-10-25T08:41:00.000Z",
+    "runId": "k7m2qa",
+    "editedAt": "2026-10-25T08:41:30.000Z"
+  }
+}

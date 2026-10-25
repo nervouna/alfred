@@ -1,0 +1,16 @@
+{
+  "id": 4,
+  "at": "2026-10-25T08:31:30.000Z",
+  "type": "run.updated",
+  "data": {
+    "id": "h6w4tz",
+    "kind": "subagent",
+    "parentRunId": "k7m2qa",
+    "title": "核对供应商 A 的带宽",
+    "status": "running",
+    "model": "claude-sonnet-5-5",
+    "startedAt": "2026-10-25T08:31:30.000Z",
+    "costUsd": 0,
+    "files": []
+  }
+}

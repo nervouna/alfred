@@ -1,0 +1,21 @@
+{
+  "id": 5,
+  "at": "2026-10-25T08:34:41.902Z",
+  "type": "run.updated",
+  "data": {
+    "id": "k7m2qa",
+    "kind": "task",
+    "title": "调研 VPS 价格",
+    "status": "done",
+    "model": "claude-sonnet-5-5",
+    "startedAt": "2026-10-25T08:30:05.000Z",
+    "endedAt": "2026-10-25T08:34:41.902Z",
+    "costUsd": 0.2513,
+    "files": [
+      {
+        "path": "reports/vps.md",
+        "tool": "Write"
+      }
+    ]
+  }
+}

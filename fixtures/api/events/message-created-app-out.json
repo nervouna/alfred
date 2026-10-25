@@ -1,0 +1,18 @@
+{
+  "id": 6,
+  "at": "2026-10-25T08:34:42.010Z",
+  "type": "message.created",
+  "data": {
+    "id": "m1003",
+    "channel": "app",
+    "direction": "out",
+    "text": "报告写好了，见附件。",
+    "files": [
+      {
+        "path": "reports/vps.md"
+      }
+    ],
+    "at": "2026-10-25T08:34:42.010Z",
+    "runId": "k7m2qa"
+  }
+}

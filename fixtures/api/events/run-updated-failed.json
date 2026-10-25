@@ -1,0 +1,17 @@
+{
+  "id": 8,
+  "at": "2026-10-25T08:35:10.661Z",
+  "type": "run.updated",
+  "data": {
+    "id": "d8j3sx",
+    "kind": "task",
+    "title": "抓取定价页",
+    "status": "failed",
+    "model": "claude-sonnet-5-5",
+    "startedAt": "2026-10-25T08:34:53.000Z",
+    "endedAt": "2026-10-25T08:35:10.661Z",
+    "costUsd": 0.0117,
+    "files": [],
+    "error": "WebFetch: 403 Forbidden"
+  }
+}
