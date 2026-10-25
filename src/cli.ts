@@ -3,6 +3,8 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
+import qrcode from "qrcode-terminal";
+
 import { checkMemoryScanSettings } from "./agent/config.ts";
 import { resolveInside } from "./agent/guard.ts";
 import { createAgentHandler } from "./agent/handler.ts";
@@ -23,6 +25,8 @@ import { describeError, log, logToFile, mask } from "./log.ts";
 import { BROWSERS_PATH, renderPdf } from "./pdf.ts";
 import { LOG_FILE } from "./runs.ts";
 import { AccessVerifier } from "./workbench/access.ts";
+import { DeviceStore } from "./workbench/devices.ts";
+import { buildPairing, pairingSettings } from "./workbench/pairing.ts";
 import { startWorkbench } from "./workbench/server.ts";
 import { ContextTokenStore, STATE_DIR, WORKSPACE_DIR, loadAccount, loadCursor, requireAccount, saveAccount } from "./store.ts";
 
@@ -37,6 +41,10 @@ const USAGE = `usage: node src/cli.ts <command>
   pdf <source> [output]      render a Markdown or HTML file to PDF
   memory-scan                extract long-term memories from new transcript entries now
   workbench [--dev]          serve the read-only workbench (--dev: no Access check, loopback only)
+  pair [--name <name>] [--json]
+                             pair the app: create a device and show a QR code to scan (--json: print the pairing instead)
+  devices                    list the paired devices
+  devices revoke <id>        lock a device out
   api send <text…>           send a message to the running Alfred over its local API socket
   api stop <run id>          stop a run
   api events [--after N] [--follow]
@@ -199,7 +207,9 @@ async function cmdWorkbench(args: string[]): Promise<void> {
         "the TCP listener needs CF_ACCESS_TEAM_DOMAIN, CF_ACCESS_AUD and ALFRED_WORKBENCH_OWNER_EMAIL; set ALFRED_WORKBENCH_LISTEN=off to serve the socket only",
       );
     }
-    access = new AccessVerifier({ teamDomain, aud, ownerEmail });
+    // The app's service token; without its client id, a service token is refused.
+    const serviceClientId = process.env.CF_ACCESS_SERVICE_CLIENT_ID?.trim() || undefined;
+    access = new AccessVerifier({ teamDomain, aud, ownerEmail, serviceClientId });
   }
   if (listen && dev && !["127.0.0.1", "localhost", "::1"].includes(listen.host)) {
     throw new Error(`--dev serves without an Access check, so it listens on loopback only, not ${listen.host}`);
@@ -211,6 +221,53 @@ async function cmdWorkbench(args: string[]): Promise<void> {
   });
   log.info("workbench stopping");
   await close();
+}
+
+/** Creates a device and shows the pairing the app scans: server, Access service token and the new device's token. */
+function cmdPair(args: string[]): void {
+  const usage = "usage: pair [--name <name>] [--json]";
+  let name = "iPhone";
+  let json = false;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    const value = args[i + 1];
+    if (arg === "--json") json = true;
+    else if (arg === "--name" && value && !value.startsWith("--")) {
+      name = value;
+      i++;
+    } else throw new Error(usage);
+  }
+  // The settings come first, so a missing variable leaves no device behind.
+  const settings = pairingSettings();
+  const device = new DeviceStore().createDevice(name);
+  const pairing = JSON.stringify(buildPairing(settings, device));
+  if (json) {
+    console.log(pairing);
+    return;
+  }
+  qrcode.generate(pairing, { small: true });
+  console.log(`device ${device.id}  ${name.trim()}\nScan the code with the Alfred app. It holds the device and Access tokens, so keep it to yourself.`);
+}
+
+function cmdDevices(args: string[]): void {
+  const usage = "usage: devices | devices revoke <id>";
+  const store = new DeviceStore();
+  const [sub, id, ...extra] = args;
+  if (sub === "revoke") {
+    if (!id || extra.length) throw new Error(usage);
+    const device = store.revokeDevice(id);
+    console.log(`revoked ${device.id} (${device.name}) at ${device.revokedAt}; its token stops working on the next request`);
+    return;
+  }
+  if (sub) throw new Error(usage);
+  const devices = store.list();
+  if (!devices.length) {
+    console.log("no devices paired");
+    return;
+  }
+  const rows = [["ID", "NAME", "CREATED", "REVOKED"], ...devices.map((d) => [d.id, d.name, d.createdAt, d.revokedAt ?? "-"])];
+  const widths = rows[0]?.map((_, col) => Math.max(...rows.map((row) => (row[col] ?? "").length))) ?? [];
+  for (const row of rows) console.log(row.map((cell, col) => cell.padEnd(widths[col] ?? 0)).join("  ").trimEnd());
 }
 
 /** Prints an HTTP answer as `<status> <body>`; a status of 400 or more is a failure. */
@@ -316,6 +373,12 @@ try {
       break;
     case "workbench":
       await cmdWorkbench(args);
+      break;
+    case "pair":
+      cmdPair(args);
+      break;
+    case "devices":
+      cmdDevices(args);
       break;
     case "api":
       await cmdApi(args);
