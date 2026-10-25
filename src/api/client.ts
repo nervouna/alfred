@@ -21,11 +21,12 @@ function unreachable(socket: string, err: unknown): Error {
   return new Error(`cannot reach Alfred's API at ${socket}`, { cause: err });
 }
 
-/** One request to the API; resolves with the status and the body, whatever the status. */
+/** One request to the API; a body is sent as JSON, or as it is when it is a Buffer (an upload). Resolves with the status and the body, whatever the status. */
 export function request(socket: string, method: string, target: string, body?: unknown): Promise<ApiResponse> {
   return new Promise((resolve, reject) => {
-    const payload = body === undefined ? undefined : JSON.stringify(body);
-    const headers = payload === undefined ? {} : { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) };
+    const payload = body === undefined ? undefined : Buffer.isBuffer(body) ? body : JSON.stringify(body);
+    const contentType = Buffer.isBuffer(body) ? "application/octet-stream" : "application/json";
+    const headers = payload === undefined ? {} : { "Content-Type": contentType, "Content-Length": Buffer.byteLength(payload) };
     const req = http.request({ socketPath: socket, method, path: target, headers, agent: false }, (res) => {
       res.setEncoding("utf8");
       let text = "";

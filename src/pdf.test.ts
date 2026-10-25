@@ -155,6 +155,23 @@ test("renderPdf refuses a source outside the root", async () => {
   await assert.rejects(renderPdf(path.join(outside, "page.html"), path.join(tmp, "x.pdf"), { root }), /is outside/);
 });
 
+test("renderPdf rejects at once when its signal is already aborted, and stops a render that is still starting", async () => {
+  const source = path.join(root, "reports", "signal.md");
+  fs.writeFileSync(source, "# 信号\n");
+  const output = path.join(tmp, "signal.pdf");
+  const stopped = new AbortController();
+  stopped.abort();
+  await assert.rejects(renderPdf(source, output, { root, signal: stopped.signal }), /abort/i);
+  assert.equal(fs.existsSync(output), false);
+
+  // The abort lands while the browser is still starting: the render ends with it, and no PDF is written.
+  const midway = new AbortController();
+  const pending = renderPdf(source, output, { root, signal: midway.signal });
+  midway.abort();
+  await assert.rejects(pending, (err: unknown) => isRendererMissing(err) || /abort|closed/i.test(String(err)));
+  assert.equal(fs.existsSync(output), false);
+});
+
 test("renderPdf keeps out-of-root files, symlink escapes and frames out of an HTML report", async (t) => {
   const secret = pathToFileURL(path.join(outside, "secret.txt")).href;
   const source = path.join(root, "reports", "leak.html");

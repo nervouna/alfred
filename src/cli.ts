@@ -48,7 +48,10 @@ const USAGE = `usage: node src/cli.ts <command>
                              pair the app: create a device and show a QR code to scan (--json: print the pairing instead)
   devices                    list the paired devices
   devices revoke <id>        lock a device out
-  api send <text…>           send a message to the running Alfred over its local API socket
+  api send [--file <inbox path>]… <text…>
+                             send a message to the running Alfred over its local API socket; each --file attaches a file from the inbox
+  api upload <file> [--name <name>]
+                             copy a local file into the inbox over the API socket and print where it was saved
   api stop <run id>          stop a run
   api events [--after N] [--follow]
                              print the events after id N (default 0); --follow keeps streaming`;
@@ -300,15 +303,39 @@ function printAnswer(answer: { status: number; body: string }): void {
 }
 
 async function cmdApi(args: string[]): Promise<void> {
-  const usage = "usage: api send <text…> | api stop <run id> | api events [--after N] [--follow]";
+  const usage =
+    "usage: api send [--file <inbox path>]… <text…> | api upload <file> [--name <name>] | api stop <run id> | api events [--after N] [--follow]";
   const socket = apiSocketPath();
   if (!socket) throw new Error("the API is off (ALFRED_API_SOCKET=off)");
   const [sub, ...rest] = args;
   switch (sub) {
     case "send": {
-      const text = rest.join(" ");
-      if (!text.trim()) throw new Error(usage);
-      printAnswer(await request(socket, "POST", "/commands", { type: "message.send", clientId: `cli-${crypto.randomUUID()}`, text }));
+      const files: { path: string }[] = [];
+      const words: string[] = [];
+      for (let i = 0; i < rest.length; i++) {
+        const arg = rest[i];
+        if (arg !== "--file") words.push(arg ?? "");
+        else if (rest[i + 1] !== undefined) files.push({ path: rest[++i] ?? "" });
+        else throw new Error(usage);
+      }
+      const text = words.join(" ");
+      if (!text.trim() && files.length === 0) throw new Error(usage);
+      const command = { type: "message.send", clientId: `cli-${crypto.randomUUID()}`, text, ...(files.length ? { files } : {}) };
+      printAnswer(await request(socket, "POST", "/commands", command));
+      break;
+    }
+    case "upload": {
+      const positional: string[] = [];
+      let name: string | undefined;
+      for (let i = 0; i < rest.length; i++) {
+        if (rest[i] === "--name" && rest[i + 1] !== undefined) name = rest[++i];
+        else positional.push(rest[i] ?? "");
+      }
+      const [file, ...extra] = positional;
+      if (!file || extra.length) throw new Error(usage);
+      const data = fs.readFileSync(file);
+      const fileName = name ?? path.basename(file);
+      printAnswer(await request(socket, "POST", `/uploads?name=${encodeURIComponent(fileName)}`, data));
       break;
     }
     case "stop": {
