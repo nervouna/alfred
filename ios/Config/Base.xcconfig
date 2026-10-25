@@ -1,0 +1,7 @@
+// Shared build settings. The owner's signing settings go in Signing.xcconfig,
+// which git ignores; see ios/README.md.
+ALFRED_BUNDLE_ID = com.example.alfred
+DEVELOPMENT_TEAM =
+
+// Later assignments win, so the owner's copy overrides the defaults above.
+#include? "Signing.xcconfig"

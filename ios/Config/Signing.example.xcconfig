@@ -1,0 +1,5 @@
+// Copy this file to Signing.xcconfig (git ignores it) and fill in the owner's values.
+// The placeholders below are not real values.
+DEVELOPMENT_TEAM = XXXXXXXXXX
+ALFRED_BUNDLE_ID = com.example.alfred
+CODE_SIGN_STYLE = Automatic

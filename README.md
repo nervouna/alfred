@@ -399,6 +399,11 @@ src/workbench/      the read-only workbench: server, Access check, pages, safe M
 src/cli.ts          login | run | push | status | setup-pdf | pdf | memory-scan | workbench | api
 plugin/             the baked skills plugin `alfred`
 scripts/agent-smoke.ts  local agent run without WeChat
+ios/project.yml     XcodeGen spec for the iOS app and its Share Extension (the .xcodeproj is generated)
+ios/Alfred/         the iOS app: the placeholder tabs and the app entry point
+ios/AlfredShare/    the iOS Share Extension
+ios/Config/         build settings; the owner's Signing.xcconfig is git-ignored
+ios/AlfredKit/      Swift package: the client's model of the API, tested on the shared fixtures
 ```
 
 ## Development
@@ -425,6 +430,14 @@ The handler smoke script prints every WeChat send (`[wechat]`) and every message
 
 - The smoke script uses the real workspace and agent config dir. Point `ALFRED_WORKSPACE` and `ALFRED_STATE_DIR` at scratch directories to keep test runs out of them. Like the bot, it seeds the workspace and the workspace skills plugin, and prints the change notice for `ALFRED.md` files and skills (`[notice]`); rule disclosures show up as `disclosed … after <tool>` log lines. `npm run memory-scan` also reads transcripts from `$ALFRED_STATE_DIR/claude/projects/` and writes into `$ALFRED_WORKSPACE/memory/`, so point it at scratch directories the same way.
 - Do not start a second `npm start` against the same state dir while the bot is running. Both processes would long-poll the same cursor and take messages from each other.
+
+The iOS client builds with Xcode 27 and XcodeGen; `ios/README.md` covers the phone build and install.
+
+```bash
+xcodegen generate --spec ios/project.yml   # generate ios/Alfred.xcodeproj (not committed)
+xcodebuild -project ios/Alfred.xcodeproj -scheme Alfred -destination 'generic/platform=iOS Simulator' -derivedDataPath ios/build CODE_SIGNING_ALLOWED=NO build
+swift test --package-path ios/AlfredKit
+```
 
 ## Protocol source
 
