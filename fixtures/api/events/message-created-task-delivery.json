@@ -1,0 +1,19 @@
+{
+  "id": 21,
+  "at": "2026-10-26T01:03:12.010Z",
+  "type": "message.created",
+  "data": {
+    "id": "m1012",
+    "channel": "app",
+    "direction": "out",
+    "text": "每日 VPS 价格：三家都没有变化。报告见附件。",
+    "files": [
+      {
+        "path": "reports/vps-2026-10-26.md"
+      }
+    ],
+    "at": "2026-10-26T01:03:12.010Z",
+    "runId": "b4n7cj",
+    "taskId": "p3r8vx"
+  }
+}

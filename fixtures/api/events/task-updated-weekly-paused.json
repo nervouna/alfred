@@ -1,0 +1,33 @@
+{
+  "id": 22,
+  "at": "2026-10-25T14:00:00.000Z",
+  "type": "task.updated",
+  "data": {
+    "id": "t5w2hf",
+    "title": "每周供应商动态",
+    "brief": "看三家供应商的博客和状态页，列出本周的变化。",
+    "origin": "chat",
+    "schedule": {
+      "kind": "weekly",
+      "days": [
+        1,
+        3,
+        5
+      ],
+      "time": "08:30"
+    },
+    "status": "paused",
+    "model": "opus",
+    "budgetUsd": 5,
+    "createdAt": "2026-10-18T12:20:00.000Z",
+    "updatedAt": "2026-10-25T14:00:00.000Z",
+    "lastRunId": "e7v5mk",
+    "lastRunAt": "2026-10-21T00:30:00.000Z",
+    "skips": [
+      {
+        "at": "2026-10-19T00:30:00.000Z",
+        "reason": "daily-cap"
+      }
+    ]
+  }
+}

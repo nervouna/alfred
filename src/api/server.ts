@@ -232,6 +232,10 @@ export async function startApi(opts: ApiOptions): Promise<() => Promise<void>> {
       }
       return sendJson(res, 404, { error: `no open question ${command.questionId}` });
     }
+    // Tasks have no store yet: until one is wired in, a task command is refused here and never reaches the message path.
+    if (command.type === "task.create" || command.type === "task.update" || command.type === "task.run") {
+      return sendJson(res, 503, { error: "tasks are not available" });
+    }
     // A message's files are checked before anything is submitted: one that is not in the inbox refuses the message.
     const files = command.files ?? [];
     const missing = files.findIndex((file) => !inboxFile(file.path));

@@ -119,6 +119,9 @@ public struct Timeline: Hashable, Sendable {
             if let index = questions.firstIndex(where: { $0.id == answered.id }) {
                 questions[index].state = answered.cancelled ? .cancelled : .answered(answered.answers)
             }
+        case .taskUpdated:
+            // Tasks are not part of the chat's timeline.
+            break
         case .unknown:
             break
         }
