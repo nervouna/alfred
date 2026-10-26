@@ -78,6 +78,26 @@ final class AlfredClientTests: XCTestCase {
         assertCredentials(entry.request)
     }
 
+    func testUploadWithAProgressCallbackSendsTheSameRequest() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appending(path: "quote.pdf")
+        let bytes = Data((0..<2048).map { UInt8($0 % 241) })
+        try bytes.write(to: file)
+
+        let (client, log) = try makeClient { _ in StubReply(chunks: [((try? fixture("responses/upload-result.json")) ?? Data())]) }
+        let uploaded = try await client.upload(fileAt: file, name: "quote.pdf", contentType: "application/pdf") { fraction in
+            XCTAssertTrue((0...1).contains(fraction))
+        }
+        XCTAssertEqual(uploaded.path, "inbox/2026-10-25/IMG_0413.jpg")
+        let entry = try XCTUnwrap(log.entries.first)
+        XCTAssertEqual(try encodedQuery(entry.request), "name=quote.pdf")
+        XCTAssertEqual(entry.request.value(forHTTPHeaderField: "Content-Type"), "application/pdf")
+        XCTAssertEqual(entry.body, bytes)
+        assertCredentials(entry.request)
+    }
+
     func testRunsAndRunDetailDecodeTheirFixtures() async throws {
         let (client, log) = try makeClient { request in
             // The list and the detail are answered from the same handler: the path picks the fixture.

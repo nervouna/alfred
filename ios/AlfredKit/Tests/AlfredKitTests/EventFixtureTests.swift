@@ -107,6 +107,29 @@ final class QuestionFixtureTests: XCTestCase {
     }
 }
 
+extension QuestionFixtureTests {
+    func testTheQuestionFixturesFoldIntoTheStatesTheChatShows() throws {
+        func streamEvent(_ name: String) throws -> StreamEvent {
+            try JSONDecoder().decode(StreamEvent.self, from: Data(contentsOf: Fixtures.directory.appending(path: name)))
+        }
+
+        var answered = Timeline()
+        answered.apply(try streamEvent("events/question-asked.json"))
+        XCTAssertEqual(answered.questions.first?.state, .open)
+        answered.apply(try streamEvent("events/question-answered.json"))
+        XCTAssertEqual(
+            answered.questions.first?.state,
+            .answered(["报告用哪种格式？": "短表格", "要对比哪些供应商？": "Hetzner, Vultr"])
+        )
+
+        var cancelled = Timeline()
+        cancelled.apply(try streamEvent("events/question-asked.json"))
+        cancelled.apply(try streamEvent("events/question-answered-cancelled.json"))
+        XCTAssertEqual(cancelled.questions.first?.state, .cancelled)
+        XCTAssertEqual(cancelled.questions.first?.asked.questions.map(\.header), ["报告格式", "供应商"])
+    }
+}
+
 final class FutureFixtureTests: XCTestCase {
     private static let knownTypes: Set<String> = ["message.created", "run.updated", "question.asked", "question.answered"]
 
