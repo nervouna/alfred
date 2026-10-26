@@ -104,7 +104,7 @@ function recordMessage(
   events: EventLog,
   message: { channel: Channel; direction: "in" | "out"; text: string; files: FileRef[]; runId?: string; clientId?: string; error?: string },
 ): void {
-  // A voice note without a transcript, or media that failed to save, leaves nothing to show.
+  // A message with neither text nor files leaves nothing to show.
   if (!message.text.trim() && message.files.length === 0) return;
   const { runId, clientId, error, ...rest } = message;
   events.append("message.created", {
