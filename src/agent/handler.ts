@@ -131,13 +131,13 @@ const TOOL_LABELS: Record<string, string> = {
 };
 
 const HELP = `Alfred 调研助手
-直接发任务给我。文件、图片可以先发，再发说明。
-任务进行中也可以接着发消息补充或改方向，Alfred 会在当前步骤结束后看到。
-长任务交给后台子任务时，Alfred 可以一边等一边回答别的问题；提到某个子任务时带上它的运行 id。
+直接发要做的事给我。文件、图片可以先发，再发说明。
+运行进行中也可以接着发消息补充或改方向，Alfred 会在当前步骤结束后看到。
+耗时长的事交给后台子任务时，Alfred 可以一边等一边回答别的问题；提到某个子任务时带上它的运行 id。
 
 /new  开始新会话（清空上下文${SESSION_IDLE_HOURS > 0 ? `；空闲超过 ${SESSION_IDLE_HOURS} 小时也会自动开始` : ""}）
 /resume  切回上一个会话
-/stop [运行 id]  停止当前任务，后台子任务继续运行（带 id 只停这个后台子任务）
+/stop [运行 id]  停止当前运行，后台子任务继续运行（带 id 只停这个后台子任务）
 /model [sonnet|opus|haiku]  查看或切换模型
 /memory  查看长期记忆（要记住、修改或忘记什么，直接说）
 /status  当前状态和花费
@@ -277,8 +277,8 @@ function idleStatus(user: AgentUserState, now: number): string {
   if (SESSION_IDLE_HOURS <= 0) return `${idle}（自动开新会话已关闭）`;
   const due = rotationDueAt(user, SESSION_IDLE_HOURS);
   if (due === undefined) return idle;
-  if (now > due) return `${idle}，下一个任务会开新会话`;
-  return `${idle}，再过 ${humanAge(due - now)} 下一个任务会开新会话`;
+  if (now > due) return `${idle}，下一条消息会开新会话`;
+  return `${idle}，再过 ${humanAge(due - now)} 下一条消息会开新会话`;
 }
 
 /** Line added to a reply of a run that wrote files, so the user can find it on the workbench. */
@@ -304,7 +304,7 @@ export function backgroundFooter(dispatched: RunRecorder[], reported: RunRecorde
 /** One line naming the runs a restart cut short. */
 export function lostNote(runs: RunRef[]): string {
   const named = runs.map((r) => `「${r.title}」（${r.id}）`).join("、");
-  return `Alfred 重启时中断了 ${runs.length} 个任务：${named}。需要的话请重发。`;
+  return `Alfred 重启时中断了 ${runs.length} 个运行：${named}。需要的话请重发。`;
 }
 
 /** The text that hands a queued brief back to the agent when a background slot frees. */
@@ -325,9 +325,9 @@ function resultReply(result: SDKResultMessage): string {
   if (result.subtype === "success") {
     return result.is_error ? `出错了：${result.result}` : result.result.trim() || "完成。";
   }
-  if (result.subtype === "error_max_turns") return `任务步骤超过 ${MAX_TURNS} 步，已中止。发“继续”可以接着做。`;
+  if (result.subtype === "error_max_turns") return `运行步骤超过 ${MAX_TURNS} 步，已中止。发“继续”可以接着做。`;
   if (result.subtype === "error_max_budget_usd") {
-    return `本次任务花费超过上限 ${usd(MAX_BUDGET_USD)}，已中止。发“继续”可以接着做，或者把任务拆小。`;
+    return `本次运行花费超过上限 ${usd(MAX_BUDGET_USD)}，已中止。发“继续”可以接着做，或者把要做的事拆小。`;
   }
   return `执行出错：${result.errors.join("; ") || result.subtype}`;
 }
@@ -846,7 +846,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
       log.warn(`daily spend cap reached (${usd(spent)} of ${usd(DAILY_BUDGET_USD)}); not starting a task`);
       start.recordInbound?.(undefined);
       await outbound()
-        .text(`今天的花费已到每日上限 ${usd(DAILY_BUDGET_USD)}（已花 ${usd(spent)}），新任务明天再开始。`)
+        .text(`今天的花费已到每日上限 ${usd(DAILY_BUDGET_USD)}（已花 ${usd(spent)}），新运行明天再开始。`)
         .catch(() => {});
       return;
     }
@@ -998,7 +998,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
       if (run.stopped) status = "stopped";
       if (run.shutdown) {
         status = "lost";
-        failure = "Alfred 重启，任务中断";
+        failure = "Alfred 重启，运行中断";
       }
       // Subagents still running or queued end with the task: the process that ran them is gone.
       const orphans = background.endAll(run.shutdown ? "lost" : "stopped", run.shutdown ? failure : "the task ended");
@@ -1269,7 +1269,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
     cancelQuestions(rt);
     await interruptTurn(run);
     await out.text(
-      continuing.length ? `已停止当前任务。后台运行 ${continuing.join("、")} 仍在继续，发 /stop <id> 停止。` : "已停止当前任务。",
+      continuing.length ? `已停止当前运行。后台运行 ${continuing.join("、")} 仍在继续，发 /stop <id> 停止。` : "已停止当前运行。",
     );
     return true;
   }
@@ -1317,21 +1317,21 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
         return out.text(HELP);
 
       case "/new":
-        if (rt.busy) return out.text("当前任务还在进行，先发 /stop 或等它完成。");
+        if (rt.busy) return out.text("当前运行还在进行，先发 /stop 或等它完成。");
         if (!user.sessionId) return out.text("已经是新会话。");
         store.update(userId, retire(user));
         retired(userId, user.sessionId, "new", "/new");
         return out.text("已开始新会话。发 /resume 可以接回上一个会话。");
 
       case "/resume": {
-        if (rt.busy) return out.text("当前任务还在进行，先发 /stop 或等它完成。");
+        if (rt.busy) return out.text("当前运行还在进行，先发 /stop 或等它完成。");
         const patch = resumePrevious(user, Date.now());
         if (!patch?.sessionId) return out.text("没有可以接回的会话。");
         store.update(userId, patch);
         if (user.sessionId) retired(userId, user.sessionId, "resume", `/resume to ${patch.sessionId}`);
         else log.info(`session ${patch.sessionId} resumed`);
         return out.text(
-          `已切回上一个会话 ${patch.sessionId.slice(0, 8)}，下一个任务接着它继续。${user.sessionId ? "再发 /resume 可以换回来。" : ""}`,
+          `已切回上一个会话 ${patch.sessionId.slice(0, 8)}，下一次运行接着它继续。${user.sessionId ? "再发 /resume 可以换回来。" : ""}`,
         );
       }
 
@@ -1341,7 +1341,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
           await stopRun(target);
           return out.text(`已停止定时任务运行 ${target}。`);
         }
-        if (!rt.run) return out.text("当前没有进行中的任务。");
+        if (!rt.run) return out.text("当前没有进行中的运行。");
         if (await stopRun(target || rt.run.recorder.id)) return;
         return out.text(`没有进行中或排队的运行 ${target}。发 /status 查看。`);
       }
@@ -1355,7 +1355,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
           // An open query switches at once: the main agent's next turn runs on the new model; subagent roles keep theirs.
           await rt.run.query.setModel(MODELS[key]);
           rt.run.recorder.update({ model: MODELS[key] });
-          return out.text(`已切换到 ${key}（${MODELS[key]}），当前任务的下一轮起生效。`);
+          return out.text(`已切换到 ${key}（${MODELS[key]}），当前运行的下一轮起生效。`);
         }
         return out.text(`已切换到 ${key}（${MODELS[key]}）。`);
       }
@@ -1376,7 +1376,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
         if (user.previousSession) lines.push(`上一个会话：${user.previousSession.sessionId.slice(0, 8)}，发 /resume 接回`);
         lines.push(
           `累计花费：${usd(user.totalCostUsd)}，今天 ${usd(spentToday(user))} / 上限 ${usd(DAILY_BUDGET_USD)}`,
-          rt.run ? `任务：运行 ${rt.run.recorder.id}，进行中 ${humanAge(now - rt.run.startedAt)}，${runSummary(rt.run, now)}` : "任务：空闲",
+          rt.run ? `运行：${rt.run.recorder.id}，进行中 ${humanAge(now - rt.run.startedAt)}，${runSummary(rt.run, now)}` : "运行：空闲",
         );
         for (const b of rt.run?.background.running ?? []) {
           lines.push(`后台运行 ${b.recorder.id}：${b.role}「${b.description}」${humanAge(now - b.startedAt)}`);
@@ -1469,7 +1469,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
       rt.queue.push(prompt);
       record();
       await sendNote();
-      await out.text("收到，排在当前任务之后处理。发 /stop 可以停止当前任务。");
+      await out.text("收到，排在当前运行之后处理。发 /stop 可以停止当前运行。");
       return;
     }
     // The run records the message as soon as it has its id, before drain() first yields.

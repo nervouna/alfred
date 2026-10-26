@@ -616,7 +616,7 @@ test("a run a restart cut short is lost, and its occurrence is not run again", a
   await sleep(150);
   assert.equal(second.agent.queries.length, 0, "the occurrence was taken before the restart");
   await second.send("/help");
-  assert.match(second.app.texts[0] ?? "", new RegExp(`^Alfred 重启时中断了 1 个任务：「晨报」（${runId}）`), "the owner's next message names it");
+  assert.match(second.app.texts[0] ?? "", new RegExp(`^Alfred 重启时中断了 1 个运行：「晨报」（${runId}）`), "the owner's next message names it");
 });
 
 test("a chat message queued behind the live chat run starts no run during a shutdown", async () => {
@@ -627,7 +627,7 @@ test("a chat message queued behind the live chat run starts no run during a shut
   await t.send("第一条");
   await until("the final reply to be on its way", () => t.app.state.waiting);
   await t.send("之后的一条");
-  assert.match(t.app.texts.at(-1) ?? "", /排在当前任务之后/, "the message is queued behind the run");
+  assert.match(t.app.texts.at(-1) ?? "", /排在当前运行之后/, "the message is queued behind the run");
 
   const down = t.handler.shutdown();
   release();
@@ -833,7 +833,7 @@ test("/status lists the active tasks with their next run, and the task run in pr
   assert.ok(!status.includes(`定时任务 ${running.id}`), "a task that is done is not listed");
   const runId = t.taskRuns(running.id)[0]?.id ?? "";
   assert.match(status, new RegExp(`定时任务运行 ${runId}「检查」，进行中`));
-  assert.match(status, /任务：空闲/, "the chat is idle");
+  assert.match(status, /运行：空闲/, "the chat is idle");
   await t.handler.shutdown();
 });
 

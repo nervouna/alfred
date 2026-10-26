@@ -87,7 +87,7 @@ test("a state file written under the old key carries over to the owner key at th
 
   // What the owner sees: the model, the session and the spend are the old ones, and the lost runs are named once.
   await handler.submit({ text: "/status", files: [] });
-  assert.match(texts[0] ?? "", /^Alfred 重启时中断了 1 个任务：「没做完的调研」（p3x9za）/);
+  assert.match(texts[0] ?? "", /^Alfred 重启时中断了 1 个运行：「没做完的调研」（p3x9za）/);
   assert.doesNotMatch(texts.join("\n"), /旧的报告/, "no note about undelivered results");
   const status = texts[1] ?? "";
   assert.match(status, /^模型：opus/);
