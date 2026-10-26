@@ -18,6 +18,7 @@ export const WORKBENCH_STATE_DIR = path.join(STATE_DIR, "workbench");
 export const RUNS_LOG = path.join(WORKBENCH_STATE_DIR, "runs.jsonl");
 export const RUN_FILES_DIR = path.join(WORKBENCH_STATE_DIR, "runs");
 export const STATUS_FILE = path.join(WORKBENCH_STATE_DIR, "status.json");
+export const TASKS_FILE = path.join(WORKBENCH_STATE_DIR, "tasks.json");
 export const LOG_FILE = path.join(WORKBENCH_STATE_DIR, "alfred.log");
 
 /** Run files are kept this long after the run ends; runs.jsonl keeps the record for good. */
