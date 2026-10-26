@@ -9,6 +9,7 @@ import { z } from "zod";
 
 import type { DeliveredDocument, Outbound } from "../channels.ts";
 import { type Documents, deliverDocument } from "../documents/register.ts";
+import type { ReplyRefusal } from "../documents/store.ts";
 import { humanSize } from "../files.ts";
 import { describeError, log } from "../log.ts";
 import { PDF_SOURCE_EXTS, isRendererMissing, renderPdf } from "../pdf.ts";
@@ -19,6 +20,8 @@ import { ASPECT_RATIOS, MAX_IMAGES_PER_CALL, MAX_IMAGES_PER_TASK, createImageGen
 import { QUESTION_HOOK_TIMEOUT_SECONDS } from "./questions.ts";
 
 export const ALFRED_TOOL_NAMES = ["mcp__alfred__deliver", "mcp__alfred__move_file", "mcp__alfred__render_pdf", "mcp__alfred__generate_image"];
+/** The tools only a revision run has, beside ALFRED_TOOL_NAMES. */
+export const REVISION_TOOL_NAMES = ["mcp__alfred__reply_annotation"];
 
 /** deliver refuses a file over this size. */
 const DELIVER_MAX_BYTES = 100 * 1024 * 1024;
@@ -53,8 +56,9 @@ export function anySignal(run: AbortSignal | undefined, call: AbortSignal | unde
  * `signal` aborts (the run is stopped) or when its own call's signal does (the turn is interrupted). `run`
  * records the files they write, and gives a delivery its run and task. `documents` is the history of the workspace and
  * the document store: with it, a file delivered becomes a document, and a file moved takes its document along.
+ * `revision` is set for a revision run, whose `run` is its record: it also gets reply_annotation.
  */
-export function alfredToolDefinitions(out: Outbound, signal?: AbortSignal, run?: RunRecorder, documents?: Documents) {
+export function alfredToolDefinitions(out: Outbound, signal?: AbortSignal, run?: RunRecorder, documents?: Documents, revision = false) {
   const deliver = tool(
     "deliver",
     "Deliver a file from the workspace to the owner in the app. A delivered file becomes a document the owner can annotate in the app. Revise a delivered document in place, under the same path, since every version is kept: change the file and deliver it again, and do not write a copy under a new name. The app opens Markdown, PDF, images, video, text files and HTML reports; an HTML report opens in a sandbox where inline scripts and SVG charts work, with no network access.",
@@ -186,13 +190,45 @@ export function alfredToolDefinitions(out: Outbound, signal?: AbortSignal, run?:
     },
   );
 
-  return [deliver, moveFile, renderPdfTool, generateImage];
+  const tools: SdkMcpToolDefinition<any>[] = [deliver, moveFile, renderPdfTool, generateImage];
+  if (revision && documents && run) tools.push(replyAnnotationTool(documents, run, signal));
+  return tools;
+}
+
+/** What the agent is told when the store refuses a reply. */
+const REPLY_REFUSALS: Record<ReplyRefusal, (id: string) => string> = {
+  unknown: (id) => `There is no annotation ${id}. Use an id from the list in your first message.`,
+  "other-run": (id) => `Annotation ${id} is not part of this revision. Use an id from the list in your first message.`,
+  closed: (id) => `Annotation ${id} is already closed (answered, or sent back to the owner), so it cannot be answered again.`,
+  blank: () => "The reply is empty. Say what you changed, or why you left the annotation as it is.",
+  "too-long": () => "The reply is over 4000 characters. Shorten it.",
+};
+
+/** reply_annotation: answers one annotation of the revision run's batch. It stops when the run is stopped, like the other tools. */
+function replyAnnotationTool({ store }: Documents, run: RunRecorder, signal?: AbortSignal) {
+  return tool(
+    "reply_annotation",
+    "Answer one annotation of the batch this revision run was given, after you have acted on it or decided not to. The owner reads the reply under the annotation: say what you changed, or why you left it as it is, and state any assumption you made. Answer every annotation; one you leave unanswered goes back to the owner.",
+    {
+      annotationId: z.string().describe("The annotation's id, from the list in your first message"),
+      reply: z.string().describe("What you changed, or why you did not act on the annotation"),
+    },
+    async ({ annotationId, reply }, extra) => {
+      if (anySignal(signal, callSignal(extra))?.aborted) return fail("The run was stopped; the reply was not recorded.");
+      const id = annotationId.trim();
+      const answered = store.reply(id, run.id, reply);
+      if ("refused" in answered) return fail(REPLY_REFUSALS[answered.refused](id));
+      const waiting = store.annotations(answered.documentId).filter((annotation) => annotation.runId === run.id && annotation.state === "submitted").length;
+      log.info(`revision run ${run.id} answered annotation ${answered.id}; ${waiting} waiting`);
+      return ok(`Recorded your reply to annotation ${answered.id}. ${waiting ? `${waiting} annotation(s) still need an answer.` : "Every annotation has an answer."}`);
+    },
+  );
 }
 
 /**
  * Alfred's tools as the in-process MCP server the agent's query gets (see alfredToolDefinitions). `asking` are tools
  * that wait for the owner's answer to a question (the task tools): the server waits for them as long as a question
- * does, not for the SDK's default of about a day.
+ * does, not for the SDK's default of about a day. `revision` is set for a revision run (see alfredToolDefinitions).
  */
 export function createAlfredTools(
   out: Outbound,
@@ -200,11 +236,12 @@ export function createAlfredTools(
   run?: RunRecorder,
   asking: SdkMcpToolDefinition<any>[] = [],
   documents?: Documents,
+  revision = false,
 ) {
   return createSdkMcpServer({
     name: "alfred",
     version: "0.1.0",
-    tools: [...alfredToolDefinitions(out, signal, run, documents), ...asking],
+    tools: [...alfredToolDefinitions(out, signal, run, documents, revision), ...asking],
     alwaysLoad: true,
     ...(asking.length ? { timeout: QUESTION_HOOK_TIMEOUT_SECONDS * 1000 } : {}),
   });

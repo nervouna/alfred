@@ -13,6 +13,7 @@ import { MemoryLock } from "./agent/memory.ts";
 import { describeEvent, request, streamEvents } from "./api/client.ts";
 import { apiSocketPath, startApi } from "./api/server.ts";
 import { appOutbound } from "./channels.ts";
+import { documentCommands } from "./documents/commands.ts";
 import { startDocuments } from "./documents/startup.ts";
 import { sharedEventLog } from "./events.ts";
 import { humanAge } from "./files.ts";
@@ -82,7 +83,14 @@ async function cmdRun(args: string[]): Promise<void> {
   const agent = createAgentHandler({ out: appOutbound(), tasks, documents });
   let closeApi: () => Promise<void>;
   try {
-    closeApi = await startApi({ socket, handler: agent, events: sharedEventLog(), tasks: taskCommands(tasks, agent) });
+    // Without documents the API answers every document command 503.
+    closeApi = await startApi({
+      socket,
+      handler: agent,
+      events: sharedEventLog(),
+      tasks: taskCommands(tasks, agent),
+      ...(documents ? { documents: documentCommands(agent) } : {}),
+    });
   } catch (err) {
     await agent.shutdown();
     throw err;

@@ -35,8 +35,11 @@ export interface DeliveredDocument {
 /** Where Alfred's output to the owner goes. */
 export interface Outbound {
   readonly channel: Channel;
-  /** Rejects when the channel refuses the message. */
-  text(text: string): Promise<void>;
+  /**
+   * Rejects when the channel refuses the message. `files` are shown on the same message: files that already are
+   * documents, which the app opens by their ids, so the channel sends nothing for them.
+   */
+  text(text: string, files?: FileRef[]): Promise<void>;
   /**
    * Sends the file at an absolute path, after `caption` as a message of its own. Returns how the channel sent it.
    * A file delivered as a document carries it: the message that records the send names the document and the version.
@@ -149,14 +152,14 @@ export function recordInbound(events: EventLog, channel: Channel, inbound: Inbou
 export function recorded(out: Outbound, events: EventLog, opts: { workspace: string; runId?: string; taskId?: string }): Outbound {
   const record = (text: string, files: FileRef[], error?: string) =>
     recordMessage(events, { channel: out.channel, direction: "out", text, files, runId: opts.runId, taskId: opts.taskId, error });
-  const text = async (body: string): Promise<void> => {
+  const text = async (body: string, files: FileRef[] = []): Promise<void> => {
     try {
-      await out.text(body);
+      await out.text(body, files);
     } catch (err) {
-      record(body, [], describeError(err));
+      record(body, files, describeError(err));
       throw err;
     }
-    record(body, []);
+    record(body, files);
   };
   return {
     channel: out.channel,
