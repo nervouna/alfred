@@ -415,8 +415,11 @@ src/cli.ts          login | run | push | status | setup-pdf | pdf | memory-scan 
 plugin/             the baked skills plugin `alfred`
 scripts/agent-smoke.ts  local agent run without WeChat
 ios/project.yml     XcodeGen spec for the iOS app and its Share Extension (the .xcodeproj is generated)
-ios/Alfred/         the iOS app: the chat, runs and documents tabs, the file viewer, pairing and the app entry point
-ios/AlfredShare/    the iOS Share Extension
+ios/Alfred/         the iOS app: the 对话, 运行 and 文档 tabs, the file viewer, attachments, questions, push, pairing and the app entry point
+ios/AlfredShare/    the iOS Share Extension: a page, PDF or image from another app, sent to Alfred
+ios/Shared/         code the app and the Share Extension both compile: the keychain store, the upload limit, photo conversion and the share logic
+ios/AlfredTests/    unit tests of the app and of the shared code, on a stubbed URLSession
+ios/AlfredUITests/  UI tests that drive the app against a running app-dev
 ios/Config/         build settings; the owner's Signing.xcconfig is git-ignored
 ios/AlfredKit/      Swift package: the client's model of the API, tested on the shared fixtures
 ```
