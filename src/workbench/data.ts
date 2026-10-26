@@ -7,7 +7,10 @@ import path from "node:path";
 
 import { AGENT_CONFIG_DIR } from "../agent/config.ts";
 import { transcriptDirs } from "../agent/memory-scan.ts";
-import { LOG_FILE, STATUS_FILE, readRunFile, readRunLog, runFileIds } from "../runs.ts";
+import { TaskListSchema } from "../api/schema.ts";
+import type { TaskList } from "../api/schema.ts";
+import { describeError } from "../log.ts";
+import { LOG_FILE, STATUS_FILE, TASKS_FILE, readRunFile, readRunLog, runFileIds } from "../runs.ts";
 import type { Heartbeat, RunFile, RunRecord } from "../runs.ts";
 import { readJson } from "../store.ts";
 
@@ -35,6 +38,24 @@ export function runDetail(id: string): { record: RunRecord; file?: RunFile } | u
   if (file) return { record: file, file };
   const record = readRunLog().findLast((r) => r.id === id);
   return record ? { record } : undefined;
+}
+
+/**
+ * The task list the task store keeps in tasks.json, through TaskListSchema. With no such file there are no tasks
+ * yet, and the schedules are computed in the workbench's own time zone. A file that cannot be read or does not
+ * fit throws, naming the file.
+ */
+export function readTaskList(file = TASKS_FILE): TaskList {
+  let raw: unknown;
+  try {
+    raw = readJson<unknown>(file);
+  } catch (err) {
+    throw new Error(`cannot read ${file}: ${describeError(err)}`);
+  }
+  if (raw === undefined) return { timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone, tasks: [] };
+  const parsed = TaskListSchema.safeParse(raw);
+  if (!parsed.success) throw new Error(`${file} does not fit a task list: ${parsed.error.message}`);
+  return parsed.data;
 }
 
 export interface AlfredStatus {
