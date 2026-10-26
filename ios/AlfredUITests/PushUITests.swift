@@ -29,7 +29,7 @@ final class PushUITests: XCTestCase {
         UIPasteboard.general.string = pairing
         app.buttons["粘贴配对信息"].tap()
         XCTAssertTrue(app.tabBars.buttons["对话"].waitForExistence(timeout: patience), "the chat tab did not appear\n\(app.debugDescription)")
-        allowNotifications()
+        allowNotifications(waiting: 5)
         XCTAssertTrue(app.staticTexts["连接中…"].waitForNonExistence(timeout: patience), "the stream never connected")
         waitUntilStable { messageIds(in: app).count }
 
@@ -54,7 +54,9 @@ final class PushUITests: XCTestCase {
         ]
         try JSONSerialization.data(withJSONObject: payload).write(to: URL(filePath: handshake).appending(path: "payload.json"))
 
-        // The chat is on screen: the notification arrives and shows nothing.
+        // The chat is on screen: the notification arrives and shows nothing. The system's question may come late on a
+        // new simulator, and an unanswered question means no notification at all.
+        allowNotifications(waiting: 15)
         dismissKeyboard(in: app)
         push(1, handshake)
         XCTAssertFalse(banner().waitForExistence(timeout: 8), "a notification was shown over the chat\n\(springboard.debugDescription)")
@@ -65,17 +67,22 @@ final class PushUITests: XCTestCase {
         XCTAssertTrue(banner().waitForExistence(timeout: patience), "no banner over the runs tab\n\(springboard.debugDescription)")
         XCTAssertTrue(banner().waitForNonExistence(timeout: patience), "the banner stayed")
 
-        // The app is in the background: the notification is shown by the system, and tapping it opens the chat.
-        XCUIDevice.shared.press(.home)
-        push(3, handshake)
-        let tapped = banner()
-        XCTAssertTrue(tapped.waitForExistence(timeout: patience), "no banner on the home screen\n\(springboard.debugDescription)")
-        tapped.tap()
+        // The app is in the background: the notification is shown by the system, and tapping it opens the chat at the
+        // message. The tap switches tabs, which makes a new list, and a list that is still laying out can lose a scroll
+        // made at once; that is a matter of timing, so the tap is made three times.
+        for round in 0..<3 {
+            if round > 0 { app.tabBars.buttons["运行"].tap() }
+            XCUIDevice.shared.press(.home)
+            push(3 + round, handshake)
+            let tapped = banner()
+            XCTAssertTrue(tapped.waitForExistence(timeout: patience), "no banner on the home screen (tap \(round + 1))\n\(springboard.debugDescription)")
+            tapped.tap()
 
-        XCTAssertTrue(app.wait(for: .runningForeground, timeout: patience), "the app did not come to the foreground")
-        XCTAssertTrue(app.tabBars.buttons["对话"].isSelected, "the chat tab is not selected\n\(app.debugDescription)")
-        let reply = element(firstId, in: app)
-        XCTAssertTrue(wait(timeout: patience) { isOnScreen(reply, in: app) }, "the chat did not scroll to the message\n\(app.debugDescription)")
+            XCTAssertTrue(app.wait(for: .runningForeground, timeout: patience), "the app did not come to the foreground (tap \(round + 1))")
+            XCTAssertTrue(app.tabBars.buttons["对话"].isSelected, "the chat tab is not selected (tap \(round + 1))\n\(app.debugDescription)")
+            let reply = element(firstId, in: app)
+            XCTAssertTrue(wait(timeout: patience) { isOnScreen(reply, in: app) }, "the chat did not scroll to the message (tap \(round + 1))\n\(app.debugDescription)")
+        }
 
         FileManager.default.createFile(atPath: URL(filePath: handshake).appending(path: "done").path, contents: nil)
     }
@@ -93,9 +100,9 @@ final class PushUITests: XCTestCase {
     }
 
     /// Answers the system's question about notifications, if it is asked: it is asked once per install.
-    private func allowNotifications() {
+    private func allowNotifications(waiting seconds: TimeInterval) {
         let alert = springboard.alerts.firstMatch
-        guard alert.waitForExistence(timeout: 10) else { return }
+        guard alert.waitForExistence(timeout: seconds) else { return }
         let allow = alert.buttons.matching(NSPredicate(format: "label IN {'Allow', '允许'}")).firstMatch
         XCTAssertTrue(allow.exists, "the notification question has no Allow button\n\(springboard.debugDescription)")
         allow.tap()
@@ -138,11 +145,14 @@ final class PushUITests: XCTestCase {
     }
 
     private func dismissKeyboard(in app: XCUIApplication) {
-        guard app.keyboards.count > 0 else { return }
-        let top = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.25))
-        let bottom = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.98))
-        top.press(forDuration: 0.1, thenDragTo: bottom)
-        XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: patience), "the keyboard stayed up")
+        // The first drag on a new simulator can miss, so it is tried again.
+        for _ in 0..<3 where app.keyboards.count > 0 {
+            let top = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.25))
+            let bottom = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.98))
+            top.press(forDuration: 0.1, thenDragTo: bottom)
+            if app.keyboards.firstMatch.waitForNonExistence(timeout: 5) { return }
+        }
+        XCTAssertEqual(app.keyboards.count, 0, "the keyboard stayed up")
     }
 
     /// Leaves the app on the pairing screen: a paired app unpairs through the menu, and one whose device the

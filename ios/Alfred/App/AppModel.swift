@@ -82,7 +82,7 @@ final class AppModel {
     private var stagingCount = 0
     /// The tab on screen.
     var selectedTab = AppTab.chat
-    /// Where the chat should scroll to, until the chat has done it.
+    /// Where the chat should scroll to. It stays until the chat has seen the row on screen (`revealHandled`).
     private(set) var revealRequest: RevealRequest?
 
     @ObservationIgnored private let store: any CredentialStore
@@ -339,7 +339,7 @@ final class AppModel {
         revealRequest = RevealRequest(itemId: itemId, number: revealCount)
     }
 
-    /// The chat scrolled to a request.
+    /// The chat has shown a request's row (or given up on it): the request is done. A newer request stays.
     func revealHandled(_ request: RevealRequest) {
         if revealRequest == request {
             revealRequest = nil
