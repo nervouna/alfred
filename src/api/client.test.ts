@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
@@ -109,4 +110,26 @@ test("streamEvents reads the backlog and live events, resumes by id and stops wh
 test("a socket nobody listens on is reported as unreachable", async () => {
   await assert.rejects(request(path.join(tmp, "nobody.sock"), "GET", "/health"), /cannot reach Alfred's API at/);
   await assert.rejects(streamEvents(path.join(tmp, "nobody.sock")).next(), /cannot reach Alfred's API at/);
+});
+
+test("a request aborted by its signal rejects with the signal's reason and drops the connection, even if the socket never answers", async (t) => {
+  const socket = path.join(tmp, "silent.sock");
+  const server = http.createServer(() => {}); // takes every request and never answers it
+  const received = new Promise<void>((resolve) => server.once("request", () => resolve()));
+  const dropped = new Promise<void>((resolve) => server.on("connection", (conn) => conn.on("close", () => resolve())));
+  await new Promise<void>((resolve) => server.listen(socket, resolve));
+  t.after(() => {
+    server.closeAllConnections();
+    server.close();
+  });
+
+  const gave = new AbortController();
+  const reason = new Error("the caller gave up");
+  const pending = request(socket, "GET", "/health", undefined, { signal: gave.signal });
+  await received;
+  gave.abort(reason);
+  await assert.rejects(pending, (err) => err === reason);
+  await dropped;
+
+  await assert.rejects(request(socket, "GET", "/health", undefined, { signal: AbortSignal.abort(reason) }), (err) => err === reason, "an aborted signal sends nothing");
 });

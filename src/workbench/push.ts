@@ -121,6 +121,7 @@ export function nextDelay(current: number, max: number): number {
 }
 
 const BACKOFF = { minMs: 1000, maxMs: 30_000 };
+const HEALTH_TIMEOUT_MS = 10_000;
 const CursorSchema = z.object({ lastEventId: z.number().int().nonnegative() });
 
 export interface DispatcherOptions {
@@ -134,6 +135,8 @@ export interface DispatcherOptions {
   signal: AbortSignal;
   /** The first and the longest wait between reconnects; 1 s and 30 s by default. */
   backoff?: { minMs: number; maxMs: number };
+  /** How long GET /health may take before it counts as a failure; 10 s by default. */
+  healthTimeoutMs?: number;
 }
 
 /**
@@ -173,7 +176,8 @@ export async function runPushDispatcher(opts: DispatcherOptions): Promise<void> 
 async function resumePoint(opts: DispatcherOptions): Promise<number> {
   const saved = readCursor(opts.cursorFile);
   if (saved !== undefined) return saved;
-  const health = await request(opts.socket, "GET", "/health");
+  const timeout = AbortSignal.timeout(opts.healthTimeoutMs ?? HEALTH_TIMEOUT_MS);
+  const health = await request(opts.socket, "GET", "/health", undefined, { signal: AbortSignal.any([opts.signal, timeout]) });
   if (health.status !== 200) throw new Error(`GET /health answered ${health.status}`);
   const { lastEventId } = CursorSchema.parse(JSON.parse(health.body));
   writeJson(opts.cursorFile, { lastEventId });

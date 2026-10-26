@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
+import type { Socket } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { after, mock, test } from "node:test";
@@ -254,6 +255,46 @@ function frame(event: Event): string {
   return `id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
 }
 
+/**
+ * A fake of Alfred's socket that accepts every connection and never answers, except GET /health
+ * once answerHealth() is called: the /health requests held so far are answered then.
+ */
+async function silentAlfred(socket: string) {
+  const sockets = new Set<Socket>();
+  const heldHealth = new Set<http.ServerResponse>();
+  let connections = 0;
+  let answering = false;
+  const answer = (res: http.ServerResponse) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, lastEventId: 7 }));
+  };
+  const server = http.createServer((req, res) => {
+    if (req.method !== "GET" || req.url !== "/health") return;
+    if (answering) return void answer(res);
+    heldHealth.add(res);
+    res.on("close", () => heldHealth.delete(res));
+  });
+  server.on("connection", (conn) => {
+    connections++;
+    sockets.add(conn);
+    conn.on("close", () => sockets.delete(conn));
+  });
+  await new Promise<void>((resolve) => server.listen(socket, resolve));
+  return {
+    connections: () => connections,
+    answerHealth() {
+      answering = true;
+      for (const res of heldHealth) answer(res);
+      heldHealth.clear();
+    },
+    close: () =>
+      new Promise<void>((resolve) => {
+        for (const conn of sockets) conn.destroy();
+        server.close(() => resolve());
+      }),
+  };
+}
+
 async function waitFor(check: () => boolean, label: string): Promise<void> {
   for (let i = 0; i < 500; i++) {
     if (check()) return;
@@ -375,6 +416,56 @@ test("while Alfred is unreachable the dispatcher keeps trying, and after a dropp
     signal.abort();
     await done;
     await alfred?.close();
+  }
+});
+
+test("aborting the dispatcher's signal ends it within a second, while GET /health is unanswered", async () => {
+  const socket = path.join(tmp, "silent-abort.sock");
+  const alfred = await silentAlfred(socket);
+  const cursorFile = path.join(tmp, "silent-abort", "push-cursor.json");
+  const signal = new AbortController();
+  const done = runPushDispatcher({ socket, cursorFile, devices: storeWithPhone(), apns: fakeApns(), signal: signal.signal, backoff: BACKOFF });
+  try {
+    await waitFor(() => alfred.connections() === 1, "GET /health to reach the socket");
+    const aborted = performance.now();
+    signal.abort();
+    await done;
+    assert.ok(performance.now() - aborted < 1000, "the dispatcher ends within a second of the abort");
+  } finally {
+    await alfred.close();
+  }
+});
+
+test("a GET /health that is not answered in time fails like any other error: the dispatcher retries after the wait", async () => {
+  const socket = path.join(tmp, "silent-retry.sock");
+  const alfred = await silentAlfred(socket);
+  const cursorFile = path.join(tmp, "silent-retry", "push-cursor.json");
+  const signal = new AbortController();
+  const done = runPushDispatcher({ socket, cursorFile, devices: storeWithPhone(), apns: fakeApns(), signal: signal.signal, backoff: BACKOFF, healthTimeoutMs: 50 });
+  try {
+    await waitFor(() => alfred.connections() >= 2, "a second GET /health after the first timed out");
+    assert.equal(cursorOf(cursorFile), undefined, "no cursor without an answer");
+  } finally {
+    signal.abort();
+    await done;
+    await alfred.close();
+  }
+});
+
+test("once GET /health answers, the dispatcher saves the cursor it reports", async () => {
+  const socket = path.join(tmp, "silent-answer.sock");
+  const alfred = await silentAlfred(socket);
+  const cursorFile = path.join(tmp, "silent-answer", "push-cursor.json");
+  const signal = new AbortController();
+  const done = runPushDispatcher({ socket, cursorFile, devices: storeWithPhone(), apns: fakeApns(), signal: signal.signal, backoff: BACKOFF, healthTimeoutMs: 50 });
+  try {
+    await waitFor(() => alfred.connections() >= 2, "a second GET /health after the first timed out");
+    alfred.answerHealth();
+    await waitFor(() => cursorOf(cursorFile) === 7, "the cursor from /health");
+  } finally {
+    signal.abort();
+    await done;
+    await alfred.close();
   }
 });
 
