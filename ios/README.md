@@ -2,7 +2,7 @@
 
 `AlfredKit/` is a Swift package with the client's Codable model of Alfred's API: events, commands and the objects they carry. Its tests decode the shared JSON fixtures in `fixtures/api/`.
 
-`Alfred/` is the app, and `AlfredShare/` is its Share Extension. `Config/` holds the build settings. `project.yml` is the XcodeGen spec for the Xcode project; the `.xcodeproj` is generated and not committed.
+`Alfred/` is the app, and `AlfredShare/` is its Share Extension. `Shared/` holds the code both compile: the keychain store, the 50 MiB limit, the HEIC-to-JPEG conversion, and the share logic (what the extension reads, `ShareModel`), which lives there so the app's unit tests can reach it. `Config/` holds the build settings. `project.yml` is the XcodeGen spec for the Xcode project; the `.xcodeproj` is generated and not committed.
 
 Build tools: Xcode 27 and XcodeGen (`brew install xcodegen`).
 
@@ -15,6 +15,7 @@ The 对话 tab is the chat with Alfred, 运行 lists its runs, and 文档 lists 
 - `Chat/` is the conversation: messages in timeline order (WeChat ones tagged `微信`, failed WeChat sends `微信未送达`) with Alfred's questions as cards where they were asked, the owner's pending messages dimmed until their echo arrives (a failed send says `发送失败，点按重试` and a tap sends it again with the same `clientId`), each run's draft reply with its latest step under it, the composer with its attach button, a stop button while a task runs, and a menu with `取消配对`. A file chip under a message opens its file in the viewer.
 - `Runs/` is the 运行 tab. The list is fetched (`GET /api/runs`) when the tab appears and on pull to refresh, newest first; a run the stream knows takes its latest version from the `Timeline`, so a running run updates live, and a run only the stream has told of is listed too. A row shows the title, the status (排队中, 进行中, 完成, 已停止, 失败, 中断), `子任务` for a subagent, the short model name, the cost and the start time. A run's detail (`GET /api/runs/<id>`) shows its steps, the files it wrote, its error, a link to the parent run for a subagent, and a `停止` button while it is running, which sends `run.stop`.
 - `Documents/` is the 文档 tab and the viewer. The list holds the files of Alfred's outbound messages and of the runs the tab has loaded or the stream has told of, once per path, newest first; a run's files are dated by when the run ended (or started, while it runs).
+- `Push/` is the notifications: the app delegate, what the app asks the system for, the token and the payload. See Push below.
 
 ### The viewer
 
@@ -48,7 +49,7 @@ One QR code carries the server URL, the Cloudflare Access service token and the 
 
 The app decodes the pairing, checks it with `GET /api/ping`, and only then saves it to the keychain. A failure stays on the screen with its reason: not a valid pairing, the device was refused (401), Access refused (403), or a network error.
 
-The credentials live in one keychain item, in the access group from the `AlfredKeychainAccessGroup` Info.plist value (`$(AppIdentifierPrefix)$(ALFRED_BUNDLE_ID)`), which the Share Extension shares. A simulator build has no group, so the app uses its default one. The simulator's keychain refuses an app that is not signed (status -34018): build the simulator app with the default signing, as the test commands below do, and not with `CODE_SIGNING_ALLOWED=NO`, which is only good for checking that it compiles.
+The credentials live in one keychain item (service `alfred`), in the access group from the `AlfredKeychainAccessGroup` Info.plist value (`$(AppIdentifierPrefix)$(ALFRED_BUNDLE_ID)`). The Share Extension has the same key in its own Info.plist and the same group in its entitlements, and reads the item through `AppKeychain` too. A simulator build has no group, so both use their default one; signed the same way, they get the same default, and the extension reads the pairing in the simulator as well (`ShareUITests` relies on it). The simulator's keychain refuses an app that is not signed (status -34018): build the simulator app with the default signing, as the test commands below do, and not with `CODE_SIGNING_ALLOWED=NO`, which is only good for checking that it compiles.
 
 If the server stops accepting the device, the app says so and offers `重新配对`, which deletes the credentials. If Cloudflare Access refuses the stream, it offers a retry. `取消配对` in the chat's menu deletes the credentials too, after a confirmation.
 
@@ -70,6 +71,35 @@ A `question.asked` event shows as a card where it was asked, in event order amon
 
 - **Answering.** With one question that is not multi-select, tapping an option sends `question.answer` at once. Otherwise the options toggle and `提交` sends all the answers, with the labels of a multi-select question joined by `, `. Typing in the composer answers an open question too, but that is the server's rule and the card says nothing about it. A failed answer shows an error on the card and leaves the question open.
 - **Afterwards.** An answered question shows its answers. A question cancelled by a stop shows `已取消`. A question whose run ended (`done`, `stopped`, `failed` or `lost`) without an answer shows `已结束`: the `Timeline` closes it on that `run.updated`.
+
+### Push
+
+The workbench pushes through APNs for Alfred's outbound messages on the app channel, for questions, and for WeChat sends that failed (`src/workbench/push.ts`). The payload is `aps.alert` (title `Alfred` and the text), `sound: default` and `thread-id: chat`, plus the custom keys `eventId` and, when there is one, `runId`.
+
+- **Permission and token.** After a successful pairing, and at each launch while paired, the app asks the system for permission to show alerts, play sounds and badge the icon (the system asks the owner once), and registers for remote notifications. The token goes to `POST /api/push` as lowercase hex, with the environment from the Info.plist key `AlfredAPNsEnvironment`, which `project.yml` sets to `development`: the owner installs a Release build signed with a development profile, whose `aps-environment` entitlement (`Alfred.entitlements`) is `development`. A build without the key registers nothing.
+- **Registering again.** A token Alfred accepted is not sent again until it changes or the app pairs again. A 401 or 403 is the pairing and access-error flow's to show; any other failure leaves the token unregistered, and the next launch sends it again.
+- **In the foreground.** With the chat tab on screen (the app active, paired and without an access error) a notification is not shown, because the chat already has the message. On the other tabs it shows as a banner with sound. In the background the system shows it.
+- **A tap.** It opens the chat tab and scrolls to the message or question card that `eventId` names, when the timeline has it (`AppModel` keeps the event id of each); otherwise the chat just opens. Later events still follow the bottom of the chat.
+- **Unpairing** calls `unregisterForRemoteNotifications`. The server keeps the registration until the device is revoked: it has no call to remove one.
+
+To see how the app handles a notification, push a payload shaped like the server's to the simulator while the app is in the background:
+
+```bash
+cat > payload.json <<'EOF'
+{"aps":{"alert":{"title":"Alfred","body":"报告写好了"},"sound":"default","thread-id":"chat"},"eventId":42,"runId":"k7m2qa"}
+EOF
+xcrun simctl push <udid> com.example.alfred payload.json
+```
+
+The simulator asks for notification permission the first time the app pairs; allow it. `PushUITests` does this whole check (see Test).
+
+### Share Extension
+
+Share one web page, PDF or image from any app (the activation rule in `project.yml` lets exactly one through). A small sheet shows what is shared, a note field and `发送`. Without credentials it says `请先在 Alfred 里完成配对` and offers `关闭`. `ShareModel` (in `Shared/`) holds the logic, and `SharedContentLoader` reads what the host app handed over.
+
+- **A page** is one `message.send`: the note, a blank line, then the page's title (when the host gave one, cut to 300 characters) and the address. Only `http` and `https` addresses are pages.
+- **A PDF or an image** is copied by the file system into the extension's scratch area (never read into memory, because an extension has little of it) and uploaded from there with `upload(fileAt:)`; then a `message.send` names the file and carries the note, which may be empty. An image in a format Claude cannot read, HEIC among them, is written as a JPEG by ImageIO straight from the system's file. A file over 50 MiB is refused before it is copied. The file is named as the host app names it, with the extension of the copy.
+- **Sending** shows progress. On success the request completes. On a failure the sheet shows the reason and `重试`: a file that was saved is not uploaded again, and the message keeps its client id, so one that did arrive is not stored twice.
 
 ## Build for the simulator
 
@@ -100,7 +130,7 @@ Run the AlfredKit tests on macOS with Swift 6.0 or later: `swift test --package-
 
 The app has two test targets in the `Alfred` scheme. Use a simulator of your own; `xcrun simctl create "alfred-test" com.apple.CoreSimulator.SimDeviceType.iPhone-18-Pro com.apple.CoreSimulator.SimRuntime.iOS-27-0` prints its id, and `xcrun simctl delete <id>` removes it. Build with the default signing (see Pairing), and add `-collect-test-diagnostics never` so a failed run does not wait on simulator diagnostics.
 
-- `AlfredTests` are unit tests of `AppModel` on a stubbed `URLSession`: pairing, unpairing, sending and retrying, the stream's restart and its errors, attachments (the limits, the upload order, a failed upload and its retry, photos becoming JPEGs) and answering questions. They also cover the runs and documents lists, the viewer chosen by extension, the Markdown blocks, and the isolation of the report web view (the navigation policy, the rules, and a real `WKWebView` loading a page).
+- `AlfredTests` are unit tests of `AppModel` on a stubbed `URLSession`: pairing, unpairing, sending and retrying, the stream's restart and its errors, attachments (the limits, the upload order, a failed upload and its retry, photos becoming JPEGs) and answering questions. They also cover the runs and documents lists, the viewer chosen by extension, the Markdown blocks, and the isolation of the report web view (the navigation policy, the rules, and a real `WKWebView` loading a page). `PushTests` covers the token as lowercase hex, the registration body and its environment, registering again, the access errors, the permission calls, the foreground rule, reading `eventId` and `runId` from the payload, and what a tap opens. `ShareTests` covers the extension's logic: no credentials, a page with a title and a note as one `message.send`, a PDF as an upload and then a `message.send` with the file, a HEIC image converted to a JPEG, a failed send and its retry, and `SharedContentLoader` on real `NSItemProvider`s.
 
   ```bash
   xcodegen generate --spec ios/project.yml
@@ -114,6 +144,18 @@ The app has two test targets in the `Alfred` scheme. Use a simulator of your own
   ```
 
   `QuestionsUITests` asks the model to put a question (red or blue) with `AskUserQuestion`, then answers it three ways in three tests: it taps an option on the question card and checks that the card shows the answer and that a reply names the color; it types an answer in the composer; it stops the run and checks that the card says `已取消`. Each test costs a fraction of a cent. The system photo and file pickers are not driven by the UI tests.
+
+  `PushUITests` checks notifications end to end. A test in the simulator cannot call `xcrun simctl push`, so a loop outside it does: the test writes `ready-<n>` into the directory named by `TEST_RUNNER_ALFRED_PUSH_DIR` whenever it wants a push, and the loop pushes the `payload.json` the test wrote there. The test sends `/status` eight times so the first reply is far above the screen, and writes a payload that names that reply. With the chat on screen it checks that no banner shows; on the 运行 tab it checks that one does; with the app in the background it taps the banner and checks that the chat tab is selected and the first reply is on screen. It answers the system's notification question with Allow.
+
+  ```bash
+  # shell 1: the test
+  mkdir -p /tmp/push-check && rm -f /tmp/push-check/*
+  TEST_RUNNER_ALFRED_PUSH_DIR=/tmp/push-check TEST_RUNNER_ALFRED_PAIRING='{"version":1,…}' xcodebuild test -project ios/Alfred.xcodeproj -scheme Alfred -destination 'id=<udid>' -derivedDataPath ios/build -only-testing:AlfredUITests/PushUITests -collect-test-diagnostics never
+  # shell 2: pushes whenever the test asks, until it is done
+  n=1; until [ -e /tmp/push-check/done ]; do if [ -e /tmp/push-check/ready-$n ]; then xcrun simctl push <udid> com.example.alfred /tmp/push-check/payload.json; n=$((n+1)); fi; sleep 0.5; done
+  ```
+
+  `ShareUITests` shares the newest photo of the simulator's library from the Photos app to Alfred, with a note, and checks that the message and its file arrive in the chat; a second test leaves the app unpaired and checks that the sheet says `请先在 Alfred 里完成配对` and closes with `关闭`. Add a photo first (`xcrun simctl addmedia <udid> <image>`). The extension is found by its name in the share sheet; Photos' own controls are found by their identifiers, which may change with the system.
 
   Without `ALFRED_PAIRING` the tests skip themselves, so a plain test run needs no stack. Each test starts from the pairing screen whatever the app was left in, so they can run again against the same stack or a new one. Server replies are waited for 30 s and model replies 120 s.
 

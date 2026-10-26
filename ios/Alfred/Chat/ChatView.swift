@@ -86,6 +86,12 @@ private struct MessageList: View {
             .onChange(of: contentSignature) {
                 proxy.scrollTo(bottom, anchor: .bottom)
             }
+            // A tapped notification names a message; this comes after the scroll to the bottom, so it wins.
+            .onChange(of: model.revealRequest, initial: true) { _, request in
+                guard let request else { return }
+                proxy.scrollTo(request.itemId, anchor: .center)
+                model.revealHandled(request)
+            }
         }
     }
 

@@ -2,6 +2,13 @@ import AlfredKit
 import Foundation
 import Observation
 
+/// The app's tabs. The model owns the one on screen so a notification can open the chat.
+enum AppTab: Hashable {
+    case chat
+    case runs
+    case documents
+}
+
 /// What the app knows and does: whether it is paired, the stream of events from Alfred and the timeline they
 /// build, and the owner's sends. Views read it and call it; they hold no state of their own beyond what they edit.
 @MainActor
@@ -42,6 +49,13 @@ final class AppModel {
         var id: String { runId }
     }
 
+    /// A message or a question card the chat should scroll to. `number` is new for each request, so asking for the same
+    /// row twice scrolls twice.
+    struct RevealRequest: Hashable {
+        let itemId: String
+        let number: Int
+    }
+
     /// The device's credentials; `nil` until it is paired.
     private(set) var credentials: Credentials?
     private(set) var timeline = Timeline()
@@ -66,10 +80,25 @@ final class AppModel {
     private(set) var answerFailures: [String: String] = [:]
     /// How many calls to `attach` are bringing files in.
     private var stagingCount = 0
+    /// The tab on screen.
+    var selectedTab = AppTab.chat
+    /// Where the chat should scroll to, until the chat has done it.
+    private(set) var revealRequest: RevealRequest?
 
     @ObservationIgnored private let store: any CredentialStore
     @ObservationIgnored private let session: URLSession
     @ObservationIgnored private let makeClientId: () -> String
+    @ObservationIgnored private let push: any PushSystem
+    /// The APNs environment this build registers with; `nil` registers nothing.
+    @ObservationIgnored private let pushEnvironment: PushEnvironment?
+    /// The APNs device token the system last handed over.
+    @ObservationIgnored private var pushToken: Data?
+    /// The registration Alfred accepted for these credentials, so the same token is not sent again.
+    @ObservationIgnored private var registeredPush: PushRegistration?
+    /// The timeline row of each stored message and question, by the id of the event that created it. A notification
+    /// names an event.
+    @ObservationIgnored private var itemIdsByEvent: [Int64: String] = [:]
+    @ObservationIgnored private var revealCount = 0
     /// Whether the scene is in the foreground. The stream runs only then.
     @ObservationIgnored private var isForeground = false
     @ObservationIgnored private var streamTask: Task<Void, Never>?
@@ -79,17 +108,22 @@ final class AppModel {
     init(
         store: any CredentialStore,
         session: URLSession = .shared,
+        push: any PushSystem = NoPushSystem(),
+        pushEnvironment: PushEnvironment? = nil,
         makeClientId: @escaping () -> String = { "c-" + UUID().uuidString.lowercased() }
     ) {
         self.store = store
         self.session = session
+        self.push = push
+        self.pushEnvironment = pushEnvironment
         self.makeClientId = makeClientId
         credentials = try? store.load()
     }
 
-    /// The model the app runs on: credentials from the keychain, requests on the shared session.
+    /// The model the app runs on: credentials from the keychain, requests on the shared session, notifications from
+    /// the system, registered for the APNs environment the build was signed for.
     static func live() -> AppModel {
-        AppModel(store: AppKeychain.store())
+        AppModel(store: AppKeychain.store(), push: LivePushSystem(), pushEnvironment: PushToken.environment())
     }
 
     var isPaired: Bool {
@@ -131,6 +165,8 @@ final class AppModel {
         reset()
         credentials = candidate
         startStreamIfNeeded()
+        startPush()
+        await registerPushIfPossible()
     }
 
     /// Forgets the pairing: deletes the credentials and the timeline, and returns to the pairing screen.
@@ -145,6 +181,8 @@ final class AppModel {
         reset()
         credentials = nil
         pairingFailure = nil
+        push.unregisterForRemoteNotifications()
+        pushToken = nil
     }
 
     private func reset() {
@@ -157,6 +195,9 @@ final class AppModel {
         answerFailures = [:]
         streamFailure = nil
         isConnected = false
+        registeredPush = nil
+        itemIdsByEvent = [:]
+        revealRequest = nil
     }
 
     private static func pairing(in text: String) -> Pairing? {
@@ -225,6 +266,7 @@ final class AppModel {
             isConnected = true
         case let .received(event):
             timeline.apply(event)
+            trackItem(of: event)
             if case let .event(stored) = event, case let .messageCreated(message) = stored.payload, let clientId = message.clientId {
                 failedClientIds.remove(clientId)
                 if let sent = outgoingAttachments.removeValue(forKey: clientId) {
@@ -244,6 +286,78 @@ final class AppModel {
     private func noteAccess(_ error: any Error) {
         guard let error = error as? AlfredError, error == .unauthorized || error == .forbidden else { return }
         streamFailure = error
+    }
+
+    // MARK: Push
+
+    /// Asks the owner for permission to notify (alert, sound, badge) and the system for an APNs token. It runs when the
+    /// app starts paired and when a pairing succeeds; the system asks the owner only once. The token arrives in
+    /// `registerPushToken`.
+    func startPush() {
+        guard isPaired else { return }
+        push.requestAuthorization()
+        push.registerForRemoteNotifications()
+    }
+
+    /// The system handed over the APNs token, at launch or because it changed: register it with Alfred. A token that
+    /// came before the pairing is registered once the app is paired. A 401 or 403 is an access error, and the pairing
+    /// flow shows it; any other failure leaves the token unregistered, and the next launch sends it again.
+    func registerPushToken(_ token: Data) async {
+        pushToken = token
+        await registerPushIfPossible()
+    }
+
+    private func registerPushIfPossible() async {
+        guard let client, let credentials, let pushToken, let pushEnvironment else { return }
+        let registration = PushRegistration(token: PushToken.hex(pushToken), environment: pushEnvironment)
+        guard registration != registeredPush else { return }
+        do {
+            try await client.registerPush(registration)
+            // The pairing may have changed while the request was out.
+            if self.credentials == credentials {
+                registeredPush = registration
+            }
+        } catch {
+            if self.credentials == credentials {
+                noteAccess(error)
+            }
+        }
+    }
+
+    /// Whether the chat is what the owner is looking at: the app is active, paired and showing the chat tab. A
+    /// notification that arrives then is not shown, because the chat already has the message.
+    var isChatVisible: Bool {
+        isForeground && isPaired && streamFailure == nil && selectedTab == .chat
+    }
+
+    /// The owner tapped a notification: show the chat, scrolled to the message or question it was about when the
+    /// timeline has it.
+    func openChat(for target: NotificationTarget) {
+        selectedTab = .chat
+        guard let eventId = target.eventId, let itemId = itemIdsByEvent[eventId] else { return }
+        revealCount += 1
+        revealRequest = RevealRequest(itemId: itemId, number: revealCount)
+    }
+
+    /// The chat scrolled to a request.
+    func revealHandled(_ request: RevealRequest) {
+        if revealRequest == request {
+            revealRequest = nil
+        }
+    }
+
+    private func trackItem(of event: StreamEvent) {
+        guard case let .event(stored) = event else { return }
+        switch stored.payload {
+        case let .messageCreated(message):
+            itemIdsByEvent[stored.id] = TimelineItem.message(message).id
+        case let .questionAsked(asked):
+            if let record = timeline.questions.first(where: { $0.id == asked.id }) {
+                itemIdsByEvent[stored.id] = TimelineItem.question(record).id
+            }
+        default:
+            break
+        }
     }
 
     // MARK: Sending
