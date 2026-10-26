@@ -101,7 +101,8 @@ private struct QuoteText: View {
 
 /// What the owner can do with a draft or an annotation that went back.
 struct AnnotationActions {
-    var edit: (StoredDraft) -> Void
+    /// Keeps the new words of a draft.
+    var saveComment: (StoredDraft, String) -> Void
     var delete: (StoredDraft) -> Void
     var makeWholeDocument: (StoredDraft) -> Void
     var reedit: (Annotation) -> Void
@@ -117,6 +118,9 @@ struct AnnotationCard: View {
     let actions: AnnotationActions
     /// Whether the card names its state. The list does not: the section it is under does.
     var showsState = true
+    /// The draft being edited, in a sheet this card presents: the list and the card sheet are sheets themselves, and a
+    /// sheet can only be presented by what is inside the one before.
+    @State private var editing: StoredDraft?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -153,6 +157,11 @@ struct AnnotationCard: View {
         .padding(.vertical, 4)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("annotation.row.\(identifierName).\(row.id)")
+        .sheet(item: $editing) { draft in
+            AnnotationEditorSheet(title: "编辑批注", quote: row.quote, comment: draft.comment) { comment in
+                actions.saveComment(draft, comment)
+            }
+        }
     }
 
     private var identifierName: String {
@@ -200,7 +209,7 @@ struct AnnotationCard: View {
         switch row.source {
         case let .draft(draft):
             HStack(spacing: 16) {
-                Button("编辑") { actions.edit(draft) }
+                Button("编辑") { editing = draft }
                     .accessibilityIdentifier("annotation.edit")
                 if section == .misfit {
                     Button("改为整篇批注") { actions.makeWholeDocument(draft) }
@@ -274,17 +283,27 @@ struct AnnotationCardSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        Group {
-            if let found {
-                ScrollView {
-                    AnnotationCard(row: found.row, section: found.section, actions: actions)
-                        .padding()
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16))
-                        .padding()
+        NavigationStack {
+            Group {
+                if let found {
+                    ScrollView {
+                        AnnotationCard(row: found.row, section: found.section, actions: actions)
+                            .padding()
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16))
+                            .padding()
+                    }
+                } else {
+                    Color.clear.onAppear { dismiss() }
                 }
-            } else {
-                Color.clear.onAppear { dismiss() }
+            }
+            .navigationTitle("批注")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("完成") { dismiss() }
+                        .accessibilityIdentifier("annotation.card.done")
+                }
             }
         }
         .presentationDetents([.medium, .large])

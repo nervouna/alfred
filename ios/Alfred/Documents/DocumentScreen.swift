@@ -48,17 +48,15 @@ struct DocumentScreen: View {
         let text: AnchorText
     }
 
-    /// What the comment sheet is for.
+    /// What the sheet that writes a new comment is for.
     enum Editor: Identifiable {
         case passage(AnnotationTarget)
         case wholeDocument
-        case draft(StoredDraft)
 
         var id: String {
             switch self {
             case .passage: "passage"
             case .wholeDocument: "whole"
-            case let .draft(draft): "draft." + draft.id
             }
         }
     }
@@ -164,7 +162,7 @@ struct DocumentScreen: View {
 
     private var actions: AnnotationActions {
         AnnotationActions(
-            edit: { editor = .draft($0) },
+            saveComment: { draft, comment in model.annotationDrafts.setComment(comment, of: draft.id) },
             delete: { model.annotationDrafts.remove(ids: [$0.id]) },
             makeWholeDocument: { draft in
                 if let document { model.annotationDrafts.makeWholeDocument(draft.id, version: document.version) }
@@ -361,10 +359,6 @@ struct DocumentScreen: View {
             AnnotationEditorSheet(title: "整篇批注", quote: nil) { comment in
                 guard let document else { return }
                 model.annotationDrafts.add(documentId: documentId, version: document.version, target: .document, comment: comment)
-            }
-        case let .draft(draft):
-            AnnotationEditorSheet(title: "编辑批注", quote: quote(of: draft.target), comment: draft.comment) { comment in
-                model.annotationDrafts.setComment(comment, of: draft.id)
             }
         }
     }
