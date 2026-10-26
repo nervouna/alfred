@@ -28,7 +28,7 @@ export interface Usage {
   cacheRead: number;
   /** Cache writes with the 5-minute TTL. */
   cacheWrite: number;
-  /** Cache writes with the 1-hour TTL. */
+  /** Cache writes with the 1-hour TTL, and those whose TTL the usage does not give. */
   cacheWrite1h: number;
   webSearches: number;
 }
@@ -52,8 +52,8 @@ function priceUsage(u: Usage, price: number): number {
 export function unitPrices(modelUsage: Record<string, ModelUsage>): Record<string, number> {
   const prices: Record<string, number> = {};
   for (const [model, u] of Object.entries(modelUsage)) {
-    // modelUsage does not split the cache writes by TTL, so they are weighted at the 5-minute rate.
-    const tokens = weighted({ input: u.inputTokens, output: u.outputTokens, cacheRead: u.cacheReadInputTokens, cacheWrite: u.cacheCreationInputTokens, cacheWrite1h: 0 });
+    // Every agent call caches for an hour (#125) and modelUsage does not split the cache writes by TTL, so they are weighted at the 1-hour rate.
+    const tokens = weighted({ input: u.inputTokens, output: u.outputTokens, cacheRead: u.cacheReadInputTokens, cacheWrite: 0, cacheWrite1h: u.cacheCreationInputTokens });
     if (tokens > 0) prices[model] = Math.max(0, u.costUSD - u.webSearchRequests * WEB_SEARCH_USD) / tokens;
   }
   return prices;
@@ -73,9 +73,9 @@ const count = (v: unknown): number => (typeof v === "number" ? v : 0);
 
 /**
  * A response's usage. Cache writes are split by TTL where the usage gives the split (`cache_creation`); a write without a
- * TTL counts with `unsplitTtl`.
+ * TTL counts as 1-hour, as every agent call caches for an hour (#125).
  */
-function usageOf(u: ApiUsage | undefined, unsplitTtl: "5m" | "1h"): Usage {
+function usageOf(u: ApiUsage | undefined): Usage {
   const split = (u?.cache_creation ?? {}) as Record<string, unknown>;
   const fiveMinutes = count(split.ephemeral_5m_input_tokens);
   const oneHour = count(split.ephemeral_1h_input_tokens);
@@ -84,8 +84,8 @@ function usageOf(u: ApiUsage | undefined, unsplitTtl: "5m" | "1h"): Usage {
     input: count(u?.input_tokens),
     output: count(u?.output_tokens),
     cacheRead: count(u?.cache_read_input_tokens),
-    cacheWrite: fiveMinutes + (unsplitTtl === "5m" ? unsplit : 0),
-    cacheWrite1h: oneHour + (unsplitTtl === "1h" ? unsplit : 0),
+    cacheWrite: fiveMinutes,
+    cacheWrite1h: oneHour + unsplit,
     webSearches: count((u?.server_tool_use as Record<string, unknown> | null | undefined)?.web_search_requests),
   };
 }
@@ -140,7 +140,7 @@ export class TranscriptUsage {
     }
     const m = entry.message;
     if (entry.type !== "assistant" || typeof m?.id !== "string" || typeof m.model !== "string" || !m.usage) return;
-    this.responses.set(m.id, { model: m.model, usage: usageOf(m.usage, "5m") });
+    this.responses.set(m.id, { model: m.model, usage: usageOf(m.usage) });
   }
 
   /** USD at `prices` (per input-token equivalent, by model); undefined while a model it used has no price. */
@@ -173,7 +173,7 @@ export class ResponseLedger {
     const stream = m.parent_tool_use_id ?? "";
     const { event } = m;
     if (event.type === "message_start") {
-      this.responses.set(event.message.id, { model: event.message.model, usage: usageOf(event.message.usage, "1h") });
+      this.responses.set(event.message.id, { model: event.message.model, usage: usageOf(event.message.usage) });
       this.open.set(stream, event.message.id);
     } else if (event.type === "message_delta") {
       const response = this.responses.get(this.open.get(stream) ?? "");

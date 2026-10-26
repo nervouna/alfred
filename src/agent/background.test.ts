@@ -110,14 +110,14 @@ test("a subagent's cost comes from its transcript, live and once more when its r
   bg.progressed(run);
   assert.equal(run.recorder.record.costUsd, 0, "no price for the model before a result reports it");
 
-  // $2 per million input tokens: 2 + 5×1000 + 1.25×10000 = 17502 input-token equivalents.
-  bg.settleEnded(modelUsage(model, 0.035004, { input: 2, output: 1000, cacheRead: 0, cacheWrite: 10_000 }));
-  assert.ok(Math.abs(run.recorder.record.costUsd - 0.035004) < 1e-9, "the result reprices a running subagent");
+  // $2 per million input tokens: 2 + 5×1000 + 2×10000 = 25002 input-token equivalents, the writes being 1-hour.
+  bg.settleEnded(modelUsage(model, 0.050004, { input: 2, output: 1000, cacheRead: 0, cacheWrite: 10_000 }));
+  assert.ok(Math.abs(run.recorder.record.costUsd - 0.050004) < 1e-9, "the result reprices a running subagent");
 
   fs.appendFileSync(transcript, response("msg_2", model, { input: 2, output: 500, cacheRead: 11_000, cacheWrite: 600 }));
   bg.progressed(run);
-  // 2 + 2500 + 1100 + 750 = 4352 more.
-  const live = 0.035004 + 0.008704;
+  // 2 + 2500 + 1100 + 1200 = 4802 more.
+  const live = 0.050004 + 0.009604;
   assert.ok(Math.abs(run.recorder.record.costUsd - live) < 1e-9);
   assert.equal(run.recorder.record.costEstimated, true);
 
