@@ -1,6 +1,6 @@
 import XCTest
 
-/// Pairs the app with a running `scripts/app-dev.ts`, has Alfred write a file, and follows it through the 运行 and
+/// Pairs the app with a running `scripts/app-dev.ts`, has Alfred write a file, and follows it through the 任务 and
 /// 文档 tabs and the viewer. The pairing comes from the environment variable `ALFRED_PAIRING` (pass
 /// `TEST_RUNNER_ALFRED_PAIRING` to xcodebuild); without it the tests skip themselves, so CI and plain test runs
 /// need no stack. Each test runs the model once, for about a tenth of a cent.
@@ -13,7 +13,7 @@ final class RunsUITests: XCTestCase {
         let app = try launchPaired()
 
         // The stack may hold runs from an earlier test; this one looks for the run it starts.
-        openTab("运行", in: app)
+        openTab("任务", in: app)
         let knownRuns = settledRunRows(in: app)
 
         openTab("对话", in: app)
@@ -21,8 +21,8 @@ final class RunsUITests: XCTestCase {
         send("在 notes/hi.md 里写一行“你好”，然后只回复“好了”", in: app)
         XCTAssertTrue(newReply(beforeAsk, containing: "好了", in: app).waitForExistence(timeout: modelPatience), "Alfred did not answer\n\(app.debugDescription)")
 
-        // The 运行 tab lists the run, finished.
-        openTab("运行", in: app)
+        // The 任务 tab lists the run, finished.
+        openTab("任务", in: app)
         let row = try newRunRow(excluding: knownRuns, in: app)
         XCTAssertTrue(wait(timeout: patience) { row.label.contains("完成") }, "the run never showed as 完成: \(row.label)")
 
@@ -161,7 +161,7 @@ final class RunsUITests: XCTestCase {
 
     // MARK: Runs
 
-    /// The ids of the runs on the 运行 tab, once its list has stopped changing.
+    /// The ids of the runs on the 任务 tab, once its list has stopped changing.
     @MainActor
     private func settledRunRows(in app: XCUIApplication) -> Set<String> {
         _ = wait(timeout: patience) { !runRowIds(in: app).isEmpty || app.staticTexts["还没有运行"].exists }
@@ -182,7 +182,7 @@ final class RunsUITests: XCTestCase {
         XCTAssertTrue(wait(timeout: patience) {
             fresh = runRowIds(in: app).first { !known.contains($0) }
             return fresh != nil
-        }, "the 运行 tab shows no new run\n\(app.debugDescription)")
+        }, "the 任务 tab shows no new run\n\(app.debugDescription)")
         return element(try XCTUnwrap(fresh), in: app)
     }
 

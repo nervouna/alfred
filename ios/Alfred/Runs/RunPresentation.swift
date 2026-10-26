@@ -33,9 +33,11 @@ enum RunPresentation {
         date.formatted(.relative(presentation: .numeric, unitsStyle: .abbreviated).locale(locale))
     }
 
-    /// A date with its time, for a list of files: `10月26日 08:30`.
-    static func dateTime(_ date: Date) -> String {
-        date.formatted(.dateTime.locale(locale).month().day().hour().minute())
+    /// A date with its time, for a list of files: `10月26日 08:30`. It reads on the clock of `zone`, the device's by default.
+    static func dateTime(_ date: Date, in zone: TimeZone = .current) -> String {
+        var style = Date.FormatStyle.dateTime.locale(locale)
+        style.timeZone = zone
+        return date.formatted(style.month().day().hour().minute())
     }
 
     /// A time of day to the second, for a run's steps: `08:31:02`.

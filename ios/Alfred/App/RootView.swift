@@ -32,8 +32,8 @@ struct RootView: View {
                 Tab("对话", systemImage: "bubble.left", value: AppTab.chat) {
                     ChatView(model: model)
                 }
-                Tab("运行", systemImage: "gearshape.2", value: AppTab.runs) {
-                    RunsView()
+                Tab("任务", systemImage: "checklist", value: AppTab.tasks) {
+                    TasksView()
                 }
                 Tab("文档", systemImage: "doc.text", value: AppTab.documents) {
                     DocumentsView()

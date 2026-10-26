@@ -416,7 +416,7 @@ src/cli.ts          run | status | setup-pdf | pdf | memory-scan | workbench | a
 plugin/             the baked skills plugin `alfred`
 scripts/agent-smoke.ts  local agent run without the app
 ios/project.yml     XcodeGen spec for the iOS app and its Share Extension (the .xcodeproj is generated)
-ios/Alfred/         the iOS app: the 对话, 运行 and 文档 tabs, the file viewer, attachments, questions, push, pairing, the app entry point and the app icon
+ios/Alfred/         the iOS app: the 对话, 任务 and 文档 tabs, the file viewer, attachments, questions, push, pairing, the app entry point and the app icon
 ios/AlfredShare/    the iOS Share Extension: a page, PDF or image from another app, sent to Alfred
 ios/Shared/         code the app and the Share Extension both compile: the keychain store, the upload limit, photo conversion and the share logic
 ios/AlfredTests/    unit tests of the app and of the shared code, on a stubbed URLSession

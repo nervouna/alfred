@@ -62,16 +62,16 @@ final class PushUITests: XCTestCase {
         XCTAssertFalse(banner().waitForExistence(timeout: 8), "a notification was shown over the chat\n\(springboard.debugDescription)")
 
         // Another tab is on screen: the notification shows as a banner.
-        app.tabBars.buttons["运行"].tap()
+        app.tabBars.buttons["任务"].tap()
         push(2, handshake)
-        XCTAssertTrue(banner().waitForExistence(timeout: patience), "no banner over the runs tab\n\(springboard.debugDescription)")
+        XCTAssertTrue(banner().waitForExistence(timeout: patience), "no banner over the tasks tab\n\(springboard.debugDescription)")
         XCTAssertTrue(banner().waitForNonExistence(timeout: patience), "the banner stayed")
 
         // The app is in the background: the notification is shown by the system, and tapping it opens the chat at the
         // message. The tap switches tabs, which makes a new list, and a list that is still laying out can lose a scroll
         // made at once; that is a matter of timing, so the tap is made three times.
         for round in 0..<3 {
-            if round > 0 { app.tabBars.buttons["运行"].tap() }
+            if round > 0 { app.tabBars.buttons["任务"].tap() }
             XCUIDevice.shared.press(.home)
             push(3 + round, handshake)
             let tapped = banner()
