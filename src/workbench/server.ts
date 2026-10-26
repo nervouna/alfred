@@ -17,9 +17,11 @@ import path from "node:path";
 
 import { resolveInside } from "../agent/guard.ts";
 import { loadMemories } from "../agent/memory.ts";
-import { PushRegistrationSchema, RunSchema, StepSchema } from "../api/schema.ts";
-import type { Run, RunDetail, TaskDetail } from "../api/schema.ts";
+import { DocumentDetailSchema, PushRegistrationSchema, RunSchema, StepSchema } from "../api/schema.ts";
+import type { DocumentDetail, DocumentList, Run, RunDetail, TaskDetail } from "../api/schema.ts";
 import { apiSocketPath } from "../api/server.ts";
+import { readDocumentFile } from "../documents/store.ts";
+import { VERSIONS_GIT_DIR, Versions } from "../documents/versions.ts";
 import { describeError, log } from "../log.ts";
 import type { AccessVerifier } from "./access.ts";
 import { allRuns, alfredStatus, listSessions, readTaskList, readTranscript, runDetail, spendByDay, tailLog } from "./data.ts";
@@ -220,11 +222,18 @@ const RUN_PATH = /^\/api\/runs\/([2-9a-hjkmnp-z]{6})$/;
 const TASK_PREFIX = "/api/tasks/";
 /** A task id has the run id's alphabet and length. */
 const TASK_ID = /^[2-9a-hjkmnp-z]{6}$/;
+const DOCUMENT_PREFIX = "/api/documents/";
+/** A document id has the run id's alphabet and length. */
+const DOCUMENT_ID = /^[2-9a-hjkmnp-z]{6}$/;
+/** A version is a commit id: 40 lowercase hex characters. */
+const COMMIT_ID = /^[0-9a-f]{40}$/;
 const FILE_PATH = "/api/files/";
 /** How many runs GET /api/runs lists, newest first. */
 const LISTED_RUNS = 100;
 /** How many of a task's runs GET /api/tasks/<id> lists, newest first. */
 const LISTED_TASK_RUNS = 50;
+/** How many of a document's revision runs GET /api/documents/<id> lists, newest first. */
+const LISTED_DOCUMENT_RUNS = 50;
 /** The largest POST /api/push body: a registration is a token and an environment. */
 const MAX_PUSH_BYTES = 4096;
 /** On close, how long a request in flight gets to finish before its connection is cut. */
@@ -365,6 +374,48 @@ function taskDetailReply(id: string): Response {
 }
 
 /**
+ * GET /api/documents: the documents the store keeps in documents.json, most recently updated first. A missing file is
+ * an empty list; a file that does not fit fails the request, and is logged.
+ */
+function documentListReply(): Response {
+  const documents = readDocumentFile().documents.map((entry) => entry.document);
+  documents.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+  const body: DocumentList = { documents };
+  return jsonReply(200, body);
+}
+
+/**
+ * GET /api/documents/<id>: the document, its versions (newest first, the first being the current one), its annotations
+ * (newest first) and its revision runs (newest first, at most 50). A malformed or unknown id is 404; runs whose record
+ * does not fit the client's schema are left out and logged, as GET /api/tasks/<id> leaves them out. A body that does
+ * not fit DocumentDetailSchema fails the request, and is logged.
+ */
+function documentDetailReply(id: string): Response {
+  const notFound = () => jsonError(404, "There is no such document.");
+  if (!DOCUMENT_ID.test(id)) return notFound();
+  const file = readDocumentFile();
+  const entry = file.documents.find((other) => other.document.id === id);
+  if (!entry) return notFound();
+  const runs: Run[] = [];
+  let left = 0;
+  for (const record of allRuns()) {
+    if (record.documentId !== id) continue;
+    if (runs.length === LISTED_DOCUMENT_RUNS) break;
+    const parsed = RunSchema.safeParse(record);
+    if (parsed.success) runs.push(parsed.data);
+    else left++;
+  }
+  if (left) log.warn(`workbench left out ${left} run record(s) of document ${id} that do not fit the client's schema`);
+  const body: DocumentDetail = DocumentDetailSchema.parse({
+    document: entry.document,
+    versions: entry.versions,
+    annotations: file.annotations.filter((annotation) => annotation.documentId === id),
+    runs,
+  });
+  return jsonReply(200, body);
+}
+
+/**
  * POST /api/push: the device's APNs registration, replacing its earlier one; 204. A body that is not a
  * PushRegistration is 400 with the first problem found; a device revoked meanwhile is 401.
  */
@@ -392,9 +443,9 @@ async function pushRegistrationReply(req: http.IncomingMessage, deviceId: string
 /**
  * GET /api/files/<path>: a workspace file's bytes, typed by extension as the pages type them, under the sandbox policy.
  * An HTML report comes with its workspace images inlined, as the report page shows it; one over the preview cap is
- * sent as it is, since the page would refuse it.
+ * sent as it is, since the page would refuse it. With `?version=<commit>` it is the file as it was at that commit.
  */
-function fileReply(workspace: string, rest: string): Response {
+function fileReply(workspace: string, rest: string, query: URLSearchParams): Response | Promise<Response> {
   const notFound = () => jsonError(404, "There is no such file.");
   let rel: string;
   try {
@@ -403,6 +454,7 @@ function fileReply(workspace: string, rest: string): Response {
     return notFound();
   }
   if (rel.includes("\0")) return notFound();
+  if (query.has("version")) return versionFileReply(workspace, rel, query.getAll("version"));
   let target: ReturnType<typeof workspacePath>;
   try {
     target = workspacePath(workspace, rel);
@@ -420,6 +472,38 @@ function fileReply(workspace: string, rest: string): Response {
   }
   headers["Content-Length"] = String(target.stat.size);
   return { headers, body: fs.createReadStream(target.real) };
+}
+
+/**
+ * GET /api/files/<path>?version=<commit>: the file's bytes at that commit of the workspace's history, typed and sandboxed
+ * as the live file is. An HTML report gets its workspace images inlined from the live workspace, under the same cap.
+ * Anything the history does not hold is 404: a version that is not one commit id, a commit that is not in the history,
+ * a path that is not a file in that commit, and a path the history refuses (outside the workspace, inside .git).
+ * The refusal of a path or commit is logged with its reason.
+ */
+async function versionFileReply(workspace: string, rel: string, asked: string[]): Promise<Response> {
+  const notFound = () => jsonError(404, "There is no such file.");
+  const [version] = asked;
+  if (asked.length !== 1 || version === undefined || !COMMIT_ID.test(version)) return notFound();
+  const real = resolveInside(workspace, rel || ".");
+  if (!real) return notFound();
+  let bytes: Buffer | undefined;
+  try {
+    bytes = await new Versions({ workspace, gitDir: VERSIONS_GIT_DIR }).show(version, rel);
+  } catch (err) {
+    log.warn(`workbench refused ${rel} at ${version}: ${describeError(err)}`);
+    return notFound();
+  }
+  if (bytes === undefined) return notFound();
+  const ext = path.extname(real).toLowerCase();
+  const headers: Record<string, string> = { "Content-Type": rawContentType(ext), "Content-Security-Policy": "sandbox" };
+  if (HTML_EXTS.has(ext) && bytes.length <= MAX_PREVIEW_BYTES) {
+    const markup = inlineImages(bytes.toString("utf8"), real, workspace);
+    headers["Content-Length"] = String(Buffer.byteLength(markup));
+    return { headers, body: markup };
+  }
+  headers["Content-Length"] = String(bytes.length);
+  return { headers, body: bytes };
 }
 
 /** The app's way in: the Access JWT (owner or service token) on the tunnel, then a paired device's bearer token everywhere. */
@@ -450,10 +534,12 @@ async function apiRoute(req: http.IncomingMessage, url: URL, ctx: ApiContext): P
   if (p === "/api/runs") return only("GET", () => runList());
   if (p === "/api/tasks") return only("GET", () => taskListReply());
   if (p.startsWith(TASK_PREFIX)) return only("GET", () => taskDetailReply(p.slice(TASK_PREFIX.length)));
+  if (p === "/api/documents") return only("GET", () => documentListReply());
+  if (p.startsWith(DOCUMENT_PREFIX)) return only("GET", () => documentDetailReply(p.slice(DOCUMENT_PREFIX.length)));
   if (p === "/api/push") return only("POST", () => pushRegistrationReply(req, device.id, ctx.devices));
   const run = RUN_PATH.exec(p)?.[1];
   if (run) return only("GET", () => runDetailReply(run));
-  if (p.startsWith(FILE_PATH)) return only("GET", () => fileReply(ctx.workspace, p.slice(FILE_PATH.length)));
+  if (p.startsWith(FILE_PATH)) return only("GET", () => fileReply(ctx.workspace, p.slice(FILE_PATH.length), url.searchParams));
   return jsonError(404, "There is no such endpoint.");
 }
 

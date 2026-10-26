@@ -101,6 +101,20 @@ test("a run of a task carries the task id on its file, its event and its line in
   assert.equal(chat.record.taskId, undefined, "a chat run has none");
 });
 
+test("a run of a document carries the document id on its file, its event and its line in runs.jsonl", () => {
+  const events = new EventLog(path.join(tmp, "document-run-events", "events.jsonl"));
+  const run = new RunRecorder({ kind: "revision", title: "改写", documentId: "k7m2qa", events });
+  run.finish("done");
+
+  assert.equal(readRunFile(run.id)?.documentId, "k7m2qa");
+  assert.equal(readRunLog().find((r) => r.id === run.id)?.documentId, "k7m2qa");
+  const updates = events.readSince(0).flatMap((e) => (e.type === "run.updated" ? [e.data] : []));
+  assert.deepEqual(updates.map((r) => [r.status, r.documentId]), [["running", "k7m2qa"], ["done", "k7m2qa"]]);
+  const task = new RunRecorder({ kind: "task", title: "晨报", events });
+  task.finish("done");
+  assert.equal(task.record.documentId, undefined, "a run of no document has none");
+});
+
 test("runs left running by an earlier process are marked lost at startup", () => {
   const live = new RunRecorder({ kind: "task", title: "被打断的任务" });
   const lost = markLostRuns();
