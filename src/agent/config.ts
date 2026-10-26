@@ -173,7 +173,7 @@ export function isSubagentRole(value: unknown): value is SubagentRoleName {
 }
 
 /** Tools the roles go without: only Alfred talks to the user, and a role does its part itself. */
-export const SUBAGENT_DISALLOWED_TOOLS = ["mcp__alfred__deliver", "Agent", "TaskStop"];
+export const SUBAGENT_DISALLOWED_TOOLS = ["mcp__alfred__deliver", "mcp__alfred__reply_annotation", "Agent", "TaskStop"];
 
 /** Rules every subagent gets when it starts, whatever its type (subagents.ts: subagentRulesHook). */
 export const SUBAGENT_RULES = `You are a subagent of Alfred, a personal research assistant. Alfred gave you a brief. Your final message goes back to Alfred, never to the user, so write it for Alfred: what you found or did, in the shape the brief asks for.

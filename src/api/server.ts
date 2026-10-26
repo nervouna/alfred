@@ -50,13 +50,13 @@ export interface TaskCommands {
 }
 
 /** A document command's answer: the body to send, or the status and the reason it was refused. */
-export type DocumentReply<T> = { ok: true; body: T } | { ok: false; status: 404 | 409; error: string };
+export type DocumentReply<T> = { ok: true; body: T } | { ok: false; status: 400 | 404 | 409; error: string };
 
 export interface DocumentCommands {
   /** Starts a revision run that takes the batch, or refuses it. */
   revise(command: DocumentRevise): DocumentReply<RevisionAccepted> | Promise<DocumentReply<RevisionAccepted>>;
-  /** Undoes the document's latest revision, or refuses it. */
-  undo(command: DocumentUndo): DocumentReply<DocumentResult> | Promise<DocumentReply<DocumentResult>>;
+  /** Undoes the document's latest revision, or refuses it. Without it every document.undo answers 503. */
+  undo?(command: DocumentUndo): DocumentReply<DocumentResult> | Promise<DocumentReply<DocumentResult>>;
 }
 
 export interface ApiOptions {
@@ -275,6 +275,7 @@ export async function startApi(opts: ApiOptions): Promise<() => Promise<void>> {
         if (!reply.ok) return sendJson(res, reply.status, { error: reply.error });
         return sendJson(res, 202, reply.body);
       }
+      if (!documents.undo) return sendJson(res, 503, { error: "undo is not available" });
       const reply = await documents.undo(command);
       if (!reply.ok) return sendJson(res, reply.status, { error: reply.error });
       return sendJson(res, 200, reply.body);

@@ -17,6 +17,7 @@ import { TASK_TOOL_NAMES } from "./task-tools.ts";
 
 const AGENT_TOOL = "Agent";
 const DELIVER_TOOL = "mcp__alfred__deliver";
+const REPLY_TOOL = "mcp__alfred__reply_annotation";
 /** The agent type the SDK uses for an Agent call that names none. */
 export const DEFAULT_AGENT_TYPE = "general-purpose";
 
@@ -74,12 +75,13 @@ function deny(reason: string) {
 }
 
 /**
- * Returns a denial reason when a subagent calls deliver or a task tool: only Alfred talks to the user, and
- * only Alfred manages the owner's tasks, with the owner's tap. A role's tool list already leaves them out, but
- * built-in agent types and forked skills get every tool the main thread has.
+ * Returns a denial reason when a subagent calls deliver, reply_annotation or a task tool: only Alfred talks to the user,
+ * only Alfred answers the owner's annotations, and only Alfred manages the owner's tasks, with the owner's tap. A role's
+ * tool list already leaves them out, but built-in agent types and forked skills get every tool the main thread has.
  */
 export function checkSubagentTool(toolName: string): string | undefined {
   if (toolName === DELIVER_TOOL) return "Subagents may not send files: only Alfred talks to the user. Name the file in your final message instead.";
+  if (toolName === REPLY_TOOL) return "Subagents may not answer annotations: only Alfred talks to the user. Say in your final message what you changed for each one instead.";
   if (TASK_TOOL_NAMES.includes(toolName)) {
     return "Subagents may not manage the owner's tasks: only Alfred does, and only when the owner asks. Do not try again; leave it out of your work.";
   }
