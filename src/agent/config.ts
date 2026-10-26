@@ -50,6 +50,20 @@ export function checkSessionIdleHours(): void {
   }
 }
 
+const COMPACT_TOKENS_SETTING = process.env.ALFRED_COMPACT_TOKENS?.trim() || "100000";
+/**
+ * Context size in tokens at which Claude Code compacts the session, in place of its own window for the model; 0 leaves
+ * that window alone. Claude Code's minimum is 100000, so a smaller value compacts as if it were 100000.
+ */
+export const COMPACT_TOKENS = Number(COMPACT_TOKENS_SETTING);
+
+/** Fail at startup on a compaction size that is neither 0 nor a whole number of at least 20000 tokens. */
+export function checkCompactTokens(): void {
+  if (!Number.isSafeInteger(COMPACT_TOKENS) || (COMPACT_TOKENS !== 0 && COMPACT_TOKENS < 20_000)) {
+    throw new Error(`ALFRED_COMPACT_TOKENS must be a whole number of tokens, at least 20000, or 0 (Claude Code's default), got "${COMPACT_TOKENS_SETTING}"`);
+  }
+}
+
 const SCAN_MINUTES_SETTING = process.env.ALFRED_MEMORY_SCAN_MINUTES?.trim() || "60";
 /** Background memory extraction runs this often; 0 turns it off (`cli.ts memory-scan` still works). */
 export const MEMORY_SCAN_MINUTES = Number(SCAN_MINUTES_SETTING);
@@ -209,6 +223,9 @@ export function agentEnv(): Record<string, string> {
     ANTHROPIC_API_KEY: apiKey,
     CLAUDE_CONFIG_DIR: AGENT_CONFIG_DIR,
     CLAUDE_AGENT_SDK_CLIENT_APP: "alfred/0.1.0",
+    // The prompt cache lasts an hour, so a message after a pause reads the prompt back instead of writing it again.
+    ENABLE_PROMPT_CACHING_1H: "1",
+    ...(COMPACT_TOKENS ? { CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(COMPACT_TOKENS) } : {}),
   };
 }
 

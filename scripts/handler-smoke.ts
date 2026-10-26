@@ -40,11 +40,18 @@
 //                task.updated with origin chat and that schedule follows; asked to pause it, a task.updated
 //                with status paused follows and no card is asked; ends with one pass or fail line per check
 //                and the spend
+//   compact      the real handler on haiku, with the SDK's query watched: a 4000-line workspace file is read to
+//                its end, then a short question; ends with one pass or fail line per check: the first turn's
+//                usage writes the prompt cache for an hour, a compaction is reported and logged, the reply names
+//                the file's last line and the short question is answered; then the spend
 //   prompt <text>  one message on the default model, then the spend per model
 
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+
+import { query } from "@anthropic-ai/claude-agent-sdk";
+import type { SDKAssistantMessage, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 
 import { LiveEventSchema } from "../src/api/schema.ts";
 import type { Event, LiveEvent, Message } from "../src/api/schema.ts";
@@ -108,8 +115,7 @@ function summary(): void {
 }
 
 /** A handler behind the command API on a socket in a temp dir, as `run` serves it; `send` posts a message the way the app does. */
-async function startStack() {
-  const handler = newHandler();
+async function startStack(handler: Handler = newHandler()) {
   // A short path: Unix socket paths are limited to about 100 bytes.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "alf-"));
   const socket = path.join(dir, "api.sock");
@@ -841,6 +847,100 @@ async function chatTasks(): Promise<number> {
   return failed;
 }
 
+/** The SDK's query, with each message shown to `observe` on its way to the handler; the messages pass on unchanged. */
+function observed(observe: (m: SDKMessage) => void): typeof query {
+  return (params) => {
+    const q = query(params);
+    return new Proxy(q, {
+      get(target, key) {
+        if (key === Symbol.asyncIterator) {
+          return async function* () {
+            for await (const m of target) {
+              observe(m);
+              yield m;
+            }
+          };
+        }
+        const value: unknown = Reflect.get(target, key, target);
+        return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+  };
+}
+
+/** The compact scenario: a long workspace file is read to its end, which fills the context past the compaction size, then a short question. Returns the number of checks that failed. */
+async function compact(): Promise<number> {
+  let failed = 0;
+  const check = (name: string, problems: string[]) => {
+    if (problems.length) failed++;
+    console.log(`[${problems.length ? "fail" : "pass"}] ${name}${problems.length ? `: ${problems.join("; ")}` : ""}`);
+  };
+
+  const lines = Array.from({ length: 4000 }, (_, i) => `Entry ${i + 1}: the harbour gauge held steady at the usual level, and the tide turned on schedule.`);
+  lines.push("END OF LOG. The code on this last line is LAST-LINE-OK-7319.");
+  const file = path.join(WORKSPACE_DIR, "notes", "compact-log.txt");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, `${lines.join("\n")}\n`);
+  console.log(`[file] ${at()} notes/compact-log.txt: ${lines.length} lines, ${fs.statSync(file).size} bytes`);
+
+  const seen = { compactions: 0, firstUsage: undefined as SDKAssistantMessage["message"]["usage"] | undefined };
+  const handler = createLocalHandler({
+    runQuery: observed((m) => {
+      if (m.type === "assistant" && !seen.firstUsage) seen.firstUsage = m.message.usage;
+      if (m.type === "system" && m.subtype === "compact_boundary") {
+        seen.compactions++;
+        console.log(`[sdk] ${at()} compact_boundary trigger=${m.compact_metadata.trigger} pre_tokens=${m.compact_metadata.pre_tokens} post_tokens=${m.compact_metadata.post_tokens ?? "-"}`);
+      }
+    }),
+  });
+  // The handler's own log lines go to the console, so they are kept here as well.
+  const logged: string[] = [];
+  const consoleLog = console.log;
+  console.log = (...args: unknown[]) => {
+    const line = args.map(String).join(" ");
+    if (line.includes("agent run compacted")) logged.push(line);
+    consoleLog(...args);
+  };
+  const stack = await startStack(handler);
+  try {
+    await stack.send("/model haiku");
+    await stack.send("用 Read 工具把 notes/compact-log.txt 从头读到尾（文件很长，分段读，直到读完最后一行），然后只回一句：最后一行里的代码是什么。");
+    await idle();
+    await stack.send("6 乘以 7 等于几？只回数字。");
+    await idle();
+  } finally {
+    console.log = consoleLog;
+    await stack.stop();
+  }
+
+  const replies = sharedEventLog()
+    .readSince(0, 100_000)
+    .flatMap((e) => (e.type === "message.created" && e.data.direction === "out" && e.data.text.trim() ? [e.data] : []));
+  const first = replies.find((m) => m.text.includes("LAST-LINE-OK-7319"));
+  const answer = replies.at(-1);
+  check("the first reply names the code on the file's last line, so the whole file was read", first ? [] : [`${replies.length} reply(ies), none names it`]);
+  check("a short question after the compaction gets its own reply", answer && answer !== first && answer.text.includes("42") ? [] : [`last reply: ${flat(answer?.text ?? "-").slice(0, 60)}`]);
+
+  const usage = seen.firstUsage;
+  const hour = usage?.cache_creation?.ephemeral_1h_input_tokens ?? 0;
+  console.log(
+    `[usage] first turn: input=${usage?.input_tokens ?? "-"} cache_write=${usage?.cache_creation_input_tokens ?? "-"} ` +
+      `(1h=${hour}, 5m=${usage?.cache_creation?.ephemeral_5m_input_tokens ?? "-"}) cache_read=${usage?.cache_read_input_tokens ?? "-"} output=${usage?.output_tokens ?? "-"}`,
+  );
+  check("the first turn's usage writes the prompt cache for an hour", hour > 0 ? [] : [`ephemeral_1h_input_tokens=${hour}`]);
+  check(
+    "the query reports a compaction and the handler logs it",
+    seen.compactions > 0 && logged.length > 0 ? [] : [`${seen.compactions} compact_boundary message(s), ${logged.length} logged line(s)`],
+  );
+  for (const line of logged) console.log(`[logged] ${line}`);
+
+  summary();
+  const runs = listRunFiles().filter((f) => f.kind === "task");
+  check("every run ends done", runs.every((f) => f.status === "done") && runs.length ? [] : runs.map((f) => `${f.id} ${f.status}`));
+  console.log(`[spend] $${runs.reduce((sum, f) => sum + f.costUsd, 0).toFixed(4)} across ${runs.length} run(s)`);
+  return failed;
+}
+
 let failedRules = 0;
 if (scenario === "background") {
   const stack = await startStack();
@@ -914,8 +1014,10 @@ if (scenario === "background") {
   failedRules = await scheduled();
 } else if (scenario === "tasks") {
   failedRules = await chatTasks();
+} else if (scenario === "compact") {
+  failedRules = await compact();
 } else {
-  console.error("usage: node scripts/handler-smoke.ts background|restart|stop|nested|api|stream|attach|ask|scheduled|tasks|prompt <text>");
+  console.error("usage: node scripts/handler-smoke.ts background|restart|stop|nested|api|stream|attach|ask|scheduled|tasks|compact|prompt <text>");
   process.exit(2);
 }
 process.exit(failedRules ? 1 : 0);
