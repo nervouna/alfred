@@ -142,7 +142,7 @@ A read-only web page for following Alfred's work: one card per run with live pro
   After those checks, the routes (a method a route does not take gets 405 with `Allow`; an unknown path gets 404):
   - `GET /api/ping` answers 204.
   - `POST /api/commands` takes a command as the Command API does (`message.send`, `run.stop`, `question.answer`). It is checked with `parseCommand` first: a body that is not `application/json`, not JSON or not a valid command gets 400 `{"error": "…"}` and nothing is sent. A valid command goes to Alfred's socket, and Alfred's status and body come back unchanged. Over 65,536 bytes is 413.
-  - `GET /api/events` relays Alfred's event stream as it arrives, passing on `Last-Event-ID` or `?after=`. A client that goes away closes Alfred's request; when Alfred ends or breaks the stream, the response ends.
+  - `GET /api/events` relays Alfred's event stream as it arrives, passing on `Last-Event-ID` or `?after=`. A client that goes away closes Alfred's request; when Alfred ends or breaks the stream, the response ends. When the workbench stops, it ends open event streams at once, gives other requests up to 2 s, then closes the remaining connections.
   - `POST /api/uploads?name=<name>` streams the body to Alfred's `/uploads` and relays the answer. A declared length over 52,428,800 bytes is 413 before anything is sent; an undeclared one is cut with 413 once it passes that limit.
   - `GET /api/runs` answers `RunList`: the 100 newest runs, newest first, with only the fields the client shows.
   - `GET /api/runs/<id>` answers `RunDetail`: the run and its steps. An unknown or malformed id is 404.

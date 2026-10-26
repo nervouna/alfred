@@ -13,6 +13,19 @@ public struct Draft: Hashable, Sendable {
     public let text: String
 }
 
+/// One row of the conversation: a stored message, or a question where it was asked.
+public enum TimelineItem: Hashable, Sendable, Identifiable {
+    case message(Message)
+    case question(QuestionRecord)
+
+    public var id: String {
+        switch self {
+        case let .message(message): "m-" + message.id
+        case let .question(record): "q-" + record.id
+        }
+    }
+}
+
 /// What the chat view shows, folded in order from the event stream. `apply` takes stored events and live events.
 /// A stored event whose id is not past `lastEventId` is a replay, and an event or live event of a type this client
 /// does not know, changes nothing at all.
@@ -29,10 +42,32 @@ public struct Timeline: Hashable, Sendable {
     public private(set) var runs: [String: Run] = [:]
     /// The latest step of each run, by run id. A run that ends loses its step.
     public private(set) var latestStep: [String: Step] = [:]
-    /// The questions Alfred has asked and nobody has answered, by question id.
-    public private(set) var openQuestions: [String: QuestionAsked] = [:]
+    /// Every question Alfred asked, in event order, with how it stands.
+    public private(set) var questions: [QuestionRecord] = []
     /// The id of the last stored event applied: where a stream resumes.
     public private(set) var lastEventId: Int64 = 0
+
+    /// The questions Alfred has asked and nobody has answered, by question id.
+    public var openQuestions: [String: QuestionAsked] {
+        Dictionary(uniqueKeysWithValues: questions.filter { $0.state == .open }.map { ($0.id, $0.asked) })
+    }
+
+    /// The conversation in event order: the stored messages, with each question after the messages that came
+    /// before it.
+    public var items: [TimelineItem] {
+        var result: [TimelineItem] = []
+        result.reserveCapacity(messages.count + questions.count)
+        var next = 0
+        for (index, message) in messages.enumerated() {
+            while next < questions.count, questions[next].afterMessages <= index {
+                result.append(.question(questions[next]))
+                next += 1
+            }
+            result.append(.message(message))
+        }
+        result.append(contentsOf: questions[next...].map(TimelineItem.question))
+        return result
+    }
 
     public init() {}
 
@@ -70,11 +105,20 @@ public struct Timeline: Hashable, Sendable {
             if Self.endedStatuses.contains(run.status) {
                 drafts[run.id] = nil
                 latestStep[run.id] = nil
+                // Nobody can answer a question of a run that is over.
+                for index in questions.indices where questions[index].asked.runId == run.id && questions[index].state == .open {
+                    questions[index].state = .ended
+                }
             }
         case let .questionAsked(asked):
-            openQuestions[asked.id] = asked
+            if !questions.contains(where: { $0.id == asked.id }) {
+                questions.append(QuestionRecord(asked: asked, afterMessages: messages.count, state: .open))
+            }
         case let .questionAnswered(answered):
-            openQuestions[answered.id] = nil
+            // An answer is a fact even when the run's end came first, so it replaces `ended` too.
+            if let index = questions.firstIndex(where: { $0.id == answered.id }) {
+                questions[index].state = answered.cancelled ? .cancelled : .answered(answered.answers)
+            }
         case .unknown:
             break
         }

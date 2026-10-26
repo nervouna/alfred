@@ -209,6 +209,8 @@ export interface HandlerOptions {
   devices?: DeviceStore;
   /** Alfred's command socket for /api/ to forward to; ALFRED_API_SOCKET when omitted. */
   apiSocket?: string;
+  /** Collects the event streams this handler opens, so that closing the workbench can end them. A new set when omitted. */
+  streams?: Set<http.ServerResponse>;
 }
 
 const API_PREFIX = "/api/";
@@ -219,6 +221,8 @@ const FILE_PATH = "/api/files/";
 const LISTED_RUNS = 100;
 /** The largest POST /api/push body: a registration is a token and an environment. */
 const MAX_PUSH_BYTES = 4096;
+/** On close, how long a request in flight gets to finish before its connection is cut. */
+const CLOSE_GRACE_MS = 2000;
 
 /** The device token in an Authorization header, or why there is none. */
 function bearerToken(header: string | undefined): { token: string } | { reason: string } {
@@ -409,6 +413,7 @@ async function apiRoute(req: http.IncomingMessage, url: URL, ctx: ApiContext): P
 export function createHandler(opts: HandlerOptions): (req: http.IncomingMessage, res: http.ServerResponse) => Promise<void> {
   const devices = opts.devices ?? new DeviceStore();
   const alfred = opts.apiSocket ?? apiSocketPath();
+  const streams = opts.streams ?? new Set<http.ServerResponse>();
   return async (req, res) => {
     // Aborted when the client goes away, which also ends any request or stream forwarded to Alfred.
     const gone = new AbortController();
@@ -422,6 +427,8 @@ export function createHandler(opts: HandlerOptions): (req: http.IncomingMessage,
       if (r.body instanceof http.IncomingMessage) {
         // Alfred's stream goes out as it arrives. A broken upstream ends the response where it stands.
         res.flushHeaders();
+        streams.add(res);
+        res.once("close", () => streams.delete(res));
         r.body.on("error", () => res.end());
         r.body.once("close", () => res.end());
         r.body.pipe(res);
@@ -502,8 +509,10 @@ function listen(server: http.Server, target: { host: string; port: number } | st
 export async function startWorkbench(opts: WorkbenchOptions): Promise<() => Promise<void>> {
   const servers: http.Server[] = [];
   const devices = opts.devices ?? new DeviceStore();
+  // The event streams open on either listener; closing ends them all.
+  const streams = new Set<http.ServerResponse>();
   if (opts.tcp) {
-    const server = http.createServer(createHandler({ workspace: opts.workspace, access: opts.tcp.access, devices }));
+    const server = http.createServer(createHandler({ workspace: opts.workspace, access: opts.tcp.access, devices, streams }));
     await listen(server, opts.tcp);
     servers.push(server);
     log.info(`workbench listening on ${opts.tcp.host}:${opts.tcp.port}${opts.tcp.access ? " (Cloudflare Access required)" : " WITHOUT an Access check"}`);
@@ -514,7 +523,7 @@ export async function startWorkbench(opts: WorkbenchOptions): Promise<() => Prom
     } catch {
       // No socket left over.
     }
-    const server = http.createServer(createHandler({ workspace: opts.workspace, devices }));
+    const server = http.createServer(createHandler({ workspace: opts.workspace, devices, streams }));
     // Created owner-only from the start, so no other user can connect in between.
     const umask = process.umask(0o177);
     try {
@@ -527,6 +536,21 @@ export async function startWorkbench(opts: WorkbenchOptions): Promise<() => Prom
   }
   if (!servers.length) throw new Error("the workbench has no listener: set ALFRED_WORKBENCH_LISTEN or ALFRED_WORKBENCH_SOCKET");
   return async () => {
-    await Promise.all(servers.map((s) => new Promise<void>((resolve) => s.close(() => resolve()))));
+    const closed = Promise.all(servers.map((s) => new Promise<void>((resolve) => s.close(() => resolve()))));
+    // Every event stream ends at once. Its upstream request ends with it: the handler aborts that when the response closes.
+    for (const res of streams) res.destroy();
+    // Other requests in flight get the grace period to finish. Then the connections that remain are cut, idle keep-alive ones included.
+    const cutAt = Date.now() + CLOSE_GRACE_MS;
+    const sweep = setInterval(() => {
+      for (const s of servers) {
+        if (Date.now() < cutAt) s.closeIdleConnections();
+        else s.closeAllConnections();
+      }
+    }, 20);
+    try {
+      await closed;
+    } finally {
+      clearInterval(sweep);
+    }
   };
 }

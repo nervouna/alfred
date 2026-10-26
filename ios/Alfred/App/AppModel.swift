@@ -55,6 +55,17 @@ final class AppModel {
     private(set) var failedClientIds: Set<String> = []
     /// A failure to show once, for an action the owner took.
     var actionFailure: String?
+    /// The files chosen for the next message, in the order they were chosen.
+    private(set) var draftAttachments: [Attachment] = []
+    /// The files of the owner's pending messages by client id, each with how far its upload is. A message's entry goes
+    /// when its echo arrives.
+    private(set) var outgoingAttachments: [String: [Attachment]] = [:]
+    /// The questions with an answer on its way, until they close.
+    private(set) var answeringQuestions: Set<String> = []
+    /// Why the last answer to a question failed, by question id. The question stays open.
+    private(set) var answerFailures: [String: String] = [:]
+    /// How many calls to `attach` are bringing files in.
+    private var stagingCount = 0
 
     @ObservationIgnored private let store: any CredentialStore
     @ObservationIgnored private let session: URLSession
@@ -139,6 +150,11 @@ final class AppModel {
     private func reset() {
         timeline = Timeline()
         failedClientIds = []
+        AttachmentStaging.discard(draftAttachments + outgoingAttachments.values.flatMap { $0 })
+        draftAttachments = []
+        outgoingAttachments = [:]
+        answeringQuestions = []
+        answerFailures = [:]
         streamFailure = nil
         isConnected = false
     }
@@ -211,7 +227,11 @@ final class AppModel {
             timeline.apply(event)
             if case let .event(stored) = event, case let .messageCreated(message) = stored.payload, let clientId = message.clientId {
                 failedClientIds.remove(clientId)
+                if let sent = outgoingAttachments.removeValue(forKey: clientId) {
+                    AttachmentStaging.discard(sent)
+                }
             }
+            forgetClosedQuestions()
         case .disconnected:
             isConnected = false
         case let .stopped(error):
@@ -228,16 +248,28 @@ final class AppModel {
 
     // MARK: Sending
 
-    /// Sends the owner's message: it shows as pending at once, and stays pending until its echo arrives.
-    func send(_ text: String) async {
+    /// Sends the owner's message with the files chosen for it, and clears them from the draft.
+    func sendDraft(_ text: String) async {
+        let attachments = draftAttachments
+        draftAttachments = []
+        await send(text, attachments: attachments)
+    }
+
+    /// Sends the owner's message: it shows as pending at once, and stays pending until its echo arrives. Its files
+    /// are uploaded first, in order; the message goes out once every one is saved. The text may be empty with files.
+    func send(_ text: String, attachments: [Attachment] = []) async {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+        guard !text.isEmpty || !attachments.isEmpty else { return }
         let clientId = makeClientId()
         timeline.addPending(clientId: clientId, text: text)
+        if !attachments.isEmpty {
+            outgoingAttachments[clientId] = attachments
+        }
         await deliver(clientId: clientId, text: text)
     }
 
-    /// Sends a failed message again with the same client id, so a message that did arrive is not stored twice.
+    /// Sends a failed message again with the same client id, so a message that did arrive is not stored twice. Files
+    /// that were saved are not uploaded again.
     func retry(clientId: String) async {
         guard failedClientIds.contains(clientId), let pending = timeline.pending.first(where: { $0.clientId == clientId }) else { return }
         failedClientIds.remove(clientId)
@@ -247,7 +279,8 @@ final class AppModel {
     private func deliver(clientId: String, text: String) async {
         do {
             guard let client else { throw URLError(.userAuthenticationRequired) }
-            try await client.send(.messageSend(clientId: clientId, text: text, files: []))
+            let files = try await upload(filesOf: clientId, using: client)
+            try await client.send(.messageSend(clientId: clientId, text: text, files: files))
         } catch {
             // The echo may have come first, with the response lost on the way back.
             if timeline.pending.contains(where: { $0.clientId == clientId }) {
@@ -255,6 +288,140 @@ final class AppModel {
             }
             noteAccess(error)
         }
+    }
+
+    /// Uploads the files of a pending message that are not saved yet, one after the other in the order they were
+    /// chosen, and returns every file's inbox path in that order. A file that fails is marked and the rest still go
+    /// up; then this throws, so the message is not sent.
+    private func upload(filesOf clientId: String, using client: AlfredClient) async throws -> [FileRef] {
+        var failure: (any Error)?
+        for index in 0..<(outgoingAttachments[clientId]?.count ?? 0) {
+            // The echo came, or the pairing went: the message is no longer ours to send.
+            guard let attachment = outgoingAttachments[clientId]?[index] else { throw CancellationError() }
+            if case .uploaded = attachment.state { continue }
+            setState(.uploading(0), ofAttachment: attachment.id, in: clientId)
+            do {
+                let file = try await client.upload(
+                    fileAt: attachment.fileURL,
+                    name: attachment.name,
+                    contentType: attachment.contentType
+                ) { [weak self] fraction in
+                    Task { @MainActor in self?.noteProgress(fraction, ofAttachment: attachment.id, in: clientId) }
+                }
+                setState(.uploaded(file), ofAttachment: attachment.id, in: clientId)
+            } catch {
+                setState(.failed, ofAttachment: attachment.id, in: clientId)
+                failure = failure ?? error
+                noteAccess(error)
+            }
+        }
+        if let failure { throw failure }
+        return (outgoingAttachments[clientId] ?? []).compactMap { attachment in
+            if case let .uploaded(file) = attachment.state { file } else { nil }
+        }
+    }
+
+    private func setState(_ state: Attachment.State, ofAttachment id: UUID, in clientId: String) {
+        guard let index = outgoingAttachments[clientId]?.firstIndex(where: { $0.id == id }) else { return }
+        outgoingAttachments[clientId]?[index].state = state
+    }
+
+    /// Moves a progress bar forward, never back: reports come from another thread and may be late.
+    private func noteProgress(_ fraction: Double, ofAttachment id: UUID, in clientId: String) {
+        guard case let .uploading(known)? = outgoingAttachments[clientId]?.first(where: { $0.id == id })?.state, fraction > known else { return }
+        setState(.uploading(fraction), ofAttachment: id, in: clientId)
+    }
+
+    // MARK: Attachments
+
+    /// Whether files are being brought in right now.
+    var isStaging: Bool {
+        stagingCount > 0
+    }
+
+    /// Adds files to the draft. Each is copied, so the original may go away, and a photo Claude cannot read becomes a
+    /// JPEG. A file that is too large, or that would be the eleventh, is refused by name in `actionFailure`; the
+    /// others are still added.
+    func attach(_ inputs: [AttachmentInput]) async {
+        guard !inputs.isEmpty else { return }
+        stagingCount += 1
+        defer { stagingCount -= 1 }
+        var refusals: [AttachmentRefusal] = []
+        for input in inputs {
+            guard draftAttachments.count < AttachmentLimits.maxCount else {
+                refusals.append(.tooMany(name: input.name))
+                AttachmentStaging.discard(input)
+                continue
+            }
+            do {
+                let staged = try await Task.detached { try AttachmentStaging.stage(input) }.value
+                // Another call may have filled the draft meanwhile.
+                if draftAttachments.count < AttachmentLimits.maxCount {
+                    draftAttachments.append(staged)
+                } else {
+                    AttachmentStaging.discard([staged])
+                    refusals.append(.tooMany(name: input.name))
+                }
+            } catch let refusal as AttachmentRefusal {
+                refusals.append(refusal)
+            } catch {
+                refusals.append(.unreadable(name: input.name))
+            }
+        }
+        if !refusals.isEmpty {
+            actionFailure = refusals.map(\.message).joined(separator: "\n")
+        }
+    }
+
+    /// Takes a file out of the draft.
+    func removeAttachment(id: Attachment.ID) {
+        guard let index = draftAttachments.firstIndex(where: { $0.id == id }) else { return }
+        AttachmentStaging.discard([draftAttachments.remove(at: index)])
+    }
+
+    // MARK: Questions
+
+    /// Answers a question that is one single-select question with the option the owner tapped.
+    func answer(_ asked: QuestionAsked, choosing label: String) async {
+        guard asked.questions.count == 1, let question = asked.questions.first, !question.multiSelect,
+              question.options.contains(where: { $0.label == label })
+        else { return }
+        await submitAnswers([question.question: label], to: asked.id)
+    }
+
+    /// Answers a question with what the owner picked on its card, once every question has a pick.
+    func answer(_ asked: QuestionAsked, selection: QuestionSelection) async {
+        guard let answers = selection.answers(for: asked.questions) else { return }
+        await submitAnswers(answers, to: asked.id)
+    }
+
+    private func submitAnswers(_ answers: [String: String], to questionId: String) async {
+        guard !answeringQuestions.contains(questionId) else { return }
+        answeringQuestions.insert(questionId)
+        answerFailures[questionId] = nil
+        do {
+            guard let client else { throw URLError(.userAuthenticationRequired) }
+            try await client.send(.questionAnswer(questionId: questionId, answers: answers))
+            // The card stays disabled until the question.answered event arrives, which may have come already.
+            forgetClosedQuestions()
+        } catch {
+            answeringQuestions.remove(questionId)
+            answerFailures[questionId] = Self.answerFailure(of: error)
+            noteAccess(error)
+        }
+    }
+
+    /// A question that closed needs neither its answer on its way nor an error.
+    private func forgetClosedQuestions() {
+        guard !answeringQuestions.isEmpty || !answerFailures.isEmpty else { return }
+        let closed = Set(timeline.questions.filter { $0.state != .open }.map(\.id))
+        answeringQuestions.subtract(closed)
+        answerFailures = answerFailures.filter { !closed.contains($0.key) }
+    }
+
+    private static func answerFailure(of error: any Error) -> String {
+        if case AlfredError.http(404, _) = error { return "这个问题已不在等待回答" }
+        return "回答失败，请重试"
     }
 
     /// Interrupts a run's current turn.

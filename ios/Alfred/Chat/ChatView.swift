@@ -1,4 +1,5 @@
 import AlfredKit
+import PhotosUI
 import SwiftUI
 
 struct ChatView: View {
@@ -61,8 +62,11 @@ private struct MessageList: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 12) {
-                    ForEach(model.timeline.messages, id: \.id) { message in
-                        MessageRow(message: message)
+                    ForEach(model.timeline.items) { item in
+                        switch item {
+                        case let .message(message): MessageRow(message: message)
+                        case let .question(record): QuestionCard(model: model, record: record)
+                        }
                     }
                     ForEach(model.timeline.pending, id: \.clientId) { pending in
                         PendingRow(model: model, pending: pending)
@@ -90,6 +94,9 @@ private struct MessageList: View {
         let live = model.liveReplies
         return [
             model.timeline.messages.count,
+            model.timeline.questions.count,
+            model.timeline.openQuestions.count,
+            model.answerFailures.count,
             model.timeline.pending.count,
             live.count,
             live.reduce(0) { $0 + ($1.text?.utf8.count ?? 0) + ($1.stepText?.utf8.count ?? 0) },
@@ -201,8 +208,13 @@ private struct PendingRow: View {
 
     var body: some View {
         VStack(alignment: .trailing, spacing: 4) {
-            Bubble(text: pending.text, isOwner: true, identifier: "message.pending")
-                .opacity(0.5)
+            if !pending.text.isEmpty {
+                Bubble(text: pending.text, isOwner: true, identifier: "message.pending")
+                    .opacity(0.5)
+            }
+            ForEach(model.outgoingAttachments[pending.clientId] ?? []) { attachment in
+                AttachmentChip(attachment: attachment)
+            }
             if failed {
                 Text("发送失败，点按重试")
                     .font(.caption)
@@ -244,43 +256,110 @@ private struct LiveReplyRow: View {
 private struct Composer: View {
     let model: AppModel
     @State private var text = ""
+    @State private var showsPhotoPicker = false
+    @State private var showsFileImporter = false
+    @State private var pickedPhotos: [PhotosPickerItem] = []
+    @State private var loadingPhotos = 0
 
     private var isBlank: Bool {
         text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    private var room: Int {
+        AttachmentLimits.maxCount - model.draftAttachments.count
+    }
+
+    private var canSend: Bool {
+        (!isBlank || !model.draftAttachments.isEmpty) && !model.isStaging && loadingPhotos == 0
+    }
+
     var body: some View {
-        HStack(alignment: .bottom, spacing: 8) {
-            TextField("消息", text: $text, axis: .vertical)
-                .lineLimit(1...6)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 18))
-                .accessibilityIdentifier("composer")
-            if let run = model.runningTask {
-                Button {
-                    Task { await model.stop(runId: run.id) }
+        VStack(spacing: 8) {
+            if !model.draftAttachments.isEmpty || model.isStaging || loadingPhotos > 0 {
+                AttachmentStrip(model: model, loadingPhotos: loadingPhotos > 0)
+            }
+            HStack(alignment: .bottom, spacing: 8) {
+                Menu {
+                    Button("照片", systemImage: "photo.on.rectangle") { showsPhotoPicker = true }
+                    Button("文件", systemImage: "doc") { showsFileImporter = true }
                 } label: {
-                    Image(systemName: "stop.circle.fill")
+                    Image(systemName: "plus.circle.fill")
+                        .font(.system(size: 32))
+                        .foregroundStyle(.secondary)
+                }
+                .disabled(room <= 0)
+                .accessibilityLabel("添加附件")
+                TextField("消息", text: $text, axis: .vertical)
+                    .lineLimit(1...6)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 18))
+                    .accessibilityIdentifier("composer")
+                if let run = model.runningTask {
+                    Button {
+                        Task { await model.stop(runId: run.id) }
+                    } label: {
+                        Image(systemName: "stop.circle.fill")
+                            .font(.system(size: 32))
+                    }
+                    .tint(.red)
+                    .accessibilityLabel("停止")
+                }
+                Button {
+                    let sent = text
+                    text = ""
+                    Task { await model.sendDraft(sent) }
+                } label: {
+                    Image(systemName: "arrow.up.circle.fill")
                         .font(.system(size: 32))
                 }
-                .tint(.red)
-                .accessibilityLabel("停止")
+                .disabled(!canSend)
+                .accessibilityLabel("发送")
+                .accessibilityIdentifier("send")
             }
-            Button {
-                let sent = text
-                text = ""
-                Task { await model.send(sent) }
-            } label: {
-                Image(systemName: "arrow.up.circle.fill")
-                    .font(.system(size: 32))
-            }
-            .disabled(isBlank)
-            .accessibilityLabel("发送")
-            .accessibilityIdentifier("send")
         }
         .padding(.horizontal)
         .padding(.vertical, 8)
         .background(.bar)
+        .photosPicker(
+            isPresented: $showsPhotoPicker,
+            selection: $pickedPhotos,
+            maxSelectionCount: max(room, 1),
+            matching: .images
+        )
+        .fileImporter(isPresented: $showsFileImporter, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
+            switch result {
+            case let .success(urls):
+                Task { await model.attach(urls.map(AttachmentInput.file)) }
+            case let .failure(error):
+                if (error as? CocoaError)?.code != .userCancelled {
+                    model.actionFailure = "无法打开所选文件"
+                }
+            }
+        }
+        .onChange(of: pickedPhotos) { _, items in
+            guard !items.isEmpty else { return }
+            pickedPhotos = []
+            Task { await attachPhotos(items) }
+        }
+    }
+
+    /// Reads the photos the picker chose into the app and attaches them.
+    private func attachPhotos(_ items: [PhotosPickerItem]) async {
+        loadingPhotos += 1
+        defer { loadingPhotos -= 1 }
+        var inputs: [AttachmentInput] = []
+        var unreadable = 0
+        for item in items {
+            if let photo = try? await item.loadTransferable(type: PickedPhoto.self) {
+                inputs.append(.photo(photo.url))
+            } else {
+                unreadable += 1
+            }
+        }
+        await model.attach(inputs)
+        if unreadable > 0 {
+            model.actionFailure = [model.actionFailure, "有 \(unreadable) 张照片无法读取"].compactMap { $0 }.joined(separator: "\n")
+        }
     }
 }
