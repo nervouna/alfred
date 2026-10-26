@@ -52,7 +52,14 @@ async function until(what: string, done: () => boolean, ms = 3000): Promise<void
 const INTERRUPTED = Symbol("interrupted");
 /** The same for an interrupt that landed before the model did anything: the result counts no turns. */
 const INTERRUPTED_EARLY = Symbol("interrupted early");
-type Ended = string | typeof INTERRUPTED | typeof INTERRUPTED_EARLY;
+/** A turn that ends with a result that reports its cost and the models it used, as the SDK's result does. */
+interface Priced {
+  result: string;
+  total_cost_usd: number;
+  modelUsage: Record<string, unknown>;
+}
+
+type Ended = string | Priced | typeof INTERRUPTED | typeof INTERRUPTED_EARLY;
 
 /** What a fake turn can do while it runs. */
 interface Turn {
@@ -148,12 +155,12 @@ function fakeAgent(turn: TurnFn = async (prompt) => `echo: ${prompt}`) {
                 type: "result",
                 subtype: "success",
                 is_error: false,
-                result,
                 num_turns: 1,
                 total_cost_usd: 0,
                 modelUsage: {},
                 session_id: SESSION,
                 user_message_uuid: message.uuid,
+                ...(typeof result === "string" ? { result } : result),
               },
         );
       }
@@ -198,6 +205,54 @@ const blockStart = (index: number, type: string, parent: string | null = null) =
   streamEvent({ type: "content_block_start", index, content_block: { type } }, parent);
 const textDelta = (index: number, text: string, parent: string | null = null) =>
   streamEvent({ type: "content_block_delta", index, delta: { type: "text_delta", text } }, parent);
+
+const SONNET = "claude-sonnet-5-5";
+
+/** A result that reports `costUsd` for sonnet, priced at a millionth of a dollar per input-token equivalent. */
+function priced(text: string, costUsd = 0.001): Priced {
+  const inputTokens = Math.round(costUsd * 1e6);
+  return {
+    result: text,
+    total_cost_usd: costUsd,
+    modelUsage: {
+      [SONNET]: { inputTokens, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, webSearchRequests: 0, costUSD: costUsd, contextWindow: 200_000, maxOutputTokens: 64_000 },
+    },
+  };
+}
+
+/**
+ * One response of the main agent as the stream sends it: message_start with the usage the API gives at its start, message_delta
+ * with the output tokens and web searches it ended with, and message_stop.
+ */
+function response(id: string, model: string, usage: object, outputTokens: number, webSearches = 0): object[] {
+  return [
+    streamEvent({ type: "message_start", message: { id, model, usage } }),
+    streamEvent({ type: "message_delta", delta: {}, usage: { output_tokens: outputTokens, server_tool_use: { web_search_requests: webSearches, web_fetch_requests: 0 } } }),
+    streamEvent({ type: "message_stop" }),
+  ];
+}
+
+/** Input 100, 1000 cache read and a 1-hour cache write of 200: 100 + 5×50 + 0.1×1000 + 2×200 = 850 input-token equivalents with 50 output tokens. */
+const FIRST = { input_tokens: 100, output_tokens: 1, cache_read_input_tokens: 1000, cache_creation_input_tokens: 200, cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 200 } };
+/** Input 10 and a 5-minute cache write of 1000: 10 + 5×20 + 1.25×1000 = 1360 input-token equivalents with 20 output tokens, and two searches at 0.01. */
+const SECOND = { input_tokens: 10, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 1000, cache_creation: { ephemeral_5m_input_tokens: 1000, ephemeral_1h_input_tokens: 0 } };
+
+/**
+ * A turn that streams these messages, then waits until the run is aborted. `taken` settles once the handler has read them: a stop
+ * sent before that would end the run before it saw the responses.
+ */
+function streamThenStall(messages: object[]): { turn: TurnFn; taken: Promise<void> } {
+  let markTaken!: () => void;
+  const taken = new Promise<void>((resolve) => (markTaken = resolve));
+  const turn: TurnFn = async (prompt, signal, live) => {
+    for (const message of messages) live.emit(message);
+    // The handler reads each message in a microtask of its own; a timer lets all of them land first.
+    await sleep(10);
+    markTaken();
+    return stubborn(prompt, signal, live);
+  };
+  return { turn, taken };
+}
 
 /** An assistant message with tool calls, from the main agent or, with a parent, from a subagent. */
 function toolCalls(calls: { name: string; input: Record<string, unknown> }[], parent: string | null = null) {
@@ -1515,4 +1570,103 @@ test("without documents a run commits nothing, and still runs", async () => {
   await settled(t);
   assert.equal(t.statusOf(t.taskId()), "done");
   assert.equal(d.commitCount(), before);
+});
+
+test("a stopped run keeps an estimate of the responses no result reported, marked as estimated, and the day's spend counts it", async () => {
+  const stateFile = path.join(tmp, `state-${states++}`, "agent-state.json");
+  const stall = streamThenStall([...response("r1", SONNET, FIRST, 50), ...response("r2", SONNET, SECOND, 20, 2)]);
+  const t = setup({ turn: (prompt, signal, live) => (prompt === "第一句" ? Promise.resolve(priced("好")) : stall.turn(prompt, signal, live)), interruptMs: 20, stateFile });
+  await t.send("第一句");
+  await until("the first run to finish", () => t.finished());
+  await t.send("第二句");
+  await stall.taken;
+  await t.send("/stop");
+  const runId = t.taskId();
+  await until("the run to stop", () => t.statusOf(runId) === "stopped");
+
+  const run = readRunFile(runId);
+  assert.ok(Math.abs((run?.costUsd ?? 0) - (0.00085 + 0.02136)) < 1e-9, `the estimate of both responses, got ${run?.costUsd}`);
+  assert.equal(run?.costEstimated, true);
+  assert.deepEqual(Object.keys(run?.modelCostUsd ?? {}), [SONNET]);
+  const owner = JSON.parse(fs.readFileSync(stateFile, "utf8")).owner;
+  assert.ok(Math.abs(owner.spendDayUsd - (0.001 + 0.00085 + 0.02136)) < 1e-9, "the day's spend counts it");
+  assert.ok(Math.abs(owner.totalCostUsd - (0.001 + 0.00085 + 0.02136)) < 1e-9, "and the owner's total");
+});
+
+test("a run whose last turn has a result records the result's cost, with no estimate on top of the responses it reported", async () => {
+  const t = setup({
+    turn: async (_prompt, _signal, live) => {
+      for (const message of response("r1", SONNET, FIRST, 50)) live.emit(message);
+      return priced("好", 0.5);
+    },
+  });
+  await t.send("一句");
+  await until("the run to finish", () => t.finished());
+  const run = readRunFile(t.taskId());
+  assert.equal(run?.costUsd, 0.5);
+  assert.notEqual(run?.costEstimated, true);
+});
+
+test("a run with an earlier result and an aborted turn after it records the result, plus the estimate of that turn only", async () => {
+  let finishFirst!: () => void;
+  const firstEnds = new Promise<void>((resolve) => (finishFirst = resolve));
+  const stall = streamThenStall(response("r2", SONNET, SECOND, 20, 2));
+  const t = setup({
+    interruptMs: 20,
+    turn: async (prompt, signal, live) => {
+      if (prompt !== "第一句") return stall.turn(prompt, signal, live);
+      // A large response: were the result not to settle it, its estimate would show.
+      for (const message of response("r1", SONNET, { input_tokens: 100_000, output_tokens: 1 }, 1000)) live.emit(message);
+      await firstEnds;
+      return priced("好", 0.3);
+    },
+  });
+  await t.send("第一句");
+  await until("the first turn to start", () => t.agent.prompts.length === 1);
+  await t.send("第二句");
+  await until("the follow-up to be taken into the run", () => t.app.texts.includes(STEERED));
+  finishFirst();
+  await stall.taken;
+  await t.send("/stop");
+  const runId = t.taskId();
+  await until("the run to stop", () => t.statusOf(runId) === "stopped");
+
+  const run = readRunFile(runId);
+  assert.ok(Math.abs((run?.costUsd ?? 0) - (0.3 + 0.02136)) < 1e-9, `the result, then the estimate of the turn after it, got ${run?.costUsd}`);
+  assert.equal(run?.costEstimated, true);
+});
+
+test("a model with no remembered unit price adds nothing to an aborted run, which is not marked estimated", async () => {
+  const stall = streamThenStall(response("h1", "claude-haiku-5-5", { input_tokens: 500, output_tokens: 1 }, 100));
+  const t = setup({ turn: (prompt, signal, live) => (prompt === "第一句" ? Promise.resolve(priced("好")) : stall.turn(prompt, signal, live)), interruptMs: 20 });
+  await t.send("第一句");
+  await until("the first run to finish", () => t.finished());
+  await t.send("第二句");
+  await stall.taken;
+  await t.send("/stop");
+  const runId = t.taskId();
+  await until("the run to stop", () => t.statusOf(runId) === "stopped");
+
+  assert.equal(readRunFile(runId)?.costUsd, 0);
+  assert.notEqual(readRunFile(runId)?.costEstimated, true);
+});
+
+test("the unit prices a result sets are kept in the state file, so a restarted handler estimates an aborted run from them", async () => {
+  const stateFile = path.join(tmp, `state-${states++}`, "agent-state.json");
+  const first = setup({ turn: async () => priced("好"), stateFile });
+  await first.send("第一句");
+  await until("the first run to finish", () => first.finished());
+  await first.handler.shutdown();
+  const remembered = JSON.parse(fs.readFileSync(stateFile, "utf8")).owner.unitPrices;
+  assert.ok(Math.abs(remembered[SONNET] - 1e-6) < 1e-12, "the price is on disk");
+
+  const stall = streamThenStall(response("r1", SONNET, FIRST, 50));
+  const second = setup({ turn: stall.turn, interruptMs: 20, stateFile });
+  await second.send("第二句");
+  await stall.taken;
+  await second.send("/stop");
+  const runId = second.taskId();
+  await until("the run to stop", () => second.statusOf(runId) === "stopped");
+  assert.ok(Math.abs((readRunFile(runId)?.costUsd ?? 0) - 0.00085) < 1e-9);
+  assert.equal(readRunFile(runId)?.costEstimated, true);
 });

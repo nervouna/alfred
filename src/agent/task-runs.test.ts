@@ -58,7 +58,8 @@ async function until(what: string, done: () => boolean, ms = 3000): Promise<void
 
 /** What a turn ends with: the reply of a successful result, or the fields of a result of another kind. */
 type Ended = string | Record<string, unknown>;
-type TurnFn = (prompt: string, signal: AbortSignal, options: Options) => Promise<Ended>;
+/** `emit` sends a message to the handler during the turn, as the SDK does. */
+type TurnFn = (prompt: string, signal: AbortSignal, options: Options, emit: (message: object) => void) => Promise<Ended>;
 
 interface Query {
   options: Options;
@@ -86,7 +87,7 @@ function fakeAgent(turn: TurnFn = async (prompt) => `echo: ${prompt}`) {
         const prompt = String(message.message.content);
         record.prompts.push(prompt);
         push({ type: "system", subtype: "init", session_id: "sess-1" });
-        const result = await turn(prompt, signal, options);
+        const result = await turn(prompt, signal, options, push);
         push({
           type: "result",
           subtype: "success",
@@ -1274,4 +1275,50 @@ test("changing a task's title or schedule while its run is live does not stop it
   hold.release("好");
   await until("the run to end", () => t.finished(task.id));
   assert.equal(t.taskRuns(task.id)[0]?.status, "done");
+});
+
+const SONNET = "claude-sonnet-5-5";
+/** The stream of one response of the main agent: its start with the usage the API gives there, its output tokens at its end. */
+function responseStream(id: string, usage: object, outputTokens: number): object[] {
+  const stream = (event: object) => ({ type: "stream_event", event, parent_tool_use_id: null, uuid: "00000000-0000-4000-8000-000000000000", session_id: "sess-1" });
+  return [
+    stream({ type: "message_start", message: { id, model: SONNET, usage } }),
+    stream({ type: "message_delta", delta: {}, usage: { output_tokens: outputTokens, server_tool_use: null } }),
+    stream({ type: "message_stop" }),
+  ];
+}
+/** The cost and models of a result that prices sonnet at a millionth of a dollar per input-token equivalent. */
+const SONNET_PRICED = {
+  total_cost_usd: 0.001,
+  modelUsage: { [SONNET]: { inputTokens: 1000, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, webSearchRequests: 0, costUSD: 0.001, contextWindow: 200_000, maxOutputTokens: 64_000 } },
+};
+
+test("a task run its owner paused keeps an estimate of the response it had no result for, marked as estimated", async () => {
+  const s = stack();
+  const task = evening(s, "晚报");
+  let turns = 0;
+  let streamed!: () => void;
+  const taken = new Promise<void>((resolve) => (streamed = resolve));
+  const t = start(s, {
+    turn: async (_prompt, signal, _options, emit) => {
+      turns++;
+      if (turns === 1) return { result: "好", ...SONNET_PRICED };
+      // 100 input tokens and 50 output: 100 + 5×50 = 350 input-token equivalents.
+      for (const message of responseStream("r1", { input_tokens: 100, output_tokens: 1 }, 50)) emit(message);
+      await sleep(10);
+      streamed();
+      return new Promise<Ended>((_resolve, reject) => signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true }));
+    },
+  });
+  assert.equal(t.handler.runTask(task.id), true);
+  await until("the first run to end", () => t.taskRuns(task.id).some((r) => r.status === "done"));
+  assert.equal(t.handler.runTask(task.id), true);
+  await taken;
+  s.store.update(task.id, { status: "paused" });
+  await until("the second run to end", () => t.taskRuns(task.id)[1]?.status === "stopped");
+
+  const record = readRunFile(t.taskRuns(task.id)[1]?.id ?? "");
+  assert.ok(Math.abs((record?.costUsd ?? 0) - 0.00035) < 1e-9, `the estimate, got ${record?.costUsd}`);
+  assert.equal(record?.costEstimated, true);
+  assert.ok(Math.abs((t.state().spendDayUsd as number) - (0.001 + 0.00035)) < 1e-9, "the day's spend counts it");
 });

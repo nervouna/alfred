@@ -65,7 +65,8 @@ async function until(what: string, done: () => boolean, ms = 20_000): Promise<vo
 
 /** What a turn ends with: the reply of a successful result, or the fields of a result of another kind. */
 type Ended = string | Record<string, unknown>;
-type TurnFn = (prompt: string, signal: AbortSignal, options: Options) => Promise<Ended>;
+/** `emit` sends a message to the handler during the turn, as the SDK does. */
+type TurnFn = (prompt: string, signal: AbortSignal, options: Options, emit: (message: object) => void) => Promise<Ended>;
 
 interface Query {
   options: Options;
@@ -93,7 +94,7 @@ function fakeAgent(turn: TurnFn = async (prompt) => `echo: ${prompt}`) {
         const prompt = String(message.message.content);
         record.prompts.push(prompt);
         push({ type: "system", subtype: "init", session_id: "sess-1" });
-        const result = await turn(prompt, signal, options);
+        const result = await turn(prompt, signal, options, push);
         push({
           type: "result",
           subtype: "success",
@@ -373,7 +374,7 @@ async function behindATaskRun(s: Stack, revisionTurn: TurnFn = async (prompt, _s
   const task = oneTime(s, "晨报");
   clock = minutesAfterStart(2);
   const t = start(s, {
-    turn: (prompt, signal, options) => (isRevision(options) ? revisionTurn(prompt, signal, options) : isScheduled(options) ? hold.turn(prompt, signal) : Promise.resolve(`echo: ${prompt}`)),
+    turn: (prompt, signal, options, emit) => (isRevision(options) ? revisionTurn(prompt, signal, options, emit) : isScheduled(options) ? hold.turn(prompt, signal) : Promise.resolve(`echo: ${prompt}`)),
   });
   await until("the task run to start", () => hold.waiting === 1);
   return { t, hold, task };
@@ -1142,4 +1143,48 @@ test("after a crash the next start sends the annotations of a revision that was 
   start(s, { documents: { versions: s.documents.versions, store }, stateFile: path.join(s.dir, "second-state.json") });
   assert.deepEqual(store.annotations(document.id).map((a) => [a.state, a.returnReason]), [["returned", "failed"]]);
   assert.equal(store.revisionOf(document.id), undefined);
+});
+
+const SONNET = "claude-sonnet-5-5";
+/** The stream of one response of the main agent: its start with the usage the API gives there, its output tokens at its end. */
+function responseStream(id: string, usage: object, outputTokens: number): object[] {
+  const stream = (event: object) => ({ type: "stream_event", event, parent_tool_use_id: null, uuid: "00000000-0000-4000-8000-000000000000", session_id: "sess-1" });
+  return [
+    stream({ type: "message_start", message: { id, model: SONNET, usage } }),
+    stream({ type: "message_delta", delta: {}, usage: { output_tokens: outputTokens, server_tool_use: null } }),
+    stream({ type: "message_stop" }),
+  ];
+}
+/** The cost and models of a result that prices sonnet at a millionth of a dollar per input-token equivalent. */
+const SONNET_PRICED = {
+  total_cost_usd: 0.001,
+  modelUsage: { [SONNET]: { inputTokens: 1000, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, webSearchRequests: 0, costUSD: 0.001, contextWindow: 200_000, maxOutputTokens: 64_000 } },
+};
+
+test("a revision run the owner stops keeps an estimate of the response it had no result for, marked as estimated", async () => {
+  const s = await stack();
+  const document = await deliver(s, NOTE);
+  let streamed!: () => void;
+  const taken = new Promise<void>((resolve) => (streamed = resolve));
+  const t = start(s, {
+    turn: async (_prompt, signal, options, emit) => {
+      if (!isRevision(options)) return { result: "好", ...SONNET_PRICED };
+      // 100 input tokens and 50 output: 100 + 5×50 = 350 input-token equivalents.
+      for (const message of responseStream("r1", { input_tokens: 100, output_tokens: 1 }, 50)) emit(message);
+      await sleep(10);
+      streamed();
+      return new Promise<Ended>((_resolve, reject) => signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true }));
+    },
+  });
+  await t.send("你好");
+  await until("the chat run to finish", () => t.lastRuns().some((r) => r.kind === "task" && r.taskId === undefined && r.status === "done"));
+  const { runId } = t.revise(batchOf(document));
+  await taken;
+  assert.equal(await t.handler.stopRun(runId), true);
+  await until("the revision run to be over", () => t.over(runId));
+
+  assert.equal(t.revisionRun(runId)?.status, "stopped");
+  assert.ok(Math.abs((readRunFile(runId)?.costUsd ?? 0) - 0.00035) < 1e-9, `the estimate, got ${readRunFile(runId)?.costUsd}`);
+  assert.equal(readRunFile(runId)?.costEstimated, true);
+  assert.ok(Math.abs((t.state().spendDayUsd as number) - (0.001 + 0.00035)) < 1e-9, "the day's spend counts it");
 });
