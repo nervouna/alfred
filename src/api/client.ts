@@ -120,10 +120,11 @@ export function describeEvent(frame: Frame): string {
     if (parsed.success && parsed.data.type === "message.created") {
       const m = parsed.data.data;
       const files = m.files.length ? ` +${m.files.length} file${m.files.length === 1 ? "" : "s"}` : "";
-      summary = `${m.channel} ${m.direction}${m.runId ? ` run=${m.runId}` : ""}${m.error ? " (not delivered)" : ""} ${flat(m.text, 60)}${files}`.trimEnd();
+      const about = `${m.runId ? ` run=${m.runId}` : ""}${m.taskId ? ` task=${m.taskId}` : ""}`;
+      summary = `${m.channel} ${m.direction}${about}${m.error ? " (not delivered)" : ""} ${flat(m.text, 60)}${files}`.trimEnd();
     } else if (parsed.success && parsed.data.type === "run.updated") {
       const r = parsed.data.data;
-      summary = `${r.id} ${r.kind} ${r.status} $${r.costUsd.toFixed(4)} ${flat(r.title, 60)}`;
+      summary = `${r.id} ${r.kind} ${r.status}${r.taskId ? ` task=${r.taskId}` : ""} $${r.costUsd.toFixed(4)} ${flat(r.title, 60)}`;
     }
   } catch {
     // Not JSON: the raw data stays.

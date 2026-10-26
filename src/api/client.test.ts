@@ -44,6 +44,18 @@ test("an event is described on one line: id, type and a short summary", () => {
   assert.equal(describeEvent({ id: 5, type: "message", data: "not json" }), "5 message not json");
 });
 
+test("an event of a task run names the task", () => {
+  const log = new EventLog(path.join(tmp, "describe-task.jsonl"));
+  const started = log.append("run.updated", { ...run, taskId: "p3x9za" });
+  const said = log.append("message.created", { id: "m3", channel: "app", direction: "out", text: "三条变化", files: [], at, runId: "k7m2qa", taskId: "p3x9za" });
+  const capped = log.append("message.created", { id: "m4", channel: "app", direction: "out", text: "今天的花费已到上限", files: [], at, taskId: "p3x9za" });
+  assert.ok(started && said && capped);
+
+  assert.equal(describeEvent(frameOf(started)), "1 run.updated k7m2qa task running task=p3x9za $0.0123 调研 VPS 价格");
+  assert.equal(describeEvent(frameOf(said)), "2 message.created app out run=k7m2qa task=p3x9za 三条变化");
+  assert.equal(describeEvent(frameOf(capped)), "3 message.created app out task=p3x9za 今天的花费已到上限");
+});
+
 test("a live event comes without an id, and describeEvent calls it live", async (t) => {
   const dir = path.join(tmp, "live");
   const socket = path.join(dir, "api", "a.sock");

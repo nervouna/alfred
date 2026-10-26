@@ -16,6 +16,20 @@ export interface RunRef {
   title: string;
 }
 
+/** A task run whose report reached the owner, kept until the owner's next message so the chat can follow up on it. */
+export interface TaskDelivery {
+  taskId: string;
+  /** The task's title when it ran. */
+  title: string;
+  runId: string;
+  /** When the reply was posted. */
+  at: string;
+  /** The first line of the reply. */
+  summary: string;
+  /** The files the run sent, relative to the workspace. */
+  files: string[];
+}
+
 /** A retired session, kept so /resume can switch back to it. */
 export interface SessionSnapshot {
   sessionId: string;
@@ -41,6 +55,8 @@ export interface AgentUserState {
   previousSession?: SessionSnapshot;
   /** Runs a restart ended while they were live or queued; the user's next message gets a note naming them. */
   lostRuns?: RunRef[];
+  /** Task runs delivered since the owner's last message, oldest first; the next message's prompt lists them and clears the list. */
+  taskDeliveries?: TaskDelivery[];
   /** Spend on `spendDay` (YYYY-MM-DD in the owner's time zone), for the daily cap. */
   spendDay?: string;
   spendDayUsd?: number;

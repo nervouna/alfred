@@ -52,7 +52,7 @@ export interface Undelivered {
 export interface RunRecord {
   id: string;
   kind: RunKind;
-  /** Tracked work this run belongs to; empty until tasks exist. */
+  /** The task this run is a run of; chat runs have none. */
   taskId?: string;
   title: string;
   status: RunStatus;
@@ -227,6 +227,8 @@ export class RunRecorder {
     kind: RunKind;
     title: string;
     model?: string;
+    /** The task this run is a run of. */
+    taskId?: string;
     id?: string;
     startedAt?: string;
     queued?: boolean;
@@ -241,6 +243,7 @@ export class RunRecorder {
     this.file = {
       id: this.id,
       kind: init.kind,
+      ...(init.taskId ? { taskId: init.taskId } : {}),
       title: init.title,
       status: init.queued ? "queued" : "running",
       model: init.model,

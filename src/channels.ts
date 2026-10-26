@@ -88,7 +88,7 @@ export class SerialQueue {
 }
 
 /** The path as the event shows it: relative to the workspace. */
-function workspaceRelative(workspace: string, absPath: string): string {
+export function workspaceRelative(workspace: string, absPath: string): string {
   const outside = (rel: string) => rel === ".." || rel.startsWith(`..${path.sep}`);
   let real = workspace;
   try {
@@ -102,16 +102,26 @@ function workspaceRelative(workspace: string, absPath: string): string {
 
 function recordMessage(
   events: EventLog,
-  message: { channel: Channel; direction: "in" | "out"; text: string; files: FileRef[]; runId?: string; clientId?: string; error?: string },
+  message: {
+    channel: Channel;
+    direction: "in" | "out";
+    text: string;
+    files: FileRef[];
+    runId?: string;
+    taskId?: string;
+    clientId?: string;
+    error?: string;
+  },
 ): void {
   // A message with neither text nor files leaves nothing to show.
   if (!message.text.trim() && message.files.length === 0) return;
-  const { runId, clientId, error, ...rest } = message;
+  const { runId, taskId, clientId, error, ...rest } = message;
   events.append("message.created", {
     id: crypto.randomUUID(),
     ...rest,
     at: new Date().toISOString(),
     ...(runId ? { runId } : {}),
+    ...(taskId ? { taskId } : {}),
     ...(clientId ? { clientId } : {}),
     ...(error ? { error } : {}),
   });
@@ -125,11 +135,11 @@ export function recordInbound(events: EventLog, channel: Channel, inbound: Inbou
 /**
  * Records what is sent through `out` as outbound messages, after each attempt,
  * with the error when the channel refused it. A caption and its file are two
- * messages.
+ * messages. The output of a task's run passes the task's id, which goes on each message.
  */
-export function recorded(out: Outbound, events: EventLog, opts: { workspace: string; runId?: string }): Outbound {
+export function recorded(out: Outbound, events: EventLog, opts: { workspace: string; runId?: string; taskId?: string }): Outbound {
   const record = (text: string, files: FileRef[], error?: string) =>
-    recordMessage(events, { channel: out.channel, direction: "out", text, files, runId: opts.runId, error });
+    recordMessage(events, { channel: out.channel, direction: "out", text, files, runId: opts.runId, taskId: opts.taskId, error });
   const text = async (body: string): Promise<void> => {
     try {
       await out.text(body);

@@ -41,6 +41,7 @@ test("checkSubagentWrite refuses memory/, skills/ and every ALFRED.md, and allow
     ["Write", { file_path: "reports/alfred.md" }],
     ["mcp__alfred__move_file", { from: "notes/a.md", to: "memory/a.md" }],
     ["mcp__alfred__render_pdf", { source: "reports/a.md", output: "memory/a.pdf" }],
+    ["mcp__alfred__render_pdf", { source: "memory/a.md" }],
     ["mcp__alfred__generate_image", { prompt: "x", output: "memory/x.jpg" }],
     ["Write", { file_path: "skills/weekly/SKILL.md" }],
     ["Edit", { file_path: path.join(root, "skills", "weekly", "template.html") }],

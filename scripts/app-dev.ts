@@ -22,6 +22,8 @@ import { startApi } from "../src/api/server.ts";
 import { isLiveEvent, sharedEventLog } from "../src/events.ts";
 import { describeError, log } from "../src/log.ts";
 import { STATE_DIR, WORKSPACE_DIR } from "../src/store.ts";
+import { taskCommands } from "../src/tasks/commands.ts";
+import { TaskStore } from "../src/tasks/store.ts";
 import { DeviceStore } from "../src/workbench/devices.ts";
 import { buildPairing } from "../src/workbench/pairing.ts";
 import { startWorkbench } from "../src/workbench/server.ts";
@@ -113,9 +115,11 @@ async function main(options: Options): Promise<void> {
   // Each cleanup undoes one setup step; they run in reverse, so the workbench goes first and the handler last.
   const cleanups: (() => Promise<void> | void)[] = [];
   try {
-    const handler = createLocalHandler();
+    // Wired as `run` wires them: the one task store behind the handler, which runs the tasks, and the task commands.
+    const tasks = new TaskStore();
+    const handler = createLocalHandler({ tasks });
     cleanups.push(() => handler.shutdown());
-    cleanups.push(await startApi({ socket, handler, events: sharedEventLog() }));
+    cleanups.push(await startApi({ socket, handler, events: sharedEventLog(), tasks: taskCommands(tasks, handler) }));
     cleanups.push(
       sharedEventLog().subscribe((event) => {
         if (isLiveEvent(event)) console.log(`[live] ${describeLive(event)}`);

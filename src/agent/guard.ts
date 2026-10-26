@@ -53,8 +53,71 @@ function hasParentSegment(pattern: string): boolean {
   return pattern.split(/[\\/]/).includes("..");
 }
 
-/** Returns a denial reason when a tool call would touch anything outside `root`. */
-export function checkToolInput(root: string, toolName: string, input: Record<string, unknown>): string | undefined {
+/** Input fields that name a path a tool call writes to. */
+const WRITE_PATHS: Record<string, string[]> = {
+  Write: ["file_path"],
+  Edit: ["file_path"],
+  MultiEdit: ["file_path"],
+  NotebookEdit: ["notebook_path"],
+  mcp__alfred__move_file: ["from", "to"],
+  mcp__alfred__render_pdf: ["output"],
+  mcp__alfred__generate_image: ["output"],
+};
+
+/** Where a run may read but not write: top-level workspace directories, and file names that count anywhere in the workspace. Names match in any case, as on a case-insensitive disk. */
+export interface ReadOnlyPaths {
+  dirs: readonly string[];
+  names: readonly string[];
+}
+
+export interface GuardOptions {
+  /** Every tool call that writes here is denied, whoever makes it: the run's own thread or a subagent. */
+  readOnly?: ReadOnlyPaths;
+}
+
+/** The paths a tool call writes to, as it spells them. */
+function writtenPaths(toolName: string, input: Record<string, unknown>): string[] {
+  const named = (WRITE_PATHS[toolName] ?? []).flatMap((key) => {
+    const p = input[key];
+    return typeof p === "string" && p ? [p] : [];
+  });
+  // render_pdf without an output writes next to its source (see tools.ts).
+  const source = input.source;
+  if (toolName === "mcp__alfred__render_pdf" && !named.length && typeof source === "string" && source) {
+    return [`${source.slice(0, source.length - path.extname(source).length)}.pdf`];
+  }
+  return named;
+}
+
+/** The path, as the call spelled it, where a tool call would write inside `readOnly`; undefined when it writes nowhere there. */
+export function readOnlyWrite(root: string, toolName: string, input: Record<string, unknown>, readOnly: ReadOnlyPaths): string | undefined {
+  const rootReal = fs.realpathSync(root);
+  const dirs = readOnly.dirs.map((dir) => dir.toLowerCase());
+  const names = readOnly.names.map((name) => name.toLowerCase());
+  for (const p of writtenPaths(toolName, input)) {
+    const real = resolveInside(root, p);
+    if (!real) continue; // The workspace check refuses paths outside the workspace.
+    const rel = path.relative(rootReal, real);
+    const top = rel.split(path.sep)[0]?.toLowerCase();
+    if ((top && dirs.includes(top)) || names.includes(path.basename(rel).toLowerCase())) return p;
+  }
+  return undefined;
+}
+
+/** Returns a denial reason when a tool call would touch anything outside `root`, or write to a path `options.readOnly` names. */
+export function checkToolInput(root: string, toolName: string, input: Record<string, unknown>, options: GuardOptions = {}): string | undefined {
+  return checkWorkspace(root, toolName, input) ?? checkReadOnly(root, toolName, input, options.readOnly);
+}
+
+function checkReadOnly(root: string, toolName: string, input: Record<string, unknown>, readOnly: ReadOnlyPaths | undefined): string | undefined {
+  if (!readOnly) return undefined;
+  const p = readOnlyWrite(root, toolName, input, readOnly);
+  if (p === undefined) return undefined;
+  const places = [...readOnly.dirs.map((dir) => `${dir}/`), ...readOnly.names.map((name) => `${name} files`)];
+  return `${p} is read-only in this run: ${places.join(", ")} may be read but not changed. Say in your final message what should change instead.`;
+}
+
+function checkWorkspace(root: string, toolName: string, input: Record<string, unknown>): string | undefined {
   const outside = (p: string) => `${p} is outside the workspace; only files under ${root} are accessible.`;
 
   const pathKey = PATH_TOOLS[toolName];
@@ -76,13 +139,13 @@ export function checkToolInput(root: string, toolName: string, input: Record<str
   return undefined;
 }
 
-/** PreToolUse hook that denies out-of-workspace file access. Runs before permission rules. */
-export function workspaceGuard(root: string): HookCallbackMatcher {
+/** PreToolUse hook that denies out-of-workspace file access, and writes to the paths `options.readOnly` names. Runs before permission rules. */
+export function workspaceGuard(root: string, options: GuardOptions = {}): HookCallbackMatcher {
   return {
     hooks: [
       async (input) => {
         if (input.hook_event_name !== "PreToolUse") return {};
-        const reason = checkToolInput(root, input.tool_name, (input.tool_input ?? {}) as Record<string, unknown>);
+        const reason = checkToolInput(root, input.tool_name, (input.tool_input ?? {}) as Record<string, unknown>, options);
         if (!reason) return {};
         log.warn(`denied ${input.tool_name}${input.agent_id ? ` in subagent ${input.agent_type ?? input.agent_id}` : ""}: ${reason}`);
         return {

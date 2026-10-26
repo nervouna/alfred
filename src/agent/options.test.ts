@@ -162,3 +162,19 @@ test("the reply rules are for the app: HTML reports are sent as they are, a PDF 
   assert.doesNotMatch(prompt, /never send (an )?HTML/i);
   assert.deepEqual(prompt.match(/^# Replying in .*$/gm), ["# Replying in the app"], "one reply section, and it is the app's");
 });
+
+test("an unattended run, such as a scheduled task's, keeps no session, has its own budget, offers no questions and may not write memory, rules or skills", async () => {
+  const { MAX_BUDGET_USD } = await import("./config.ts");
+  prepareWorkspace();
+  const options = agentOptions({ out: appOutbound(), model: "haiku", task: { budgetUsd: 0.5 } });
+  assert.equal(options.persistSession, false);
+  assert.equal(options.maxBudgetUsd, 0.5);
+  assert.equal(options.model, "claude-haiku-5-5");
+  assert.equal(options.resume, undefined);
+  assert.ok(Array.isArray(options.tools) && !options.tools.includes("AskUserQuestion"));
+  assert.ok(options.tools.includes("Agent"), "foreground subagents work as in chat");
+
+  const chat = agentOptions({ out: appOutbound(), model: "haiku" });
+  assert.equal(chat.persistSession, undefined);
+  assert.equal(chat.maxBudgetUsd, MAX_BUDGET_USD);
+});

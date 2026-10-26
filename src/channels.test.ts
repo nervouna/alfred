@@ -78,6 +78,25 @@ test("recorded text appends an outbound message event after the send, with the r
   assert.match(message?.id ?? "", /^[0-9a-f-]{36}$/);
 });
 
+test("recorded messages carry the task id when the output is a task run's", async () => {
+  const events = newLog();
+  const { out } = fakeOut();
+  const task = recorded(out, events, { workspace, runId: "k7m2qa", taskId: "p3x9za" });
+  await task.text("报告写好了。");
+  await task.file(path.join(workspace, "reports", "vps.md"), "见附件");
+  await recorded(out, events, { workspace, taskId: "p3x9za" }).text("今天的花费已到上限。");
+  await recorded(out, events, { workspace, runId: "k7m2qa" }).text("没有任务。");
+
+  const view = messages(events).map((m) => [m.text || m.files[0]?.path, m.runId, m.taskId]);
+  assert.deepEqual(view, [
+    ["报告写好了。", "k7m2qa", "p3x9za"],
+    ["见附件", "k7m2qa", "p3x9za"],
+    ["reports/vps.md", "k7m2qa", "p3x9za"],
+    ["今天的花费已到上限。", undefined, "p3x9za"],
+    ["没有任务。", "k7m2qa", undefined],
+  ]);
+});
+
 test("a send the channel refuses is recorded with the error and still rejects", async () => {
   const events = newLog();
   const { out } = fakeOut(true);
