@@ -336,8 +336,9 @@ export class DocumentStore {
   }
 
   /**
-   * Moves the document at `from`, and each document under it as a directory, to the same place under `to`. A document
-   * whose new path another document has stays where it is and is logged. Returns the documents that moved.
+   * Moves the document at `from`, and each document under it as a directory, to the same place under `to`. Its kind
+   * follows the new name. A document whose new path another document has stays where it is and is logged. Returns the
+   * documents that moved.
    */
   move(from: string, to: string, at = this.now()): Document[] {
     const stamp = at.toISOString();
@@ -352,7 +353,8 @@ export class DocumentStore {
         log.warn(`not moving document ${entry.document.id} from ${current} to ${target}: another document has that path`);
         continue;
       }
-      const document = DocumentSchema.parse({ ...entry.document, path: target, updatedAt: stamp });
+      // The kind is the file's, so a move to another extension changes it.
+      const document = DocumentSchema.parse({ ...entry.document, path: target, kind: documentKind(target), updatedAt: stamp });
       next = next.map((other) => (other === entry ? { ...other, document } : other));
       moved.push(document);
     }

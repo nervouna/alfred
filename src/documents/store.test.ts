@@ -302,6 +302,18 @@ test("a move onto a path another document has leaves both as they were, and the 
   assert.equal(store.get(free.id)?.path, "new/y.md");
 });
 
+test("a move takes the kind of the new name, and keeps the kind when the extension is the same", () => {
+  const { store } = open();
+  const doc = essay(store, "a.md");
+  const renamed = store.move("a.md", "a.txt", at("2026-10-26T05:00:00Z"));
+  assert.deepEqual(renamed, [{ ...doc, path: "a.txt", kind: "text", updatedAt: "2026-10-26T05:00:00.000Z" }]);
+  assert.deepEqual(store.get(doc.id), renamed[0]);
+
+  const sameKind = store.move("a.txt", "b.txt", at("2026-10-26T06:00:00Z"));
+  assert.equal(sameKind[0]?.kind, "text");
+  assert.equal(store.move("b.txt", "c.md", at("2026-10-26T07:00:00Z"))[0]?.kind, "markdown");
+});
+
 test("a move to the path a document already has changes nothing", () => {
   const { events, store } = open();
   const doc = essay(store, "a.md");
