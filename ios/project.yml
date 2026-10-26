@@ -33,6 +33,13 @@ targets:
         CFBundleDisplayName: Alfred
         CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
         UILaunchScreen: {}
+        # The scanner in the pairing screen uses the camera.
+        NSCameraUsageDescription: Alfred 用相机扫描配对二维码。
+        # Lets the simulator reach a local Alfred over http on 127.0.0.1.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        # The keychain group the app shares with the Share Extension; the app reads it from here.
+        AlfredKeychainAccessGroup: $(AppIdentifierPrefix)$(ALFRED_BUNDLE_ID)
     entitlements:
       path: Alfred/Alfred.entitlements
       properties:
@@ -45,6 +52,31 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(ALFRED_BUNDLE_ID)
         TARGETED_DEVICE_FAMILY: "1"
+
+  AlfredTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: AlfredTests
+    dependencies:
+      - target: Alfred
+      - package: AlfredKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(ALFRED_BUNDLE_ID).tests
+        GENERATE_INFOPLIST_FILE: YES
+
+  AlfredUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: AlfredUITests
+    dependencies:
+      - target: Alfred
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(ALFRED_BUNDLE_ID).uitests
+        GENERATE_INFOPLIST_FILE: YES
 
   AlfredShare:
     type: app-extension
@@ -79,3 +111,7 @@ schemes:
       targets:
         Alfred: all
         AlfredShare: all
+    test:
+      targets:
+        - AlfredTests
+        - AlfredUITests
