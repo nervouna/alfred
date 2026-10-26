@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -130,6 +131,70 @@ test("agentEnv passes Alfred's API key and drops inherited Claude and Anthropic 
       else process.env[name] = value;
     }
   }
+});
+
+/**
+ * Runs a snippet in a process of its own, with config.ts loaded there: the settings are read at import time, so each
+ * value needs a fresh load. The parent's CLAUDE_CODE_AUTO_COMPACT_WINDOW is set to a value of its own, which agentEnv must
+ * drop, or replace with Alfred's.
+ */
+function configIn(compactTokens: string | undefined, snippet: string) {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    ALFRED_STATE_DIR: path.join(tmp, "state"),
+    ALFRED_WORKSPACE: path.join(tmp, "workspace"),
+    ALFRED_ANTHROPIC_API_KEY: "sk-alfred",
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW: "5000",
+  };
+  if (compactTokens === undefined) delete env.ALFRED_COMPACT_TOKENS;
+  else env.ALFRED_COMPACT_TOKENS = compactTokens;
+  const config = JSON.stringify(new URL("./config.ts", import.meta.url).href);
+  const script = `const { agentEnv, checkCompactTokens } = await import(${config});\n${snippet}`;
+  return spawnSync(process.execPath, ["--input-type=module", "-e", script], { env, encoding: "utf8", timeout: 60_000 });
+}
+
+test("agentEnv turns on the one-hour prompt cache and compacts at 100000 tokens by default", () => {
+  const run = configIn(undefined, "console.log(JSON.stringify(agentEnv()));");
+  assert.equal(run.status, 0, run.stderr);
+  const env = JSON.parse(run.stdout) as Record<string, string>;
+  assert.equal(env.ENABLE_PROMPT_CACHING_1H, "1");
+  assert.equal(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, "100000", "the inherited 5000 is replaced");
+});
+
+test("ALFRED_COMPACT_TOKENS=0 leaves the compaction window out, and any other value sets it", () => {
+  const off = configIn("0", "console.log(JSON.stringify(agentEnv()));");
+  assert.equal(off.status, 0, off.stderr);
+  const offEnv = JSON.parse(off.stdout) as Record<string, string>;
+  assert.equal(offEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW, undefined, "the inherited 5000 is dropped too");
+  assert.equal(offEnv.ENABLE_PROMPT_CACHING_1H, "1");
+
+  const set = configIn("150000", "console.log(JSON.stringify(agentEnv()));");
+  assert.equal(set.status, 0, set.stderr);
+  assert.equal((JSON.parse(set.stdout) as Record<string, string>).CLAUDE_CODE_AUTO_COMPACT_WINDOW, "150000");
+});
+
+test("ALFRED_COMPACT_TOKENS must be 0 or a whole number of at least 20000, and anything else fails at startup", () => {
+  for (const value of ["20000", "0"]) {
+    const run = configIn(value, "checkCompactTokens(); console.log('ok');");
+    assert.equal(run.status, 0, `${value}: ${run.stderr}`);
+  }
+  for (const value of ["abc", "19999", "100000.5", "-1"]) {
+    const run = configIn(value, "checkCompactTokens(); console.log('ok');");
+    assert.notEqual(run.status, 0, value);
+    assert.match(run.stderr, /ALFRED_COMPACT_TOKENS must be a whole number of tokens, at least 20000, or 0/, value);
+    assert.ok(run.stderr.includes(`got "${value}"`), value);
+  }
+});
+
+test("the handler checks ALFRED_COMPACT_TOKENS before it starts anything", () => {
+  const channels = JSON.stringify(new URL("../channels.ts", import.meta.url).href);
+  const handler = JSON.stringify(new URL("./handler.ts", import.meta.url).href);
+  const run = configIn(
+    "19999",
+    `const { appOutbound } = await import(${channels});\nconst { createAgentHandler } = await import(${handler});\ncreateAgentHandler({ out: appOutbound() });`,
+  );
+  assert.notEqual(run.status, 0);
+  assert.match(run.stderr, /ALFRED_COMPACT_TOKENS must be a whole number of tokens, at least 20000, or 0/);
 });
 
 test("runTitle takes the user's own first line, without the attachments", () => {
