@@ -382,7 +382,7 @@ A task is a brief the agent runs on a schedule, without being asked each time. T
 | `$XDG_STATE_HOME/alfred/{account,sync,context-tokens}.json` | what the retired WeChat bot kept; nothing reads them any more, and they can stay or be deleted |
 | `$XDG_STATE_HOME/alfred/claude/` | isolated Claude Code config dir: agent session transcripts used for resume |
 | `$XDG_STATE_HOME/alfred/workspace-plugin/` | the `workspace` skills plugin: a manifest and the `skills` symlink into the workspace, recreated at startup |
-| `$XDG_STATE_HOME/alfred/workbench/` | what the workbench reads: `runs.jsonl` (one line per finished run, kept for good), `runs/<id>.json` (live and recent runs with their steps, kept 30 days), `status.json` (heartbeat), `tasks.json` (the owner's tasks with their schedules, next runs, skips and last run, written on every change by the task store, its only writer), `alfred.log` (the log, rotated at 5 MB to `alfred.log.1`) |
+| `$XDG_STATE_HOME/alfred/workbench/` | what the workbench reads: `runs.jsonl` (one line per finished run, kept for good), `runs/<id>.json` (live and recent runs with their steps, kept 30 days), `status.json` (heartbeat), `tasks.json` (the owner's tasks with their schedules, next runs, skips and last run, written on every change by the task store, its only writer), `documents.json` (the owner's documents, with their versions, annotations and replies, written on every change by the document store, its only writer), `alfred.log` (the log, rotated at 5 MB to `alfred.log.1`) |
 | `$ALFRED_WORKBENCH_STATE` (default `$XDG_STATE_HOME/alfred/app/`) | `devices.json`: the app's paired devices, each with its id, name, creation and revocation times and the SHA-256 of its token, never the token; a device that has registered for push also has `push`, its APNs registration (the APNs device token and the environment, as `POST /api/push` stored it); the directory is mode 700 and the file 600, rewritten atomically. The workbench re-reads it when it changes. `push-cursor.json`: the id of the last event the push dispatcher handled |
 | `~/Alfred/` (override with `ALFRED_WORKSPACE`) | `ALFRED.md` (workspace rules), `inbox/`, `reports/` (a task's reports go in `reports/tasks/<task id>/`), `notes/`, `images/`, `memory/` (long-term memory), `skills/` (the owner's skills), `.trash/` |
 | `$XDG_CACHE_HOME/alfred/ms-playwright/` (default `~/.cache/…`, override with `PLAYWRIGHT_BROWSERS_PATH`) | Chrome Headless Shell for PDF rendering |
@@ -419,6 +419,7 @@ src/files.ts        file name, date and text helpers
 src/pdf.ts          Markdown/HTML to PDF rendering
 src/runs.ts         run ids and records, the heartbeat: what the workbench reads
 src/tasks/          the owner's tasks: schedule arithmetic in the owner's time zone, the task store (the only writer of workbench/tasks.json), and the API's task commands over the store and the handler
+src/documents/      the document store: the owner's delivered files, their versions, annotations and replies (the only writer of workbench/documents.json)
 src/workbench/      the read-only workbench: server, Access check, pages, safe Markdown
 src/cli.ts          run | status | setup-pdf | pdf | memory-scan | workbench | apns-test | pair | devices | api
 plugin/             the baked skills plugin `alfred`
