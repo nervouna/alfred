@@ -1,6 +1,7 @@
 // A local Alfred for the app in the simulator: the real agent handler on the app channel, behind the
 // command API on <ALFRED_STATE_DIR>/api/alfred.sock, and the workbench on 127.0.0.1 with one paired
-// device. It prints the pairing to paste into the app, then every event as it happens: [event] for
+// device. It opens the workspace's history and the document store as `run` does, so deliveries become documents and the
+// app's revisions and undos run. It prints the pairing to paste into the app, then every event as it happens: [event] for
 // stored ones, [live] for message deltas and steps. Ctrl-C or SIGTERM stops everything; it exits 0.
 // usage: node scripts/app-dev.ts [--port <port>] [--model <sonnet|opus|haiku>] [--repair] [--seed-documents]
 //   --port            the workbench's loopback port (default 8787)
@@ -23,6 +24,8 @@ import { isModelKey } from "../src/agent/config.ts";
 import { describeEvent } from "../src/api/client.ts";
 import type { LiveEvent } from "../src/api/schema.ts";
 import { startApi } from "../src/api/server.ts";
+import { documentCommands } from "../src/documents/commands.ts";
+import { startDocuments } from "../src/documents/startup.ts";
 import { DocumentStore, documentKind, documentTitle } from "../src/documents/store.ts";
 import { VERSIONS_GIT_DIR, Versions } from "../src/documents/versions.ts";
 import { isLiveEvent, sharedEventLog } from "../src/events.ts";
@@ -255,11 +258,22 @@ async function main(options: Options): Promise<void> {
   const cleanups: (() => Promise<void> | void)[] = [];
   try {
     if (options.seedDocuments) await seedDocuments();
-    // Wired as `run` wires them: the one task store behind the handler, which runs the tasks, and the task commands.
+    // Wired as `run` wires them: the one history and document store (opened after the seed, so it finds the seeded
+    // documents and imports nothing), the one task store behind the handler, which runs the tasks, and the task commands.
+    const documents = await startDocuments();
     const tasks = new TaskStore();
-    const handler = createLocalHandler({ tasks });
+    const handler = createLocalHandler({ tasks, documents });
     cleanups.push(() => handler.shutdown());
-    cleanups.push(await startApi({ socket, handler, events: sharedEventLog(), tasks: taskCommands(tasks, handler) }));
+    // Without documents the API answers every document command 503, as in `run`.
+    cleanups.push(
+      await startApi({
+        socket,
+        handler,
+        events: sharedEventLog(),
+        tasks: taskCommands(tasks, handler),
+        ...(documents ? { documents: documentCommands(handler, documents) } : {}),
+      }),
+    );
     cleanups.push(
       sharedEventLog().subscribe((event) => {
         if (isLiveEvent(event)) console.log(`[live] ${describeLive(event)}`);

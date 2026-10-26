@@ -80,6 +80,8 @@ final class AppModel {
     private(set) var documentCatalog = DocumentCatalog()
     /// Why the last read of the document list failed, until a read works.
     private(set) var documentFailure: String?
+    /// The comments on documents that the owner wrote and has not submitted. They are kept on the phone.
+    let annotationDrafts: DraftStore
     /// Whether the event stream is connected right now.
     private(set) var isConnected = false
     /// The access error that stopped the stream, until the owner pairs again or retries.
@@ -132,10 +134,12 @@ final class AppModel {
         session: URLSession = .shared,
         push: any PushSystem = NoPushSystem(),
         pushEnvironment: PushEnvironment? = nil,
+        draftFile: DraftFile? = nil,
         makeClientId: @escaping () -> String = { "c-" + UUID().uuidString.lowercased() },
         openStream: @escaping StreamOpener = AppModel.openEventStream
     ) {
         self.store = store
+        annotationDrafts = DraftStore(file: draftFile)
         self.session = session
         self.push = push
         self.pushEnvironment = pushEnvironment
@@ -147,7 +151,7 @@ final class AppModel {
     /// The model the app runs on: credentials from the keychain, requests on the shared session, notifications from
     /// the system, registered for the APNs environment the build was signed for.
     static func live() -> AppModel {
-        AppModel(store: AppKeychain.store(), push: LivePushSystem(), pushEnvironment: PushToken.environment())
+        AppModel(store: AppKeychain.store(), push: LivePushSystem(), pushEnvironment: PushToken.environment(), draftFile: .standard)
     }
 
     nonisolated static func openEventStream(_ client: AlfredClient, after lastEventId: Int64) async -> AsyncStream<EventStreamUpdate> {
@@ -219,6 +223,7 @@ final class AppModel {
         taskFailure = nil
         documentCatalog = DocumentCatalog()
         documentFailure = nil
+        annotationDrafts.clear()
         failedClientIds = []
         AttachmentStaging.discard(draftAttachments + outgoingAttachments.values.flatMap { $0 })
         draftAttachments = []
@@ -442,13 +447,15 @@ final class AppModel {
     /// Makes a call that changes a task and passes a refusal on, for the screen that asked to show. An access error also
     /// reaches the stream's screen, as it does for the owner's messages. `apply` takes the result, unless the app was
     /// paired again meanwhile.
-    private func perform<T: Sendable>(_ call: (AlfredClient) async throws -> T, then apply: (T) -> Void) async throws {
+    @discardableResult
+    private func perform<T: Sendable>(_ call: (AlfredClient) async throws -> T, then apply: (T) -> Void) async throws -> T {
         guard let client, let credentials else { throw URLError(.userAuthenticationRequired) }
         do {
             let result = try await call(client)
             if self.credentials == credentials {
                 apply(result)
             }
+            return result
         } catch {
             if self.credentials == credentials {
                 noteAccess(error)
@@ -474,6 +481,76 @@ final class AppModel {
         } catch {
             guard self.credentials == credentials else { return }
             documentFailure = LoadFailure.message(for: error)
+        }
+    }
+
+    // MARK: Annotations
+
+    /// Sends the document's drafts as one revision of `version`, its current version, whose text is `text` (`nil` for a
+    /// document with no text to anchor on). The batch is the whole-document comments and the passages that fit `text`, in the
+    /// order they were written; a draft that does not fit stays. On 202 the drafts that went are removed and the annotations
+    /// Alfred recorded show as submitted at once. On 409 the document's detail is read again and handed back, and the
+    /// drafts stay; on any other refusal, and on a network error, they stay too.
+    func submitAnnotations(documentId: String, version: String, text: AnchorText?) async -> AnnotationSubmission {
+        let batch = annotationDrafts.list.batch(documentId: documentId, in: text)
+        guard !batch.isEmpty else { return .nothingToSend }
+        guard let client, let credentials else { return .failed(message: LoadFailure.unpaired) }
+        do {
+            let accepted = try await client.revise(
+                documentId: documentId,
+                version: version,
+                annotations: batch.map { AnnotationDraft(target: $0.target, comment: $0.comment) }
+            )
+            // The pairing may have changed while the request was out.
+            if self.credentials == credentials {
+                annotationDrafts.remove(ids: Set(batch.map(\.id)))
+                for annotation in accepted.annotations {
+                    documentCatalog.apply(annotation)
+                }
+            }
+            return .accepted(runId: accepted.runId, annotations: accepted.annotations)
+        } catch AlfredError.http(status: 409, message: let message) {
+            let detail = try? await client.document(id: documentId)
+            if let detail, self.credentials == credentials {
+                documentCatalog.apply(detail.document)
+            }
+            return .conflict(message: message ?? "文档已经有了新的版本，请核对后再提交", detail: detail)
+        } catch {
+            if self.credentials == credentials {
+                noteAccess(error)
+            }
+            if case AlfredError.http = error {
+                return .rejected(message: LoadFailure.commandMessage(for: error))
+            }
+            return .failed(message: LoadFailure.message(for: error))
+        }
+    }
+
+    /// Makes a draft from an annotation that went back, written on the document's `current` version: a passage is
+    /// anchored on `text`, the current version's text, when it is known and the passage fits it. Otherwise the draft keeps
+    /// the context and the version of the annotation, and is anchored when the current version is shown (and lands in
+    /// 已失配 until then, and after, if it does not fit).
+    @discardableResult
+    func reedit(_ annotation: Annotation, current: String, text: AnchorText?) -> StoredDraft {
+        let draft = annotationDrafts.add(
+            documentId: annotation.documentId,
+            version: annotation.version,
+            target: annotation.target,
+            comment: annotation.comment,
+            origin: annotation.id
+        )
+        annotationDrafts.reanchor(documentId: annotation.documentId, to: current, in: text)
+        return annotationDrafts.list.draft(id: draft.id) ?? draft
+    }
+
+    /// Undoes the revision `runId` made of a document: the document comes back as a new version, which is listed at once.
+    /// A refusal is returned with the server's own words.
+    func undoRevision(documentId: String, runId: String) async -> UndoOutcome {
+        do {
+            let document = try await perform({ try await $0.undoRevision(documentId: documentId, runId: runId) }, then: { documentCatalog.apply($0) })
+            return .undone(document)
+        } catch {
+            return .refused(LoadFailure.commandMessage(for: error))
         }
     }
 

@@ -218,13 +218,14 @@ private struct TextFile<Content: View>: View {
     }
 }
 
-/// Text and data files: monospaced, selectable and scrollable. UIKit's text view lays out a long file lazily.
+/// Text and data files: monospaced, selectable and scrollable. UIKit's text view lays out a long file lazily. It is the
+/// one piece of text a passage annotation on a text document anchors on.
 private struct MonospacedText: View {
     let content: FileText.Content
 
     var body: some View {
         VStack(spacing: 0) {
-            MonospacedTextView(text: content.text)
+            PassageDocumentText(text: content.text)
                 .accessibilityIdentifier("viewer.text")
             if content.isTruncated {
                 Text("文件较大，只显示开头的 \(FileText.limit / 1024) KB")
@@ -236,26 +237,6 @@ private struct MonospacedText: View {
             }
         }
     }
-}
-
-private struct MonospacedTextView: UIViewRepresentable {
-    let text: String
-
-    func makeUIView(context: Context) -> UITextView {
-        let view = UITextView()
-        view.isEditable = false
-        view.alwaysBounceVertical = true
-        view.backgroundColor = .clear
-        view.textContainerInset = UIEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
-        let mono = UIFont.monospacedSystemFont(ofSize: UIFont.preferredFont(forTextStyle: .footnote).pointSize, weight: .regular)
-        view.font = UIFontMetrics(forTextStyle: .footnote).scaledFont(for: mono)
-        view.adjustsFontForContentSizeCategory = true
-        view.textColor = .label
-        view.text = text
-        return view
-    }
-
-    func updateUIView(_ view: UITextView, context: Context) {}
 }
 
 /// An HTML or SVG report, in the isolated web view. The rule list has to be compiled before the page may load, and
