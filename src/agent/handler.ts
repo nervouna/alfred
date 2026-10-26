@@ -93,7 +93,7 @@ import {
 import type { ModelKey } from "./config.ts";
 import { BackgroundRuns } from "./background.ts";
 import type { QueuedBrief } from "./background.ts";
-import { subagentTranscript } from "./cost.ts";
+import { ResponseLedger, subagentTranscript, unitPrices } from "./cost.ts";
 import { resolveInside, workspaceGuard } from "./guard.ts";
 import { TaskInput, answeredBy } from "./input.ts";
 import { EXTRACT_MODEL, MEMORY_LOCK_FILE, MemoryScanScheduler, SCAN_TIMEOUT_MS, scanTranscripts, transcriptDirs } from "./memory-scan.ts";
@@ -170,6 +170,8 @@ interface Run {
   recorder: RunRecorder;
   /** Background subagents this task started, live or queued. */
   background: BackgroundRuns;
+  /** The responses the run's stream carried that no result has reported: estimated if the run ends without its last result. */
+  ledger: ResponseLedger;
   query?: Query;
   /** The message that handed a queued brief back to the agent, until it is answered. */
   releaseUuid?: string;
@@ -769,6 +771,28 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
     if (MEMORY_SCAN_MINUTES > 0) scheduler.request(`session retired (${reason})`);
   }
 
+  /**
+   * Prices the responses of a run that no result reported (see ResponseLedger) at the remembered unit prices, and books them as a
+   * result's cost is booked: to the owner's total and the day's spend. The chat session's running total is left alone, since the
+   * SDK keeps it and the next result continues from it. A model with no remembered price adds nothing and is logged. Returns what
+   * was estimated, by model. It never throws, so the run's cleanup goes on after it.
+   */
+  function estimateUnsettled(run: Run): { usd: number; byModel: Record<string, number> } {
+    const estimate = run.ledger.estimate(store.get(owner).unitPrices ?? {});
+    for (const model of estimate.unpriced) {
+      log.warn(`run ${run.recorder.id}: no unit price remembered for ${model}, so its unreported responses are not estimated`);
+    }
+    if (estimate.usd === 0) return estimate;
+    try {
+      const user = store.get(owner);
+      store.update(owner, { totalCostUsd: user.totalCostUsd + estimate.usd, spendDay: localDate(), spendDayUsd: spentToday(user) + estimate.usd });
+    } catch (err) {
+      log.error(`saving the estimate of run ${run.recorder.id} failed: ${describeError(err)}`);
+    }
+    log.info(`run ${run.recorder.id}: estimated ${usd(estimate.usd)} for responses no result reported`);
+    return estimate;
+  }
+
   /** Runs the task's query until every message in its input is answered; each result goes to onResult. */
   async function execute(
     userId: string,
@@ -827,6 +851,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
           run.input.closeIfIdle();
         } else if (m.type === "stream_event") {
           publishDelta(run, m);
+          run.ledger.observe(m);
         } else if (m.type === "assistant") {
           // A background subagent's steps go on its own card; a foreground one's on the task's, with its role.
           const background = m.parent_tool_use_id ? run.background.byToolUse(m.parent_tool_use_id) : undefined;
@@ -862,6 +887,9 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
           const uuids = answeredBy(m);
           const notification = !uuids.length && (m.subtype === "success" || interrupted);
           run.background.settleEnded(m.modelUsage ?? {});
+          // The result settles the responses before it, and prices the models it used for an estimate later on.
+          run.ledger.settle();
+          store.update(owner, { unitPrices: { ...store.get(owner).unitPrices, ...unitPrices(m.modelUsage ?? {}) } });
           if (run.releaseUuid && !run.input.isPending(run.releaseUuid)) {
             // Answered without starting the handed-back brief: the agent dropped it.
             run.releaseUuid = undefined;
@@ -1004,6 +1032,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
       subagents: new SubagentTracker(),
       recorder,
       background,
+      ledger: new ResponseLedger(),
       interrupted: false,
       stopped: false,
       shutdown: false,
@@ -1129,6 +1158,12 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
       }
       // Subagents still running or queued end with the task: the process that ran them is gone.
       const orphans = background.endAll(run.shutdown ? "lost" : "stopped", run.shutdown ? failure : "the task ended");
+      const estimate = estimateUnsettled(run);
+      if (estimate.usd > 0) {
+        cost += estimate.usd;
+        for (const [model, spent] of Object.entries(estimate.byModel)) modelCosts.set(model, (modelCosts.get(model) ?? 0) + spent);
+        recorder.update({ costUsd: cost, modelCostUsd: Object.fromEntries(modelCosts), costEstimated: true });
+      }
       recorder.finish(status, failure);
       try {
         if (run.shutdown) {
@@ -1229,6 +1264,12 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
         status = "lost";
         failure = hooks.lostReason;
       }
+      const estimate = estimateUnsettled(run);
+      if (estimate.usd > 0) {
+        cost += estimate.usd;
+        for (const [model, spent] of Object.entries(estimate.byModel)) modelCosts.set(model, (modelCosts.get(model) ?? 0) + spent);
+        recorder.update({ costUsd: cost, modelCostUsd: Object.fromEntries(modelCosts), costEstimated: true });
+      }
     }
     log.info(`unattended run done run=${recorder.id} ${hooks.label} status=${status} cost=${usd(cost)} time=${humanAge(Date.now() - run.startedAt)} tools=[${toolSummary(run.toolCounts)}]`);
     return { status, failure, reply, cost };
@@ -1286,6 +1327,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
       subagents: new SubagentTracker(),
       recorder,
       background: noBackground(recorder),
+      ledger: new ResponseLedger(),
       interrupted: false,
       stopped: false,
       shutdown: false,
@@ -1356,6 +1398,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
       subagents: new SubagentTracker(),
       recorder,
       background: noBackground(recorder),
+      ledger: new ResponseLedger(),
       interrupted: false,
       stopped: false,
       shutdown: false,

@@ -4,7 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
 
-import { TranscriptUsage, subagentTranscript, unitPrices } from "./cost.ts";
+import type { SDKPartialAssistantMessage } from "@anthropic-ai/claude-agent-sdk";
+
+import { ResponseLedger, TranscriptUsage, subagentTranscript, unitPrices } from "./cost.ts";
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "alfred-cost-"));
 after(() => fs.rmSync(tmp, { recursive: true, force: true }));
@@ -65,4 +67,62 @@ test("a transcript's usage counts each response once, at its last line, and only
   fs.appendFileSync(file, `\n${line("m2", "sonnet", { ...partial, output_tokens: 50 })}\n`);
   usage.read();
   assert.ok(Math.abs((usage.cost({ sonnet: 2e-6 }) ?? 0) - (first + 1510 * 2e-6)) < 1e-12);
+});
+
+test("a transcript's cache write with the 1-hour TTL is weighted 2×, one with the 5-minute TTL 1.25×, and one with no TTL 1.25×", () => {
+  const file = subagentTranscript(tmp, "session-2", "a2");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const split = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 300, cache_creation: { ephemeral_5m_input_tokens: 100, ephemeral_1h_input_tokens: 200 } };
+  const unsplit = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 50 };
+  fs.writeFileSync(file, `${line("m1", "sonnet", split)}\n${line("m2", "sonnet", unsplit)}\n`);
+  const usage = new TranscriptUsage(file);
+  usage.read();
+  // m1: 100 at 1.25 and 200 at 2; m2's 50 have no TTL, so they count at the 5-minute rate, as they did before.
+  assert.ok(Math.abs((usage.cost({ sonnet: 1 }) ?? 0) - (125 + 400 + 62.5)) < 1e-9);
+});
+
+/** A stream message of the main agent, or of a subagent with its Agent call's id. */
+function stream(event: object, parent: string | null = null): SDKPartialAssistantMessage {
+  return { type: "stream_event", event, parent_tool_use_id: parent, uuid: "00000000-0000-4000-8000-000000000000", session_id: "s" } as SDKPartialAssistantMessage;
+}
+
+test("a ledger prices the responses no result reported, from each response's final output and TTL split, and a result settles them", () => {
+  const ledger = new ResponseLedger();
+  // Input, cache and TTL come with message_start; the output tokens and web searches of a response come with its message_delta.
+  ledger.observe(
+    stream({
+      type: "message_start",
+      message: { id: "r1", model: "sonnet", usage: { input_tokens: 100, output_tokens: 1, cache_read_input_tokens: 1000, cache_creation_input_tokens: 200, cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 200 } } },
+    }),
+  );
+  ledger.observe(stream({ type: "message_delta", delta: {}, usage: { output_tokens: 50, server_tool_use: null } }));
+  ledger.observe(stream({ type: "message_stop" }));
+  // 100 + 5×50 + 0.1×1000 + 2×200 = 850 input-token equivalents.
+  assert.ok(Math.abs(ledger.estimate({ sonnet: 1e-6 }).usd - 0.00085) < 1e-12);
+
+  // A subagent's response interleaves with the main agent's, which has no price: the subagent's is priced, with two searches.
+  ledger.observe(stream({ type: "message_start", message: { id: "r2", model: "haiku", usage: { input_tokens: 5, output_tokens: 1 } } }));
+  ledger.observe(
+    stream({ type: "message_start", message: { id: "s1", model: "sonnet", usage: { input_tokens: 10, output_tokens: 1, cache_creation_input_tokens: 1000, cache_creation: { ephemeral_5m_input_tokens: 1000, ephemeral_1h_input_tokens: 0 } } } }, "toolu_x"),
+  );
+  ledger.observe(stream({ type: "message_delta", delta: {}, usage: { output_tokens: 20, server_tool_use: { web_search_requests: 2, web_fetch_requests: 0 } } }, "toolu_x"));
+  ledger.observe(stream({ type: "message_delta", delta: {}, usage: { output_tokens: 7, server_tool_use: null } }));
+  ledger.observe(stream({ type: "message_stop" }, "toolu_x"));
+  ledger.observe(stream({ type: "message_stop" }));
+  const estimate = ledger.estimate({ sonnet: 1e-6 });
+  // The subagent's: 10 + 5×20 + 1.25×1000 = 1360 input-token equivalents, plus two searches. The haiku response adds nothing.
+  assert.ok(Math.abs(estimate.usd - 0.00085 - (0.00136 + 0.02)) < 1e-12);
+  assert.deepEqual(estimate.unpriced, ["haiku"]);
+  assert.deepEqual(Object.keys(estimate.byModel), ["sonnet"]);
+
+  ledger.settle();
+  assert.deepEqual(ledger.estimate({ sonnet: 1e-6 }), { usd: 0, byModel: {}, unpriced: [] });
+});
+
+test("a ledger counts a cache write whose TTL the usage does not give as a 1-hour one", () => {
+  const ledger = new ResponseLedger();
+  ledger.observe(stream({ type: "message_start", message: { id: "u1", model: "sonnet", usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 300 } } }));
+  ledger.observe(stream({ type: "message_stop" }));
+  // 300 cache writes at 2× the input price.
+  assert.ok(Math.abs(ledger.estimate({ sonnet: 1 }).usd - 600) < 1e-9);
 });
