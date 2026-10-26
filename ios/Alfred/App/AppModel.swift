@@ -85,7 +85,7 @@ final class AppModel {
         credentials != nil
     }
 
-    private var client: AlfredClient? {
+    var client: AlfredClient? {
         credentials.map { AlfredClient(credentials: $0, session: session) }
     }
 
