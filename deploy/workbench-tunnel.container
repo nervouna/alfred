@@ -7,7 +7,7 @@
 Description=Cloudflare tunnel for the Alfred workbench
 
 [Container]
-Image=docker.io/cloudflare/cloudflared:2026.10.0
+Image=docker.io/cloudflare/cloudflared:2026.10.4
 ContainerName=workbench-tunnel
 Pod=workbench.pod
 Exec=tunnel --no-autoupdate run
