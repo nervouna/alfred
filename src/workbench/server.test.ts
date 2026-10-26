@@ -7,6 +7,8 @@ import os from "node:os";
 import path from "node:path";
 import { after, before, mock, test } from "node:test";
 
+import type { TaskList } from "../api/schema.ts";
+
 // store.ts reads these at import time, so set them before loading the modules under test.
 const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "alfred-workbench-")));
 const workspace = path.join(tmp, "workspace");
@@ -14,8 +16,8 @@ const state = path.join(tmp, "state");
 process.env.ALFRED_WORKSPACE = workspace;
 process.env.ALFRED_STATE_DIR = state;
 
-const { RunRecorder, writeHeartbeat } = await import("../runs.ts");
-const { ErrorResponseSchema, RunDetailSchema, RunListSchema } = await import("../api/schema.ts");
+const { RunRecorder, TASKS_FILE, appendRunLog, newRunId, writeHeartbeat } = await import("../runs.ts");
+const { ErrorResponseSchema, RunDetailSchema, RunListSchema, TaskDetailSchema, TaskListSchema } = await import("../api/schema.ts");
 const { AccessVerifier } = await import("./access.ts");
 const { DeviceStore } = await import("./devices.ts");
 const { REPORT_CSP, createHandler, inlineImages, startWorkbench } = await import("./server.ts");
@@ -538,6 +540,92 @@ test("the run and file routes need a device token, and refuse other methods with
   }
   const ping = await fetch(`${open}/api/ping`, { method: "POST", headers: bearer(paired.token), body: "{}" });
   assert.equal(ping.headers.get("allow"), "GET", "POST /api/ping");
+});
+
+// --- /api/tasks -------------------------------------------------------------
+
+type RunRecord = import("../runs.ts").RunRecord;
+
+const TASK_ID = "p3r8vx";
+const taskList = JSON.parse(fs.readFileSync(new URL("../../fixtures/api/responses/task-list.json", import.meta.url), "utf8")) as TaskList;
+/** Two tasks of the fixture's task list, which the store would write as tasks.json. */
+const twoTasks: TaskList = { timeZone: "Asia/Taipei", tasks: taskList.tasks.filter((task) => task.id === TASK_ID || task.id === "t5w2hf") };
+
+/** A finished run of a task (none for a chat run), as runs.jsonl holds it. */
+function taskRun(taskId: string | undefined, title: string, startedAt: number): RunRecord {
+  const at = new Date(startedAt).toISOString();
+  return { id: newRunId(), kind: "task", taskId, title, status: "done", startedAt: at, endedAt: at, costUsd: 0.1, toolCalls: 0, files: [] };
+}
+
+test("GET /api/tasks answers an empty list in the workbench's time zone when there is no tasks file", async () => {
+  fs.rmSync(TASKS_FILE, { force: true });
+  const res = await fetch(`${open}/api/tasks`, { headers: bearer(paired.token) });
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("content-type"), "application/json; charset=utf-8");
+  assert.equal(res.headers.get("cache-control"), "no-store");
+  assert.deepEqual(TaskListSchema.parse(await res.json()), { timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone, tasks: [] });
+});
+
+test("GET /api/tasks gives the two tasks of the file, as a TaskList", async () => {
+  fs.writeFileSync(TASKS_FILE, JSON.stringify(twoTasks));
+  const res = await fetch(`${open}/api/tasks`, { headers: bearer(paired.token) });
+  assert.equal(res.status, 200);
+  assert.deepEqual(TaskListSchema.parse(await res.json()), twoTasks);
+});
+
+test("GET /api/tasks/<id> gives the task and its 50 newest runs of that task only, newest first", async () => {
+  fs.writeFileSync(TASKS_FILE, JSON.stringify(twoTasks));
+  const other = newRunId();
+  for (let i = 0; i < 52; i++) appendRunLog(taskRun(TASK_ID, `run ${i}`, Date.UTC(2031, 0, 1, 0, i)));
+  // Newer than all of the task's runs: they must not be listed.
+  appendRunLog(taskRun(other, "another task's run", Date.UTC(2031, 1, 1)));
+  appendRunLog(taskRun(undefined, "a chat run", Date.UTC(2031, 2, 1)));
+
+  const res = await fetch(`${open}/api/tasks/${TASK_ID}`, { headers: bearer(paired.token) });
+  assert.equal(res.status, 200);
+  const detail = TaskDetailSchema.parse(await res.json());
+  assert.deepEqual(detail.task, twoTasks.tasks.find((task) => task.id === TASK_ID));
+  assert.equal(detail.runs.length, 50);
+  assert.ok(detail.runs.every((run) => run.taskId === TASK_ID));
+  assert.deepEqual(
+    detail.runs.map((run) => run.title),
+    Array.from({ length: 50 }, (_, i) => `run ${51 - i}`),
+  );
+});
+
+test("GET /api/tasks/<id> answers 404 with its message for an unknown id and for a malformed one", async () => {
+  fs.writeFileSync(TASKS_FILE, JSON.stringify(twoTasks));
+  for (const id of ["zzzzzz", "ABCDEF", "abc", `${TASK_ID}0`, "p3r8v"]) {
+    const res = await fetch(`${open}/api/tasks/${id}`, { headers: bearer(paired.token) });
+    assert.equal(res.status, 404, id);
+    assert.deepEqual(await res.json(), { error: "There is no such task." }, id);
+  }
+});
+
+test("GET /api/tasks and GET /api/tasks/<id> need a device token, and refuse other methods with 405", async () => {
+  for (const p of ["/api/tasks", `/api/tasks/${TASK_ID}`]) {
+    await assertApiError(await fetch(`${open}${p}`), 401, `${p} without a token`);
+    await assertApiError(await fetch(`${guarded}${p}`), 403, `${p} on the tunnel without Access`);
+    const wrong = await fetch(`${open}${p}`, { method: "POST", headers: bearer(paired.token), body: "{}" });
+    assert.equal(wrong.status, 405, `POST ${p}`);
+    assert.equal(wrong.headers.get("allow"), "GET", `POST ${p}`);
+  }
+});
+
+test("a tasks file that does not fit answers 500 on both routes, and the log names the file", async () => {
+  const lines = mock.method(console, "error", () => {});
+  try {
+    for (const body of ["{ not json", JSON.stringify({ tasks: [] })]) {
+      fs.writeFileSync(TASKS_FILE, body);
+      await assertApiError(await fetch(`${open}/api/tasks`, { headers: bearer(paired.token) }), 500, `list: ${body}`);
+      await assertApiError(await fetch(`${open}/api/tasks/${TASK_ID}`, { headers: bearer(paired.token) }), 500, `detail: ${body}`);
+    }
+  } finally {
+    lines.mock.restore();
+    fs.rmSync(TASKS_FILE, { force: true });
+  }
+  const logged = lines.mock.calls.map((call) => String(call.arguments[0]));
+  assert.ok(logged.some((line) => line.includes(TASKS_FILE)), "the log names the file");
 });
 
 // --- POST /api/push ---------------------------------------------------------

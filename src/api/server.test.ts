@@ -7,7 +7,8 @@ import path from "node:path";
 import { after, test } from "node:test";
 import type { TestContext } from "node:test";
 
-import type { Run } from "./schema.ts";
+import type { Run, TaskCreate, TaskResult, TaskUpdate } from "./schema.ts";
+import type { TaskCommands, TaskReply } from "./server.ts";
 import type { Inbound } from "../channels.ts";
 import type { EventLog as EventLogType } from "../events.ts";
 
@@ -28,7 +29,7 @@ after(() => {
 
 const { EventLog } = await import("../events.ts");
 const { localDate } = await import("../files.ts");
-const { MAX_COMMAND_BYTES, MAX_UPLOAD_BYTES, parseCommand } = await import("./schema.ts");
+const { MAX_COMMAND_BYTES, MAX_UPLOAD_BYTES, TaskResultSchema, parseCommand } = await import("./schema.ts");
 const { HEARTBEAT_MS, apiSocketPath, startApi } = await import("./server.ts");
 const { InvalidAnswer } = await import("../channels.ts");
 
@@ -93,7 +94,7 @@ function stubHandler() {
 
 let fixtures = 0;
 /** An API on a socket of its own, with a stub handler and an event log of its own. */
-async function start(t: TestContext, opts: { heartbeatMs?: number; pageSize?: number } = {}) {
+async function start(t: TestContext, opts: { heartbeatMs?: number; pageSize?: number; tasks?: TaskCommands } = {}) {
   const dir = path.join(tmp, `t${fixtures++}`);
   const socket = path.join(dir, "api", "a.sock");
   const handler = stubHandler();
@@ -444,6 +445,100 @@ test("each task command fixture gets 503 until tasks are wired in, and never rea
   assert.equal(handler.submitted.length, 0, "submit was not called");
   assert.deepEqual(handler.stopped, []);
   assert.deepEqual(handler.answered, []);
+});
+
+// --- Task commands ------------------------------------------------------------
+
+const fixture = (dir: string, name: string) => fs.readFileSync(new URL(`../../fixtures/api/${dir}/${name}`, import.meta.url), "utf8");
+const taskResult = JSON.parse(fixture("responses", "task-result.json")) as TaskResult;
+
+/** The command a commands fixture parses to, as parseCommand gives it. */
+function parsedCommand(name: string) {
+  const parsed = parseCommand(JSON.parse(fixture("commands", name)));
+  if (!parsed.ok) throw new Error(`${name} does not parse: ${parsed.error}`);
+  return parsed.command;
+}
+
+/** Stands in for the task store: records the commands it is given, and answers a create or an update with `refuse` when it is set. */
+function stubTasks() {
+  const tasks = {
+    created: [] as TaskCreate[],
+    updated: [] as TaskUpdate[],
+    ran: [] as string[],
+    refuse: undefined as Extract<TaskReply, { ok: false }> | undefined,
+    /** The task ids the store holds: run answers false for any other. */
+    known: new Set(["p3r8vx"]),
+    async create(command: TaskCreate): Promise<TaskReply> {
+      tasks.created.push(command);
+      return tasks.refuse ?? { ok: true, task: taskResult.task };
+    },
+    async update(command: TaskUpdate): Promise<TaskReply> {
+      tasks.updated.push(command);
+      return tasks.refuse ?? { ok: true, task: taskResult.task };
+    },
+    async run(taskId: string): Promise<boolean> {
+      tasks.ran.push(taskId);
+      return tasks.known.has(taskId);
+    },
+  };
+  return tasks;
+}
+
+test("task.create, task.update and task.run reach the task store as parsed commands, and answer 201, 200 and 202", async (t) => {
+  const tasks = stubTasks();
+  const { socket, handler } = await start(t, { tasks });
+  const created = await post(socket, fixture("commands", "task-create.json"));
+  assert.equal(created.status, 201);
+  assert.deepEqual(TaskResultSchema.parse(created.json()), taskResult);
+  const updated = await post(socket, fixture("commands", "task-update-schedule.json"));
+  assert.equal(updated.status, 200);
+  assert.deepEqual(TaskResultSchema.parse(updated.json()), taskResult);
+  const ran = await post(socket, fixture("commands", "task-run.json"));
+  assert.equal(ran.status, 202);
+  assert.deepEqual(ran.json(), { accepted: true });
+
+  assert.deepEqual(tasks.created, [parsedCommand("task-create.json")]);
+  assert.deepEqual(tasks.updated, [parsedCommand("task-update-schedule.json")]);
+  assert.deepEqual(tasks.ran, ["p3r8vx"]);
+  assert.equal(handler.submitted.length, 0, "a task command never reaches the message path");
+});
+
+test("a task reply that is not ok answers its status and its error", async (t) => {
+  const tasks = stubTasks();
+  const { socket } = await start(t, { tasks });
+  tasks.refuse = { ok: false, status: 400, error: "brief: must not be empty" };
+  const created = await post(socket, fixture("commands", "task-create.json"));
+  assert.equal(created.status, 400);
+  assert.deepEqual(created.json(), { error: "brief: must not be empty" });
+
+  tasks.refuse = { ok: false, status: 404, error: "no task p3r8vx" };
+  const updated = await post(socket, fixture("commands", "task-update-schedule.json"));
+  assert.equal(updated.status, 404);
+  assert.deepEqual(updated.json(), { error: "no task p3r8vx" });
+});
+
+test("task.run answers 404 for a task the store does not have", async (t) => {
+  const tasks = stubTasks();
+  const { socket } = await start(t, { tasks });
+  const reply = await post(socket, { type: "task.run", taskId: "zzzzzz" });
+  assert.equal(reply.status, 404);
+  assert.deepEqual(reply.json(), { error: "no task zzzzzz" });
+  assert.deepEqual(tasks.ran, ["zzzzzz"]);
+});
+
+test("a task command that does not fit the schema gets 400 and never reaches the task store", async (t) => {
+  const tasks = stubTasks();
+  const { socket } = await start(t, { tasks });
+  for (const bad of [
+    { type: "task.update", taskId: "p3r8vx" },
+    { type: "task.run", taskId: "p3r8vx", now: true },
+    { type: "task.create", title: "", brief: "查价格", schedule: { kind: "daily", time: "09:00" } },
+  ]) {
+    assert.equal((await post(socket, bad)).status, 400, JSON.stringify(bad));
+  }
+  assert.deepEqual(tasks.created, []);
+  assert.deepEqual(tasks.updated, []);
+  assert.deepEqual(tasks.ran, []);
 });
 
 test("GET /events streams the backlog, then live events, as server-sent events", async (t) => {

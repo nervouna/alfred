@@ -12,7 +12,7 @@ const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "alf-")));
 process.env.ALFRED_STATE_DIR = path.join(tmp, "state");
 process.env.ALFRED_WORKSPACE = path.join(tmp, "workspace");
 
-const { ErrorResponseSchema, MAX_COMMAND_BYTES, MAX_UPLOAD_BYTES, UploadResultSchema, parseCommand } = await import("../api/schema.ts");
+const { ErrorResponseSchema, MAX_COMMAND_BYTES, MAX_UPLOAD_BYTES, TaskResultSchema, UploadResultSchema, parseCommand } = await import("../api/schema.ts");
 const { DeviceStore } = await import("./devices.ts");
 const { createHandler } = await import("./server.ts");
 
@@ -36,6 +36,9 @@ const eventsClosed = new Set<string>();
 /** How the fake answers /events: hold the stream open, end it, or break it. */
 let eventsMode: "hold" | "end" | "break" = "hold";
 
+/** The TaskResult the fake answers a task.create with, as the commands fixture's task would come back. */
+const taskResultBody: unknown = JSON.parse(fs.readFileSync(new URL("../../fixtures/api/responses/task-result.json", import.meta.url), "utf8"));
+
 /** The frames the fake sends on /events: one with an id, a ping, and a live event without one. */
 const FRAMES =
   'id: 7\nevent: message.created\ndata: {"id":7,"at":"2026-10-26T01:00:00.000Z","type":"message.created","data":{"id":"m-7","channel":"app","direction":"out","text":"好","files":[],"at":"2026-10-26T01:00:00.000Z","runId":"abcdef"}}\n\n' +
@@ -57,6 +60,7 @@ const upstream = http.createServer((req, res) => {
     if (req.method === "POST" && url.pathname === "/commands") {
       const command = JSON.parse(body.toString("utf8")) as { type: string; runId?: string };
       if (command.type === "run.stop") return sendJson(res, 404, { error: `no live or queued run ${command.runId}` });
+      if (command.type === "task.create") return sendJson(res, 201, taskResultBody);
       return sendJson(res, 202, { accepted: true });
     }
     if (req.method === "POST" && url.pathname === "/uploads") {
@@ -182,6 +186,17 @@ test("a question.answer is forwarded, and Alfred's 404 for a question that is no
   const command = { type: "question.answer", questionId: "q-fwd", answers: { "报告用哪种格式？": "短表格" } };
   const res = await fetch(`${open}/api/commands`, { method: "POST", headers: { ...bearer, "Content-Type": "application/json" }, body: JSON.stringify(command) });
   assert.equal(res.status, 202);
+  const sent = upstreamSeen.at(-1);
+  assert.deepEqual(JSON.parse(sent?.body.toString("utf8") ?? ""), command);
+});
+
+test("a task.create is forwarded, and Alfred's 201 comes back with its task as it is", async () => {
+  assert.ok(TaskResultSchema.safeParse(taskResultBody).success, "the fake answers a TaskResult");
+  const command = { type: "task.create", title: "每日 VPS 价格", brief: "查三家供应商官网的定价页。", schedule: { kind: "daily", time: "09:00" } };
+  const res = await fetch(`${open}/api/commands`, { method: "POST", headers: { ...bearer, "Content-Type": "application/json" }, body: JSON.stringify(command) });
+  assert.equal(res.status, 201);
+  assert.equal(res.headers.get("content-type"), "application/json; charset=utf-8");
+  assert.deepEqual(await res.json(), taskResultBody);
   const sent = upstreamSeen.at(-1);
   assert.deepEqual(JSON.parse(sent?.body.toString("utf8") ?? ""), command);
 });
