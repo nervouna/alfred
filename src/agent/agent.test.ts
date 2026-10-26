@@ -47,6 +47,30 @@ test("checkToolInput guards file tools, Glob and Grep, and ignores other tools",
   assert.equal(checkToolInput(root, "WebFetch", { url: "https://example.com" }), undefined);
 });
 
+test("no tool may use a .git path, read or written, in any case; names that only contain .git are allowed", () => {
+  const denied: [string, Record<string, unknown>][] = [
+    ["Read", { file_path: ".git/config" }],
+    ["Write", { file_path: "sub/.GIT/HEAD" }],
+    ["Glob", { pattern: "**/.git/**" }],
+    ["Grep", { pattern: "x", path: ".git" }],
+    ["Grep", { pattern: "x", glob: ".git/*" }],
+    ["mcp__alfred__move_file", { from: "notes/a.md", to: "x/.git/hooks/pre-commit" }],
+    ["mcp__alfred__send_file", { path: ".git/config" }],
+    ["mcp__alfred__render_pdf", { source: "reports/.git/a.md" }],
+    ["mcp__alfred__generate_image", { prompt: "x", output: ".Git/x.jpg" }],
+  ];
+  for (const [tool, input] of denied) {
+    assert.match(checkToolInput(root, tool, input) ?? "", /inside a \.git directory, which no tool may use\./, `${tool} ${JSON.stringify(input)}`);
+  }
+  const allowed: [string, Record<string, unknown>][] = [
+    ["Read", { file_path: ".gitignore" }],
+    ["Write", { file_path: "notes.github.md" }],
+    ["Glob", { pattern: "**/.gitignore" }],
+    ["mcp__alfred__send_file", { path: "notes/.github/a.md" }],
+  ];
+  for (const [tool, input] of allowed) assert.equal(checkToolInput(root, tool, input), undefined, `${tool} ${JSON.stringify(input)}`);
+});
+
 test("a guard told what is read-only denies every tool that writes there, and leaves reading and other paths alone", () => {
   fs.mkdirSync(path.join(root, "memory"), { recursive: true });
   fs.writeFileSync(path.join(root, "memory", "user.md"), "m");
