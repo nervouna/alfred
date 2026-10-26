@@ -70,7 +70,7 @@ private struct MessageList: View {
                 LazyVStack(spacing: 12) {
                     ForEach(model.timeline.items) { item in
                         switch item {
-                        case let .message(message): MessageRow(message: message)
+                        case let .message(message): MessageRow(message: message, taskTitle: model.taskLabel(for: message))
                         case let .question(record): QuestionCard(model: model, record: record)
                         }
                     }
@@ -162,11 +162,16 @@ private struct Bubble: View {
 
 private struct MessageRow: View {
     let message: Message
+    /// The title of the task whose run delivered the message, when the app knows the task.
+    let taskTitle: String?
 
     private var isOwner: Bool { message.direction == .inbound }
 
     var body: some View {
         VStack(alignment: isOwner ? .trailing : .leading, spacing: 4) {
+            if let taskTitle {
+                TaskLabel(title: taskTitle, identifier: "message.task." + message.id)
+            }
             if !message.text.isEmpty {
                 Bubble(text: message.text, isOwner: isOwner, identifier: (isOwner ? "message.in." : "message.out.") + message.id)
             }
@@ -189,6 +194,26 @@ private struct MessageRow: View {
 
     private var failedOnWeChat: Bool {
         message.direction == .outbound && message.error != nil
+    }
+}
+
+/// The task a message came from, small, above its bubble.
+private struct TaskLabel: View {
+    let title: String
+    let identifier: String
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "checklist")
+                .accessibilityHidden(true)
+            Text(title)
+                .lineLimit(1)
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 4)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier(identifier)
     }
 }
 

@@ -5,7 +5,7 @@ import Observation
 /// The app's tabs. The model owns the one on screen so a notification can open the chat.
 enum AppTab: Hashable {
     case chat
-    case runs
+    case tasks
     case documents
 }
 
@@ -62,6 +62,10 @@ final class AppModel {
     /// The device's credentials; `nil` until it is paired.
     private(set) var credentials: Credentials?
     private(set) var timeline = Timeline()
+    /// The owner's tasks: the list read from the server, kept current by `task.updated` events.
+    private(set) var taskCatalog = TaskCatalog()
+    /// Why the last read of the task list failed, until a read works.
+    private(set) var taskFailure: String?
     /// Whether the event stream is connected right now.
     private(set) var isConnected = false
     /// The access error that stopped the stream, until the owner pairs again or retries.
@@ -197,6 +201,8 @@ final class AppModel {
 
     private func reset() {
         timeline = Timeline()
+        taskCatalog = TaskCatalog()
+        taskFailure = nil
         failedClientIds = []
         AttachmentStaging.discard(draftAttachments + outgoingAttachments.values.flatMap { $0 })
         draftAttachments = []
@@ -277,8 +283,11 @@ final class AppModel {
         switch update {
         case .connected:
             isConnected = true
+            // The stream is up, or up again: whatever changed while it was down is in the list.
+            Task { await refreshTasks() }
         case let .received(event):
             timeline.apply(event)
+            taskCatalog.apply(event)
             trackItem(of: event)
             if case let .event(stored) = event, case let .messageCreated(message) = stored.payload, let clientId = message.clientId {
                 failedClientIds.remove(clientId)
@@ -370,6 +379,64 @@ final class AppModel {
             }
         default:
             break
+        }
+    }
+
+    // MARK: Tasks
+
+    /// Reads the task list (`GET /api/tasks`) and merges it with what events have told. The tab asks for it when it appears
+    /// and on pull to refresh, and the stream asks each time it connects. A failure is kept in `taskFailure`.
+    func refreshTasks() async {
+        guard let client, let credentials else { return }
+        do {
+            let list = try await client.tasks()
+            // The pairing may have changed while the request was out.
+            guard self.credentials == credentials else { return }
+            taskCatalog.load(list)
+            taskFailure = nil
+        } catch where LoadFailure.isCancellation(error) {
+            return
+        } catch {
+            guard self.credentials == credentials else { return }
+            taskFailure = LoadFailure.message(for: error)
+        }
+    }
+
+    /// Creates a task, and lists it at once, ahead of its `task.updated` event. A refusal is thrown, for the form to show.
+    func createTask(_ draft: TaskDraft) async throws {
+        try await perform({ try await $0.createTask(draft) }, then: { taskCatalog.apply($0) })
+    }
+
+    /// Changes a task: the form's fields, or its status to pause, resume or end it. The result is listed at once.
+    func updateTask(id: String, changes: TaskChanges) async throws {
+        try await perform({ try await $0.updateTask(id: id, changes: changes) }, then: { taskCatalog.apply($0) })
+    }
+
+    /// Queues a run of the task now. Its next scheduled time stays as it was, and the run arrives as a `run.updated` event.
+    func runTask(id: String) async throws {
+        try await perform({ try await $0.runTask(id: id) }, then: { _ in })
+    }
+
+    /// The title to show above a message a task's run delivered, when the app knows the task.
+    func taskLabel(for message: Message) -> String? {
+        taskCatalog.label(for: message)
+    }
+
+    /// Makes a call that changes a task and passes a refusal on, for the screen that asked to show. An access error also
+    /// reaches the stream's screen, as it does for the owner's messages. `apply` takes the result, unless the app was
+    /// paired again meanwhile.
+    private func perform<T: Sendable>(_ call: (AlfredClient) async throws -> T, then apply: (T) -> Void) async throws {
+        guard let client, let credentials else { throw URLError(.userAuthenticationRequired) }
+        do {
+            let result = try await call(client)
+            if self.credentials == credentials {
+                apply(result)
+            }
+        } catch {
+            if self.credentials == credentials {
+                noteAccess(error)
+            }
+            throw error
         }
     }
 

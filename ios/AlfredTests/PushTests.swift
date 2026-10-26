@@ -239,7 +239,7 @@ final class PushTests: XCTestCase {
         XCTAssertTrue(model.isChatVisible)
         XCTAssertEqual(NotificationPresentation.options(chatVisible: model.isChatVisible), [])
 
-        model.selectedTab = .runs
+        model.selectedTab = .tasks
         XCTAssertFalse(model.isChatVisible)
         XCTAssertEqual(NotificationPresentation.options(chatVisible: model.isChatVisible), [.banner, .sound])
 
@@ -324,7 +324,7 @@ final class PushTests: XCTestCase {
             messageFrame(id: 5, text: "第三条"),
         ]
         let (model, _, _) = try makeBed(frames: frames)
-        model.selectedTab = .runs
+        model.selectedTab = .tasks
         model.foreground()
         await eventually { model.timeline.lastEventId == 5 }
 
@@ -365,7 +365,7 @@ final class PushTests: XCTestCase {
 
     func testATapWithoutAnEventIdJustOpensTheChat() throws {
         let (model, _, _) = try makeBed()
-        model.selectedTab = .runs
+        model.selectedTab = .tasks
         model.openChat(for: NotificationTarget(eventId: nil, runId: nil))
         XCTAssertEqual(model.selectedTab, .chat)
         XCTAssertNil(model.revealRequest)

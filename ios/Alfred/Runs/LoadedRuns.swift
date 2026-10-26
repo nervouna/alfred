@@ -42,6 +42,13 @@ enum LoadFailure {
         }
     }
 
+    /// The words for a command the server refused: its own message as it is (a 400 says what is wrong with the task),
+    /// or the usual words when it gave none.
+    static func commandMessage(for error: any Error) -> String {
+        if case let AlfredError.http(_, message?) = error { return message }
+        return message(for: error)
+    }
+
     /// A request cut short because its screen went away: not a failure to show.
     static func isCancellation(_ error: any Error) -> Bool {
         error is CancellationError || (error as? URLError)?.code == .cancelled
