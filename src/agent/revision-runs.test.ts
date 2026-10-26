@@ -774,6 +774,56 @@ test("the run's commit makes a revised version of the document, and other docume
   assert.deepEqual(sent, { path: document.path, kind: "file", documentId: document.id, version: revised?.version });
 });
 
+test("a revision run cannot deliver the document it revises: deliver refuses it, nothing is committed, registered or sent, and the run posts it once", async () => {
+  const s = await stack();
+  const document = await deliver(s, NOTE, { name: "self" });
+  let delivered: Result | undefined;
+  const t = start(s, {
+    turn: async (prompt, _signal, options) => {
+      await wrote(options, document.path, `${NOTE}\n结尾：潮水退了。\n`);
+      await answer(prompt, options);
+      delivered = await call(options, "deliver", { path: document.path, caption: "改好了" });
+      return "加了结尾。";
+    },
+  });
+  const { runId } = t.revise(batchOf(document));
+  await until("the run to be over", () => t.posted(runId));
+
+  assert.ok(delivered?.isError);
+  assert.equal(textOf(delivered as Result), "Alfred posts the revised document itself when this run ends; do not deliver it.");
+  const versions = s.store.versions(document.id) ?? [];
+  assert.deepEqual(versions.map((v) => [v.reason, v.runId]), [["revised", runId], ["delivered", undefined]]);
+  assert.equal(s.store.get(document.id)?.version, versions[0]?.version);
+  const withDocument = t.outbound().filter((m) => m.files.some((f) => f.documentId === document.id));
+  assert.deepEqual(withDocument.map((m) => m.runId), [runId], "the run's own message is the one with the document");
+  assert.equal(t.messagesOf(runId).length, 1, "the refused delivery sent nothing, the caption included");
+});
+
+test("a revision run delivers any other file of the workspace as it does in chat", async () => {
+  const s = await stack();
+  const document = await deliver(s, NOTE, { name: "others" });
+  let delivered: Result | undefined;
+  const t = start(s, {
+    turn: async (prompt, _signal, options) => {
+      await wrote(options, document.path, `${NOTE}\n结尾：潮水退了。\n`);
+      await wrote(options, "reports/summary-of-revision.md", "# 修订摘要\n\n加了结尾。\n");
+      await answer(prompt, options);
+      delivered = await call(options, "deliver", { path: "reports/summary-of-revision.md" });
+      return "加了结尾，另附摘要。";
+    },
+  });
+  const { runId } = t.revise(batchOf(document));
+  await until("the run to be over", () => t.posted(runId));
+
+  assert.ok(!delivered?.isError, textOf(delivered as Result));
+  assert.match(textOf(delivered as Result), /^Delivered summary-of-revision\.md /);
+  const summary = s.store.byPath("reports/summary-of-revision.md");
+  assert.ok(summary);
+  assert.deepEqual((s.store.versions(summary.id) ?? []).map((v) => [v.reason, v.runId]), [["delivered", runId]]);
+  assert.ok(t.messagesOf(runId).some((m) => m.files.some((f) => f.documentId === summary.id)), "the file was sent");
+  assert.deepEqual((s.store.versions(document.id) ?? []).map((v) => [v.reason, v.runId]), [["revised", runId], ["delivered", undefined]]);
+});
+
 test("a run that changes nothing makes no version, and its message names the version the document is at", async () => {
   const s = await stack();
   const document = await deliver(s, NOTE, { name: "unchanged" });

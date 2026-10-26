@@ -71,6 +71,11 @@ export function alfredToolDefinitions(out: Outbound, signal?: AbortSignal, run?:
       if (anySignal(signal, callSignal(extra))?.aborted) return fail("The task was stopped; the file was not sent.");
       const real = resolveInside(WORKSPACE_DIR, p);
       if (!real) return fail(`${p} is outside the workspace.`);
+      // A revision run's document is posted as its revised version when the run ends. Delivered here, it would be a delivered
+      // version that the undo cannot take back, and the owner would get it twice.
+      if (run?.record.documentId !== undefined && documents?.store.get(run.record.documentId)?.path === relPath(real)) {
+        return fail("Alfred posts the revised document itself when this run ends; do not deliver it.");
+      }
       let stat: fs.Stats;
       try {
         stat = fs.statSync(real);
