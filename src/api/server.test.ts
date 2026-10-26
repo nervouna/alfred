@@ -7,8 +7,8 @@ import path from "node:path";
 import { after, test } from "node:test";
 import type { TestContext } from "node:test";
 
-import type { Run, TaskCreate, TaskResult, TaskUpdate } from "./schema.ts";
-import type { TaskCommands, TaskReply } from "./server.ts";
+import type { DocumentResult, DocumentRevise, DocumentUndo, Run, RevisionAccepted, TaskCreate, TaskResult, TaskUpdate } from "./schema.ts";
+import type { DocumentCommands, DocumentReply, TaskCommands, TaskReply } from "./server.ts";
 import type { Inbound } from "../channels.ts";
 import type { EventLog as EventLogType } from "../events.ts";
 
@@ -94,7 +94,10 @@ function stubHandler() {
 
 let fixtures = 0;
 /** An API on a socket of its own, with a stub handler and an event log of its own. */
-async function start(t: TestContext, opts: { heartbeatMs?: number; pageSize?: number; tasks?: TaskCommands } = {}) {
+async function start(
+  t: TestContext,
+  opts: { heartbeatMs?: number; pageSize?: number; tasks?: TaskCommands; documents?: DocumentCommands } = {},
+) {
   const dir = path.join(tmp, `t${fixtures++}`);
   const socket = path.join(dir, "api", "a.sock");
   const handler = stubHandler();
@@ -539,6 +542,83 @@ test("a task command that does not fit the schema gets 400 and never reaches the
   assert.deepEqual(tasks.created, []);
   assert.deepEqual(tasks.updated, []);
   assert.deepEqual(tasks.ran, []);
+});
+
+// --- Document commands --------------------------------------------------------
+
+const revisionAccepted = JSON.parse(fixture("responses", "revision-accepted.json")) as RevisionAccepted;
+const documentResult = JSON.parse(fixture("responses", "document-result.json")) as DocumentResult;
+
+/** Stands in for the documents service: records the commands it is given, and refuses with `refuse` when it is set. */
+function stubDocuments() {
+  const documents = {
+    revised: [] as DocumentRevise[],
+    undone: [] as DocumentUndo[],
+    refuse: undefined as Extract<DocumentReply<unknown>, { ok: false }> | undefined,
+    async revise(command: DocumentRevise): Promise<DocumentReply<RevisionAccepted>> {
+      documents.revised.push(command);
+      return documents.refuse ?? { ok: true, body: revisionAccepted };
+    },
+    async undo(command: DocumentUndo): Promise<DocumentReply<DocumentResult>> {
+      documents.undone.push(command);
+      return documents.refuse ?? { ok: true, body: documentResult };
+    },
+  };
+  return documents;
+}
+
+test("each document command fixture gets 503 until documents are wired in, and never reaches the handler", async (t) => {
+  const { socket, handler } = await start(t);
+  for (const name of ["document-revise.json", "document-revise-document-comment.json", "document-undo.json"]) {
+    const reply = await post(socket, fixture("commands", name));
+    assert.equal(reply.status, 503, name);
+    assert.deepEqual(reply.json(), { error: "documents are not available" }, name);
+  }
+  assert.equal(handler.submitted.length, 0, "a document command never reaches the message path");
+});
+
+test("document.revise and document.undo reach the documents service as parsed commands, and answer 202 and 200", async (t) => {
+  const documents = stubDocuments();
+  const { socket, handler } = await start(t, { documents });
+  const revised = await post(socket, fixture("commands", "document-revise.json"));
+  assert.equal(revised.status, 202);
+  assert.deepEqual(revised.json(), revisionAccepted);
+  const undone = await post(socket, fixture("commands", "document-undo.json"));
+  assert.equal(undone.status, 200);
+  assert.deepEqual(undone.json(), documentResult);
+
+  assert.deepEqual(documents.revised, [parsedCommand("document-revise.json")]);
+  assert.deepEqual(documents.undone, [parsedCommand("document-undo.json")]);
+  assert.equal(handler.submitted.length, 0, "a document command never reaches the message path");
+});
+
+test("a document reply that is not ok answers its status and its error", async (t) => {
+  const documents = stubDocuments();
+  const { socket } = await start(t, { documents });
+  documents.refuse = { ok: false, status: 409, error: "version: not the document's current version" };
+  const revised = await post(socket, fixture("commands", "document-revise.json"));
+  assert.equal(revised.status, 409);
+  assert.deepEqual(revised.json(), { error: "version: not the document's current version" });
+
+  documents.refuse = { ok: false, status: 404, error: "no document r4f7ma" };
+  const undone = await post(socket, fixture("commands", "document-undo.json"));
+  assert.equal(undone.status, 404);
+  assert.deepEqual(undone.json(), { error: "no document r4f7ma" });
+});
+
+test("a document command that does not fit the schema gets 400 and never reaches the documents service", async (t) => {
+  const documents = stubDocuments();
+  const { socket } = await start(t, { documents });
+  for (const bad of [
+    { type: "document.undo", documentId: "r4f7ma" },
+    { type: "document.undo", documentId: "r4f7ma", runId: "x4n7mj", force: true },
+    { type: "document.revise", documentId: "r4f7ma", version: "5d726c9ddcb2d6a8fad41e6213426bdeb94c6a", annotations: [{ target: { kind: "document" }, comment: "x" }] },
+    { type: "document.revise", documentId: "r4f7ma", version: "5d726c9ddcb2d6a8fad41e6213426bdeb94c6acd", annotations: [] },
+  ]) {
+    assert.equal((await post(socket, bad)).status, 400, JSON.stringify(bad).slice(0, 80));
+  }
+  assert.deepEqual(documents.revised, []);
+  assert.deepEqual(documents.undone, []);
 });
 
 test("GET /events streams the backlog, then live events, as server-sent events", async (t) => {

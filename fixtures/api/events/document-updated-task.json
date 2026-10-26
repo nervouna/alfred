@@ -1,0 +1,15 @@
+{
+  "id": 24,
+  "at": "2026-10-26T01:03:12.010Z",
+  "type": "document.updated",
+  "data": {
+    "id": "w6k2tn",
+    "path": "reports/vps-chart-2026-10-26.html",
+    "title": "每日 VPS 价格图表",
+    "kind": "html",
+    "taskId": "p3r8vx",
+    "version": "1bf1c2d6b03988be8463518d3cf452628031ad5c",
+    "createdAt": "2026-10-26T01:03:12.010Z",
+    "updatedAt": "2026-10-26T01:03:12.010Z"
+  }
+}

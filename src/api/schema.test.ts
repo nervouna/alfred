@@ -6,13 +6,20 @@ import type { ZodType } from "zod";
 
 import type { RunRecord } from "../runs.ts";
 import {
+  AnnotationSchema,
+  DocumentDetailSchema,
+  DocumentListSchema,
+  DocumentResultSchema,
+  DocumentVersionSchema,
   ErrorResponseSchema,
   EventSchema,
+  FileRefSchema,
   LiveEventSchema,
   MAX_MESSAGE_FILES,
   MessageSchema,
   PairingSchema,
   PushRegistrationSchema,
+  RevisionAcceptedSchema,
   RunDetailSchema,
   RunListSchema,
   RunSchema,
@@ -42,6 +49,10 @@ const SCHEMAS_BY_NAME: Record<string, ZodType> = {
   error: ErrorResponseSchema,
   pairing: PairingSchema,
   "push-registration": PushRegistrationSchema,
+  "document-detail": DocumentDetailSchema,
+  "document-list": DocumentListSchema,
+  "document-result": DocumentResultSchema,
+  "revision-accepted": RevisionAcceptedSchema,
   "run-detail": RunDetailSchema,
   "run-list": RunListSchema,
   "task-detail": TaskDetailSchema,
@@ -370,4 +381,107 @@ test("a task command's schedule rejects unknown keys, and a task ignores them", 
   const parsed = TaskSchema.safeParse(withExtra);
   assert.equal(parsed.success, true, "a task");
   assert.deepEqual(parsed.data?.schedule, { kind: "daily", time: "09:00" });
+});
+
+// --- Documents ----------------------------------------------------------------
+
+const VERSION = "248e89ba3aad47311d9cf0d57bf83b038a724f1f";
+const WHOLE_COMMENT = { target: { kind: "document" }, comment: "开头加一段结论。" };
+const revise = (over: Record<string, unknown>) => parseCommand({ type: "document.revise", documentId: "r4f7ma", version: VERSION, annotations: [WHOLE_COMMENT], ...over });
+const documentFixture = (dir: string, name: string): Record<string, unknown> => JSON.parse(readFixture(dir, name));
+
+test("a document version is 40 lowercase hex characters, and a document id is six characters of the run id alphabet", () => {
+  assert.equal(revise({ version: "a".repeat(40) }).ok, true, "40 characters");
+  for (const bad of ["a".repeat(39), "a".repeat(41), VERSION.toUpperCase(), "g".repeat(40), ""]) {
+    assert.deepEqual(revise({ version: bad }), { ok: false, error: "version: must be a 40-character commit id" }, bad);
+  }
+  assert.deepEqual(revise({ documentId: "r4f7m0" }), { ok: false, error: "documentId: must be a six-character document id" });
+});
+
+test("a file a delivery registered names its document and version together, or neither", () => {
+  const path = { path: "reports/vps.md" };
+  assert.equal(FileRefSchema.safeParse(path).success, true, "neither");
+  assert.equal(FileRefSchema.safeParse({ ...path, documentId: "r4f7ma", version: VERSION }).success, true, "both");
+  assert.equal(FileRefSchema.safeParse({ ...path, documentId: "r4f7ma" }).success, false, "a document without a version");
+  assert.equal(FileRefSchema.safeParse({ ...path, version: VERSION }).success, false, "a version without a document");
+});
+
+test("an undone version names the revision it undoes and has no run; any other version has no undoes", () => {
+  const at = "2026-10-26T06:20:05.330Z";
+  const ok = (value: Record<string, unknown>) => DocumentVersionSchema.safeParse({ version: VERSION, at, ...value }).success;
+  assert.equal(ok({ reason: "revised", runId: "x4n7mj" }), true);
+  assert.equal(ok({ reason: "undone", undoes: "x4n7mj" }), true);
+  assert.equal(ok({ reason: "undone" }), false, "an undone version without undoes");
+  assert.equal(ok({ reason: "undone", undoes: "x4n7mj", runId: "m2v8pd" }), false, "an undone version with a run");
+  assert.equal(ok({ reason: "delivered", runId: "k7m2qa", undoes: "x4n7mj" }), false, "a delivered version with undoes");
+  assert.equal(ok({ reason: "reverted", runId: "k7m2qa" }), false, "a reason outside the four");
+});
+
+test("a resolved annotation has a reply, a returned one has a reason, and a submitted one has neither", () => {
+  const annotation = documentFixture("events", "annotation-updated-resolved.json").data as Record<string, unknown>;
+  const { reply: _reply, ...noReply } = annotation;
+  assert.equal(AnnotationSchema.safeParse(annotation).success, true);
+  assert.equal(AnnotationSchema.safeParse(noReply).success, false, "resolved without a reply");
+  assert.equal(AnnotationSchema.safeParse({ ...annotation, reply: "x".repeat(4001) }).success, false, "a reply over 4000 characters");
+  assert.equal(AnnotationSchema.safeParse({ ...annotation, reply: "x".repeat(4000) }).success, true, "4000 characters");
+
+  const submitted = documentFixture("events", "annotation-updated-submitted.json").data as Record<string, unknown>;
+  assert.equal(AnnotationSchema.safeParse(submitted).success, true);
+  assert.equal(AnnotationSchema.safeParse({ ...submitted, reply: "已处理。" }).success, false, "submitted with a reply");
+  assert.equal(AnnotationSchema.safeParse({ ...submitted, returnReason: "failed" }).success, false, "submitted with a return reason");
+
+  const unanswered = documentFixture("events", "annotation-updated-returned-unanswered.json").data as Record<string, unknown>;
+  const { returnReason: _reason, ...noReason } = unanswered;
+  assert.equal(AnnotationSchema.safeParse(unanswered).success, true);
+  assert.equal(AnnotationSchema.safeParse(noReason).success, false, "returned without a reason");
+});
+
+test("a passage's quote is 1 to 2000 characters and not blank, and its prefix and suffix are at most 200", () => {
+  const passage = (over: Record<string, unknown>) => revise({ annotations: [{ target: { kind: "passage", quote: "价格", prefix: "", suffix: "", ...over }, comment: "核对" }] }).ok;
+  assert.equal(passage({ quote: "x".repeat(2000) }), true, "2000 characters");
+  assert.equal(passage({ quote: "x".repeat(2001) }), false);
+  assert.equal(passage({ quote: "   " }), false, "blank");
+  assert.equal(passage({ prefix: "x".repeat(200), suffix: "x".repeat(200) }), true, "200 characters each side");
+  assert.equal(passage({ prefix: "x".repeat(201) }), false);
+  assert.equal(passage({ suffix: "x".repeat(201) }), false);
+  assert.equal(passage({ quote: "😀".repeat(2000) }), true, "a character is a code point");
+});
+
+test("a comment is 1 to 2000 characters and not blank, and a revision carries 1 to 50 annotations", () => {
+  const comment = (text: string) => revise({ annotations: [{ target: { kind: "document" }, comment: text }] }).ok;
+  assert.equal(comment("x".repeat(2000)), true);
+  assert.equal(comment("x".repeat(2001)), false);
+  assert.equal(comment("  "), false);
+  const batch = (n: number) => revise({ annotations: Array.from({ length: n }, () => WHOLE_COMMENT) }).ok;
+  assert.equal(batch(1), true);
+  assert.equal(batch(50), true);
+  assert.equal(batch(51), false);
+  assert.equal(batch(0), false);
+});
+
+test("a document title is 1 to 200 characters and not blank, and a document's kind is one of six", () => {
+  const document = documentFixture("responses", "document-result.json").document as Record<string, unknown>;
+  const ok = (value: Record<string, unknown>) => DocumentResultSchema.safeParse({ document: { ...document, ...value } }).success;
+  assert.equal(ok({ title: "x".repeat(200) }), true);
+  assert.equal(ok({ title: "x".repeat(201) }), false);
+  assert.equal(ok({ title: "" }), false);
+  assert.equal(ok({ title: "  " }), false, "blank");
+  for (const kind of ["markdown", "text", "html", "pdf", "image", "other"]) assert.equal(ok({ kind }), true, kind);
+  assert.equal(ok({ kind: "spreadsheet" }), false);
+});
+
+test("a document command's targets reject unknown keys, and a target of another kind does not parse", () => {
+  const passage = { kind: "passage", quote: "价格", prefix: "", suffix: "" };
+  assert.equal(revise({ annotations: [{ target: { ...passage, page: 1 }, comment: "x" }] }).ok, false, "an extra key");
+  assert.equal(revise({ annotations: [{ target: { kind: "page", page: 1 }, comment: "x" }] }).ok, false, "a page target");
+  assert.equal(revise({ annotations: [{ target: passage, comment: "x" }] }).ok, true);
+  assert.equal(parseCommand({ type: "document.undo", documentId: "r4f7ma", runId: "x4n7mj" }).ok, true);
+  assert.equal(parseCommand({ type: "document.undo", documentId: "r4f7ma" }).ok, false, "no run");
+});
+
+test("a revision run names its document, and a document's versions have their reasons", () => {
+  const run = documentFixture("events", "run-updated-revision.json").data as Record<string, unknown>;
+  assert.equal(RunSchema.safeParse(run).success, true);
+  assert.equal(RunSchema.parse(run).documentId, "r4f7ma");
+  assert.equal(RunSchema.safeParse({ ...run, documentId: "R4F7MA" }).success, false, "a malformed document id");
 });

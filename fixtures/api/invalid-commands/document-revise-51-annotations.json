@@ -1,0 +1,313 @@
+{
+  "type": "document.revise",
+  "documentId": "r4f7ma",
+  "version": "5d726c9ddcb2d6a8fad41e6213426bdeb94c6acd",
+  "annotations": [
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 1"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 2"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 3"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 4"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 5"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 6"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 7"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 8"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 9"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 10"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 11"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 12"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 13"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 14"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 15"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 16"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 17"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 18"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 19"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 20"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 21"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 22"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 23"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 24"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 25"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 26"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 27"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 28"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 29"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 30"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 31"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 32"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 33"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 34"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 35"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 36"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 37"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 38"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 39"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 40"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 41"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 42"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 43"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 44"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 45"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 46"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 47"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 48"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 49"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 50"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "批注 51"
+    }
+  ]
+}

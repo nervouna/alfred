@@ -12,6 +12,10 @@ public struct Event: Decodable, Hashable, Sendable {
         case questionAnswered(QuestionAnswered)
         /// A task was created or changed: the whole task, as Alfred now holds it.
         case taskUpdated(AlfredTask)
+        /// A document was delivered or changed: the whole document, as Alfred now holds it.
+        case documentUpdated(AlfredDocument)
+        /// An annotation was submitted or changed: the whole annotation, as Alfred now holds it.
+        case annotationUpdated(Annotation)
         /// An event type this client does not know. Its `data` is not decoded.
         case unknown(type: String)
     }
@@ -40,6 +44,10 @@ public struct Event: Decodable, Hashable, Sendable {
             payload = .questionAnswered(try container.decode(QuestionAnswered.self, forKey: .data))
         case "task.updated":
             payload = .taskUpdated(try container.decode(AlfredTask.self, forKey: .data))
+        case "document.updated":
+            payload = .documentUpdated(try container.decode(AlfredDocument.self, forKey: .data))
+        case "annotation.updated":
+            payload = .annotationUpdated(try container.decode(Annotation.self, forKey: .data))
         default:
             payload = .unknown(type: type)
         }

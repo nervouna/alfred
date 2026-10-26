@@ -230,4 +230,90 @@ final class AlfredClientTests: XCTestCase {
         try assertSameJSON(entry.body, fixture("commands/task-run.json"))
         assertCredentials(entry.request)
     }
+
+    private let revisedVersion = "5d726c9ddcb2d6a8fad41e6213426bdeb94c6acd"
+
+    func testDocumentsAndDocumentDetailDecodeTheirFixtures() async throws {
+        let (client, log) = try makeClient { request in
+            if request.url?.path == "/api/documents" {
+                return StubReply(chunks: [(try? fixture("responses/document-list.json")) ?? Data()])
+            }
+            return StubReply(chunks: [(try? fixture("responses/document-detail.json")) ?? Data()])
+        }
+        let list = try await client.documents()
+        XCTAssertEqual(list.documents.map(\.id), ["r4f7ma", "w6k2tn"])
+        let listed = try XCTUnwrap(log.entries.first)
+        XCTAssertEqual(listed.request.httpMethod, "GET")
+        XCTAssertEqual(try encodedPath(listed.request), "/api/documents")
+        assertCredentials(listed.request)
+
+        let detail = try await client.document(id: "r4f7ma")
+        XCTAssertEqual(detail.document.id, "r4f7ma")
+        XCTAssertEqual(detail.versions.count, 4)
+        let fetched = try XCTUnwrap(log.entries.last)
+        XCTAssertEqual(fetched.request.httpMethod, "GET")
+        XCTAssertEqual(try encodedPath(fetched.request), "/api/documents/r4f7ma")
+        assertCredentials(fetched.request)
+    }
+
+    func testReviseSendsTheBatchAndDecodesTheRevisionRun() async throws {
+        let (client, log) = try makeClient { _ in StubReply(status: 202, chunks: [(try? fixture("responses/revision-accepted.json")) ?? Data()]) }
+        let accepted = try await client.revise(
+            documentId: "r4f7ma",
+            version: revisedVersion,
+            annotations: [
+                AnnotationDraft(
+                    target: .passage(quote: "Hetzner 的 CX22 仍是 €4.51/月", prefix: "对比结论：", suffix: "，其余两家都上涨了。"),
+                    comment: "这个价格请再核对一下官网，别用缓存的数据。"
+                ),
+                AnnotationDraft(target: .passage(quote: "DigitalOcean 的基础款降到 $4", prefix: "", suffix: "/月。"), comment: "这一条的日期也写上。"),
+                AnnotationDraft(target: .document, comment: "开头加一段三句话的结论。"),
+            ]
+        )
+        XCTAssertEqual(accepted.runId, "s2d8kp")
+        XCTAssertEqual(accepted.annotations.count, 3)
+        let entry = try XCTUnwrap(log.entries.first)
+        XCTAssertEqual(entry.request.httpMethod, "POST")
+        XCTAssertEqual(try encodedPath(entry.request), "/api/commands")
+        try assertSameJSON(entry.body, fixture("commands/document-revise.json"))
+        assertCredentials(entry.request)
+    }
+
+    func testReviseFailsWithTheStatusAndMessageOfARefusal() async throws {
+        let (client, _) = try makeClient { _ in
+            StubReply(status: 409, chunks: [Data(#"{"error":"version: not the document's current version"}"#.utf8)])
+        }
+        await assertFails(with: .http(status: 409, message: "version: not the document's current version")) {
+            _ = try await client.revise(documentId: "r4f7ma", version: revisedVersion, annotations: [AnnotationDraft(target: .document, comment: "x")])
+        }
+    }
+
+    func testUndoRevisionSendsTheCommandAndDecodesTheDocument() async throws {
+        let (client, log) = try makeClient { _ in StubReply(chunks: [(try? fixture("responses/document-result.json")) ?? Data()]) }
+        let document = try await client.undoRevision(documentId: "r4f7ma", runId: "x4n7mj")
+        XCTAssertEqual(document.id, "r4f7ma")
+        XCTAssertEqual(document.version, revisedVersion)
+        let entry = try XCTUnwrap(log.entries.first)
+        XCTAssertEqual(entry.request.httpMethod, "POST")
+        try assertSameJSON(entry.body, fixture("commands/document-undo.json"))
+        assertCredentials(entry.request)
+    }
+
+    func testFileFetchesTheVersionTheQueryNames() async throws {
+        let bytes = Data("# VPS 价格对比\n".utf8)
+        let (client, log) = try makeClient { _ in StubReply(chunks: [bytes]) }
+        let saved = try await client.file(path: "reports/vps.md", version: "248e89ba3aad47311d9cf0d57bf83b038a724f1f")
+        defer { try? FileManager.default.removeItem(at: saved.deletingLastPathComponent()) }
+        XCTAssertEqual(try Data(contentsOf: saved), bytes)
+        let entry = try XCTUnwrap(log.entries.first)
+        XCTAssertEqual(entry.request.httpMethod, "GET")
+        XCTAssertEqual(try encodedPath(entry.request), "/api/files/reports/vps.md")
+        XCTAssertEqual(try encodedQuery(entry.request), "version=248e89ba3aad47311d9cf0d57bf83b038a724f1f")
+        assertCredentials(entry.request)
+
+        let (live, liveLog) = try makeClient { _ in StubReply(chunks: [bytes]) }
+        let liveCopy = try await live.file(path: "reports/vps.md")
+        defer { try? FileManager.default.removeItem(at: liveCopy.deletingLastPathComponent()) }
+        XCTAssertNil(try encodedQuery(try XCTUnwrap(liveLog.entries.first).request), "the live file has no query")
+    }
 }

@@ -1,0 +1,31 @@
+{
+  "type": "document.revise",
+  "documentId": "r4f7ma",
+  "version": "5D726C9DDCB2D6A8FAD41E6213426BDEB94C6ACD",
+  "annotations": [
+    {
+      "target": {
+        "kind": "passage",
+        "quote": "Hetzner 的 CX22 仍是 €4.51/月",
+        "prefix": "对比结论：",
+        "suffix": "，其余两家都上涨了。"
+      },
+      "comment": "这个价格请再核对一下官网，别用缓存的数据。"
+    },
+    {
+      "target": {
+        "kind": "passage",
+        "quote": "DigitalOcean 的基础款降到 $4",
+        "prefix": "",
+        "suffix": "/月。"
+      },
+      "comment": "这一条的日期也写上。"
+    },
+    {
+      "target": {
+        "kind": "document"
+      },
+      "comment": "开头加一段三句话的结论。"
+    }
+  ]
+}

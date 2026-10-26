@@ -12,10 +12,16 @@ public enum Command: Hashable, Sendable, Codable {
     case taskUpdate(taskId: String, changes: TaskChanges)
     /// Runs a task now. Its next scheduled time stays as it was.
     case taskRun(taskId: String)
+    /// Submits a batch of one to fifty annotations on a document's version, which a revision run takes. `version` is the
+    /// version the owner annotated.
+    case documentRevise(documentId: String, version: String, annotations: [AnnotationDraft])
+    /// Undoes a document's latest revision, named by the revision run that made it.
+    case documentUndo(documentId: String, runId: String)
 
     private enum CodingKeys: String, CodingKey {
         case type, clientId, text, runId, files, questionId, answers
         case title, brief, schedule, model, budgetUsd, taskId, status
+        case documentId, version, annotations
     }
 
     public init(from decoder: any Decoder) throws {
@@ -57,6 +63,17 @@ public enum Command: Hashable, Sendable, Codable {
             )
         case "task.run":
             self = .taskRun(taskId: try container.decode(String.self, forKey: .taskId))
+        case "document.revise":
+            self = .documentRevise(
+                documentId: try container.decode(String.self, forKey: .documentId),
+                version: try container.decode(String.self, forKey: .version),
+                annotations: try container.decode([AnnotationDraft].self, forKey: .annotations)
+            )
+        case "document.undo":
+            self = .documentUndo(
+                documentId: try container.decode(String.self, forKey: .documentId),
+                runId: try container.decode(String.self, forKey: .runId)
+            )
         default:
             throw DecodingError.dataCorruptedError(
                 forKey: .type,
@@ -102,6 +119,15 @@ public enum Command: Hashable, Sendable, Codable {
         case let .taskRun(taskId):
             try container.encode("task.run", forKey: .type)
             try container.encode(taskId, forKey: .taskId)
+        case let .documentRevise(documentId, version, annotations):
+            try container.encode("document.revise", forKey: .type)
+            try container.encode(documentId, forKey: .documentId)
+            try container.encode(version, forKey: .version)
+            try container.encode(annotations, forKey: .annotations)
+        case let .documentUndo(documentId, runId):
+            try container.encode("document.undo", forKey: .type)
+            try container.encode(documentId, forKey: .documentId)
+            try container.encode(runId, forKey: .runId)
         }
     }
 }

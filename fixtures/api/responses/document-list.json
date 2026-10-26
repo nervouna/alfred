@@ -1,0 +1,23 @@
+{
+  "documents": [
+    {
+      "id": "r4f7ma",
+      "path": "reports/vps.md",
+      "title": "VPS 价格对比",
+      "kind": "markdown",
+      "version": "5d726c9ddcb2d6a8fad41e6213426bdeb94c6acd",
+      "createdAt": "2026-10-25T08:34:42.010Z",
+      "updatedAt": "2026-10-26T06:20:05.330Z"
+    },
+    {
+      "id": "w6k2tn",
+      "path": "reports/vps-chart-2026-10-26.html",
+      "title": "每日 VPS 价格图表",
+      "kind": "html",
+      "taskId": "p3r8vx",
+      "version": "1bf1c2d6b03988be8463518d3cf452628031ad5c",
+      "createdAt": "2026-10-26T01:03:12.010Z",
+      "updatedAt": "2026-10-26T01:03:12.010Z"
+    }
+  ]
+}

@@ -11,6 +11,8 @@ public struct Run: Decodable, Hashable, Sendable {
     public let id: String
     public let kind: RunKind
     public let taskId: String?
+    /// Set on a revision run: the document it revised.
+    public let documentId: String?
     public let parentRunId: String?
     public let title: String
     public let status: RunStatus
@@ -22,7 +24,7 @@ public struct Run: Decodable, Hashable, Sendable {
     public let error: String?
 
     private enum CodingKeys: String, CodingKey {
-        case id, kind, taskId, parentRunId, title, status, model, startedAt, endedAt, costUsd, files, error
+        case id, kind, taskId, documentId, parentRunId, title, status, model, startedAt, endedAt, costUsd, files, error
     }
 
     public init(from decoder: any Decoder) throws {
@@ -30,6 +32,7 @@ public struct Run: Decodable, Hashable, Sendable {
         id = try container.decode(String.self, forKey: .id)
         kind = try container.decode(RunKind.self, forKey: .kind)
         taskId = try container.decodeIfPresent(String.self, forKey: .taskId)
+        documentId = try container.decodeIfPresent(String.self, forKey: .documentId)
         parentRunId = try container.decodeIfPresent(String.self, forKey: .parentRunId)
         title = try container.decode(String.self, forKey: .title)
         status = try container.decode(RunStatus.self, forKey: .status)
