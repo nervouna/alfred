@@ -7,6 +7,7 @@ import { after, test } from "node:test";
 import type { HookInput, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 
 import { SUBAGENT_RULES } from "./config.ts";
+import { TASK_TOOL_NAMES } from "./task-tools.ts";
 import { SubagentTracker, checkAgentCall, checkSubagentTool, checkSubagentWrite, subagentGuard, subagentRulesHook } from "./subagents.ts";
 
 const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "alfred-subagents-")));
@@ -84,8 +85,9 @@ test("subagentGuard denies a subagent's memory write and lets the main thread ma
   assert.equal(await decide(preToolUse("Write", { file_path: "reports/a.md" }, { id: "agent-1", type: "writer" })), undefined);
 });
 
-test("checkSubagentTool refuses only send_file", () => {
+test("checkSubagentTool refuses send_file and the task tools, and nothing else", () => {
   assert.match(checkSubagentTool("mcp__alfred__send_file") ?? "", /only Alfred talks to the user/);
+  for (const tool of TASK_TOOL_NAMES) assert.match(checkSubagentTool(tool) ?? "", /Subagents may not manage the owner's tasks: only Alfred does/, tool);
   for (const tool of ["Agent", "TaskStop", "Read", "Write", "Skill", "WebFetch", "mcp__alfred__render_pdf"]) assert.equal(checkSubagentTool(tool), undefined, tool);
 });
 
@@ -99,6 +101,23 @@ test("subagentGuard denies send_file and skill writes to every subagent, built-i
   }
   assert.equal(await decide(preToolUse("mcp__alfred__send_file", { path: "reports/a.pdf" })), undefined, "the main thread sends files");
   assert.equal(await decide(preToolUse("Write", { file_path: "skills/x/SKILL.md", content: "x" })), undefined, "the main thread writes skills");
+});
+
+test("subagentGuard denies the task tools to every subagent, with a reason, and lets the main thread call them", async () => {
+  const inputs: Record<string, Record<string, unknown>> = {
+    mcp__alfred__task_list: {},
+    mcp__alfred__task_create: { title: "x", brief: "y", schedule: { kind: "daily", time: "08:00" } },
+    mcp__alfred__task_update: { taskId: "k7m2qa", status: "paused" },
+  };
+  assert.deepEqual(Object.keys(inputs), TASK_TOOL_NAMES);
+  for (const type of ["researcher", "general-purpose", "alfred:scout"]) {
+    for (const [tool, input] of Object.entries(inputs)) {
+      const out = await decide(preToolUse(tool, input, { id: "agent-1", type }));
+      assert.equal(out && "permissionDecision" in out ? out.permissionDecision : undefined, "deny", `${type} ${tool}`);
+      assert.match(out && "permissionDecisionReason" in out ? (out.permissionDecisionReason ?? "") : "", /only Alfred does/, `${type} ${tool}`);
+    }
+  }
+  for (const [tool, input] of Object.entries(inputs)) assert.equal(await decide(preToolUse(tool, input)), undefined, `the main thread calls ${tool}`);
 });
 
 test("subagentGuard lets Agent calls of any type and model through, from the main thread and from subagents", async () => {

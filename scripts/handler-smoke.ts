@@ -35,6 +35,11 @@
 //                delivers its report, a file is written under reports/tasks/<id>/, the run is in the
 //                task's record, and its session leaves no transcript; ends with one pass or fail line
 //                per check and the spend
+//   tasks        the real handler on a task store, driven over HTTP only, on haiku: the owner asks for a
+//                daily 08:00 brief, a question.asked card (header 新任务) appears and is answered 确认, and a
+//                task.updated with origin chat and that schedule follows; asked to pause it, a task.updated
+//                with status paused follows and no card is asked; ends with one pass or fail line per check
+//                and the spend
 //   prompt <text>  one message on the default model, then the spend per model
 
 import fs from "node:fs";
@@ -719,6 +724,123 @@ async function ask(): Promise<number> {
   return failed;
 }
 
+/** The tasks scenario: a task made and paused from chat on the real handler, driven over HTTP only. Returns the number of checks that failed. */
+async function chatTasks(): Promise<number> {
+  const tasks = new TaskStore();
+  // A slow poll: nothing here is meant to run a task.
+  const handler = createLocalHandler({ tasks, taskPollMs: 3_600_000 });
+  // A short path: Unix socket paths are limited to about 100 bytes.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "alf-"));
+  const socket = path.join(dir, "api.sock");
+  const closeApi = await startApi({ socket, handler, events: sharedEventLog() });
+  let failed = 0;
+  const check = (name: string, problems: string[]) => {
+    if (problems.length) failed++;
+    console.log(`[${problems.length ? "fail" : "pass"}] ${name}${problems.length ? `: ${problems.join("; ")}` : ""}`);
+  };
+
+  // A client that follows the stream from the start, as the app does.
+  const followed: Event[] = [];
+  const stopFollowing = new AbortController();
+  const follower = (async () => {
+    try {
+      for await (const frame of streamEvents(socket, { signal: stopFollowing.signal })) {
+        if (Number.isNaN(frame.id)) continue; // a live event has no id and is not in the log
+        const event = JSON.parse(frame.data) as Event;
+        followed.push(event);
+        if (event.type === "question.asked") console.log(`[question] ${at()} ${event.data.id} run=${event.data.runId} header=${event.data.questions.map((q) => q.header).join("/")} ${flat(event.data.questions.map((q) => q.question).join(" / "))}`);
+        if (event.type === "question.answered") console.log(`[answered] ${at()} ${event.data.id} ${event.data.cancelled ? "cancelled" : JSON.stringify(event.data.answers).slice(0, 80)}`);
+        if (event.type === "task.updated") console.log(`[task] ${at()} ${event.data.id} origin=${event.data.origin} status=${event.data.status} ${JSON.stringify(event.data.schedule)} model=${event.data.model} budget=$${event.data.budgetUsd} next=${event.data.nextRunAt ?? "-"} "${event.data.title}"`);
+      }
+    } catch (err) {
+      if (!stopFollowing.signal.aborted) console.log(`[follower] ended: ${err}`);
+    }
+  })();
+  const post = (command: unknown) => request(socket, "POST", "/commands", command);
+  const json = (value: unknown) => JSON.stringify(value);
+  const messageOf = (pick: (m: Message) => boolean) => {
+    const found = followed.find((e) => e.type === "message.created" && pick(e.data));
+    return found?.type === "message.created" ? found.data : undefined;
+  };
+  const questions = () => followed.flatMap((e) => (e.type === "question.asked" ? [e.data] : []));
+  const taskUpdates = () => followed.flatMap((e) => (e.type === "task.updated" ? [e.data] : []));
+  /** Sends a message the way the app does, and returns the id of the run it started. */
+  const say = async (clientId: string, text: string) => {
+    console.log(`[app] ${at()} ${text.slice(0, 80)}`);
+    await post({ type: "message.send", clientId, text });
+    return (await waitFor(() => messageOf((m) => m.direction === "in" && m.clientId === clientId), 30_000))?.runId;
+  };
+
+  try {
+    // The model stays on haiku, as in the other scenarios.
+    console.log(`[app] ${at()} /model haiku`);
+    await post({ type: "message.send", clientId: "smoke-model", text: "/model haiku" });
+    await waitFor(() => messageOf((m) => m.direction === "out" && m.channel === "app" && /^已切换到 haiku/.test(m.text)), 30_000);
+
+    // 1. A daily brief is asked for: the agent proposes it on a question card, and nothing exists until the owner taps.
+    const createRun = await say(
+      "smoke-tasks-1",
+      "帮我建一个定时任务：每天早上 8 点给我一份 AI 新闻简报，用 haiku，每次运行上限 0.5 美元。信息都在这里了，不用再问我别的，直接提交。",
+    );
+    const asked = await waitFor(() => questions().find((q) => q.runId === createRun), 120_000);
+    const card = asked?.questions[0];
+    check(
+      "the agent proposes the task on a question.asked card: header 新任务, one single-select question, options 确认 and 不要",
+      asked && card && asked.questions.length === 1 && card.header === "新任务" && !card.multiSelect && card.options.map((o) => o.label).join() === "确认,不要"
+        ? []
+        : [`run=${createRun ?? "none"} asked=${json(asked)?.slice(0, 200)}`],
+    );
+    check("nothing exists while the card is open", tasks.list().length === 0 ? [] : [`${tasks.list().length} task(s)`]);
+    console.log(`[confirmation] ${flat(card?.question ?? "-")}`);
+    if (asked && card) {
+      const answer = await post({ type: "question.answer", questionId: asked.id, answers: { [card.question]: "确认" } });
+      check("question.answer with 确认 is answered 202", answer.status === 202 ? [] : [`got ${answer.status} ${answer.body}`]);
+    }
+    const created = await waitFor(() => taskUpdates().find((t) => t.origin === "chat"), 120_000);
+    check(
+      "a task.updated with origin chat and a daily 08:00 schedule follows",
+      created && created.schedule.kind === "daily" && created.schedule.time === "08:00" && created.status === "active"
+        ? []
+        : [`got ${json(created)?.slice(0, 200)}`],
+    );
+    check("the task is the only one", tasks.list().length === 1 ? [] : [`${tasks.list().length} tasks`]);
+    check(
+      "the task is on haiku with the cap the owner gave",
+      created?.model === "haiku" && created.budgetUsd === 0.5 ? [] : [`model=${created?.model ?? "-"} budget=${created?.budgetUsd ?? "-"}`],
+    );
+    await idle();
+    const reply = messageOf((m) => m.direction === "out" && m.runId === createRun && m.channel === "app" && m.text.trim() !== "");
+    check("the agent tells the owner what it set up", reply ? [] : ["no reply with the run's id"]);
+    console.log(`[reply] ${flat(reply?.text ?? "-").slice(0, 200)}`);
+
+    // 2. The owner asks to pause it: it happens at once, with no card.
+    const asks = questions().length;
+    const pauseRun = await say("smoke-tasks-2", "先停掉那个简报");
+    const paused = await waitFor(() => taskUpdates().find((t) => t.id === created?.id && t.status === "paused"), 120_000);
+    check(
+      "a task.updated with status paused follows, with no next run",
+      paused && paused.nextRunAt === undefined ? [] : [`got ${json(paused)?.slice(0, 200)}`],
+    );
+    await idle();
+    check("pausing asked no question", questions().length === asks ? [] : [`${questions().length - asks} question(s) in run ${pauseRun ?? "-"}`]);
+    const pausedReply = messageOf((m) => m.direction === "out" && m.runId === pauseRun && m.channel === "app" && m.text.trim() !== "");
+    check("the agent tells the owner it is paused", pausedReply ? [] : ["no reply with the run's id"]);
+    console.log(`[reply] ${flat(pausedReply?.text ?? "-").slice(0, 200)}`);
+    check("the store has the task paused", tasks.get(created?.id ?? "")?.status === "paused" ? [] : [`status ${tasks.get(created?.id ?? "")?.status ?? "-"}`]);
+
+    summary();
+    const runs = listRunFiles().filter((f) => f.kind === "task");
+    console.log(`[spend] $${runs.reduce((sum, f) => sum + f.costUsd, 0).toFixed(4)} across ${runs.length} run(s)`);
+  } finally {
+    stopFollowing.abort();
+    await follower;
+    await closeApi();
+    await handler.shutdown();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  return failed;
+}
+
 let failedRules = 0;
 if (scenario === "background") {
   const stack = await startStack();
@@ -790,8 +912,10 @@ if (scenario === "background") {
   failedRules = await ask();
 } else if (scenario === "scheduled") {
   failedRules = await scheduled();
+} else if (scenario === "tasks") {
+  failedRules = await chatTasks();
 } else {
-  console.error("usage: node scripts/handler-smoke.ts background|restart|stop|nested|api|stream|attach|ask|scheduled|prompt <text>");
+  console.error("usage: node scripts/handler-smoke.ts background|restart|stop|nested|api|stream|attach|ask|scheduled|tasks|prompt <text>");
   process.exit(2);
 }
 process.exit(failedRules ? 1 : 0);

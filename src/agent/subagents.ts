@@ -13,6 +13,7 @@ import { readOnlyWrite } from "./guard.ts";
 import type { ReadOnlyPaths } from "./guard.ts";
 import { RULES_FILE } from "./rules.ts";
 import { SKILLS_DIR } from "./skills.ts";
+import { TASK_TOOL_NAMES } from "./task-tools.ts";
 
 const AGENT_TOOL = "Agent";
 const SEND_FILE_TOOL = "mcp__alfred__send_file";
@@ -73,16 +74,19 @@ function deny(reason: string) {
 }
 
 /**
- * Returns a denial reason when a subagent calls send_file: only Alfred talks to
- * the user. A role's disallowedTools already hide it, but built-in agent types
- * and forked skills get every tool the main thread has.
+ * Returns a denial reason when a subagent calls send_file or a task tool: only Alfred talks to the user, and
+ * only Alfred manages the owner's tasks, with the owner's tap. A role's tool list already leaves them out, but
+ * built-in agent types and forked skills get every tool the main thread has.
  */
 export function checkSubagentTool(toolName: string): string | undefined {
-  if (toolName !== SEND_FILE_TOOL) return undefined;
-  return "Subagents may not send files: only Alfred talks to the user. Name the file in your final message instead.";
+  if (toolName === SEND_FILE_TOOL) return "Subagents may not send files: only Alfred talks to the user. Name the file in your final message instead.";
+  if (TASK_TOOL_NAMES.includes(toolName)) {
+    return "Subagents may not manage the owner's tasks: only Alfred does, and only when the owner asks. Do not try again; leave it out of your work.";
+  }
+  return undefined;
 }
 
-/** PreToolUse hook: admits or queues Agent calls from any thread, and denies subagents send_file and writes to memory, skills and rules. */
+/** PreToolUse hook: admits or queues Agent calls from any thread, and denies subagents send_file, the task tools and writes to memory, skills and rules. */
 export function subagentGuard(root: string, admission?: AgentAdmission): HookCallbackMatcher {
   return {
     hooks: [
