@@ -25,6 +25,17 @@ struct RunDetailView: View {
                             .accessibilityIdentifier("run.error")
                     }
                 }
+                if let documentId = run.documentId {
+                    Section("文档") {
+                        NavigationLink {
+                            DocumentScreen(documentId: documentId)
+                        } label: {
+                            Label(model.documentCatalog.document(id: documentId)?.title ?? "打开文档", systemImage: "doc.text")
+                                .lineLimit(2)
+                        }
+                        .accessibilityIdentifier("run.document")
+                    }
+                }
                 if !run.files.isEmpty {
                     Section("文件") {
                         ForEach(run.files, id: \.path) { file in

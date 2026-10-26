@@ -1,15 +1,22 @@
 import SwiftUI
 
 /// A Markdown document laid out block by block: headings, paragraphs, lists, quotes, code and tables. Images show
-/// as their alt text and nothing loads. A link opens in the system browser, and only a web link does.
+/// as their alt text and nothing loads. A link opens in the system browser, and only a web link does. The blocks in
+/// `changed` (by id) have a bar at their leading edge, in the accent colour, which VoiceOver reads as 已修改.
 struct MarkdownView: View {
     let blocks: [MarkdownBlock]
+    var changed: Set<Int> = []
 
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 12) {
                 ForEach(blocks) { block in
                     MarkdownBlockView(block: block)
+                        .overlay(alignment: .leading) {
+                            if changed.contains(block.id) {
+                                ChangedBar()
+                            }
+                        }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -20,6 +27,19 @@ struct MarkdownView: View {
             ["http", "https"].contains(url.scheme?.lowercased()) ? .systemAction : .discarded
         })
         .accessibilityIdentifier("viewer.markdown")
+    }
+}
+
+/// The bar beside a block that changed. It sits in the padding at the leading edge, so the text does not move.
+private struct ChangedBar: View {
+    var body: some View {
+        RoundedRectangle(cornerRadius: 1.5)
+            .fill(Color.accentColor)
+            .frame(width: 3)
+            .offset(x: -10)
+            .accessibilityElement()
+            .accessibilityLabel("已修改")
+            .accessibilityIdentifier("markdown.changed")
     }
 }
 

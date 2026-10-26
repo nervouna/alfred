@@ -29,6 +29,11 @@ struct TaskDetailView: View {
         RunPresentation.merged(loaded: detail?.runs ?? [], timeline: model.timeline).filter { $0.taskId == taskId }
     }
 
+    /// The documents the task's runs delivered, most recently updated first.
+    private var documents: [AlfredDocument] {
+        model.documentCatalog.documents(taskId: taskId)
+    }
+
     private var isQueued: Bool {
         guard let before = runsWhenQueued else { return false }
         return !runs.contains { !before.contains($0.id) }
@@ -49,6 +54,19 @@ struct TaskDetailView: View {
                     Section("跳过") {
                         ForEach(Array(task.skips.enumerated()), id: \.offset) { _, skip in
                             SkipRow(skip: skip)
+                        }
+                    }
+                }
+                if !documents.isEmpty {
+                    Section("文档") {
+                        ForEach(documents) { document in
+                            NavigationLink {
+                                DocumentScreen(documentId: document.id)
+                            } label: {
+                                Label(document.title, systemImage: FileViewerKind(path: document.path).symbol)
+                                    .lineLimit(2)
+                            }
+                            .accessibilityIdentifier("task.document.\(document.id)")
                         }
                     }
                 }
