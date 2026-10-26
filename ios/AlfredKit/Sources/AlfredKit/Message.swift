@@ -4,6 +4,9 @@ import Foundation
 public struct FileRef: Codable, Hashable, Sendable {
     public let path: String
     public let kind: FileKind?
+    /// Set on a file a delivery registered: the document it belongs to, and the version it delivered. Both or neither.
+    public let documentId: String?
+    public let version: String?
 }
 
 /// A message between the owner and Alfred, on either channel.

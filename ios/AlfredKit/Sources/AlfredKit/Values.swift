@@ -42,7 +42,7 @@ public struct FileKind: ExtensibleString {
     public static let file = FileKind(rawValue: "file")
 }
 
-/// What started a run: a task from the owner, a scheduled scan, or a subagent of another run.
+/// What started a run: a task from the owner, a scheduled scan, a subagent of another run, or a revision of a document.
 public struct RunKind: ExtensibleString {
     public let rawValue: String
 
@@ -53,6 +53,7 @@ public struct RunKind: ExtensibleString {
     public static let task = RunKind(rawValue: "task")
     public static let scan = RunKind(rawValue: "scan")
     public static let subagent = RunKind(rawValue: "subagent")
+    public static let revision = RunKind(rawValue: "revision")
 }
 
 /// The APNs environment a device token belongs to. A development-signed build uses the sandbox.
@@ -114,4 +115,61 @@ public struct TaskModel: ExtensibleString {
     public static let sonnet = TaskModel(rawValue: "sonnet")
     public static let opus = TaskModel(rawValue: "opus")
     public static let haiku = TaskModel(rawValue: "haiku")
+}
+
+/// What kind of file a document is. Only markdown and text documents take passage annotations.
+public struct DocumentKind: ExtensibleString {
+    public let rawValue: String
+
+    public init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+
+    public static let markdown = DocumentKind(rawValue: "markdown")
+    public static let text = DocumentKind(rawValue: "text")
+    public static let html = DocumentKind(rawValue: "html")
+    public static let pdf = DocumentKind(rawValue: "pdf")
+    public static let image = DocumentKind(rawValue: "image")
+    public static let other = DocumentKind(rawValue: "other")
+}
+
+/// Why a document has a version: a delivery, the end of a revision run, an undo, or the end of another run that changed the file.
+public struct DocumentVersionReason: ExtensibleString {
+    public let rawValue: String
+
+    public init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+
+    public static let delivered = DocumentVersionReason(rawValue: "delivered")
+    public static let revised = DocumentVersionReason(rawValue: "revised")
+    public static let undone = DocumentVersionReason(rawValue: "undone")
+    public static let changed = DocumentVersionReason(rawValue: "changed")
+}
+
+/// Where an annotation stands: submitted and not yet answered, resolved with a reply, or returned to the owner.
+public struct AnnotationState: ExtensibleString {
+    public let rawValue: String
+
+    public init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+
+    public static let submitted = AnnotationState(rawValue: "submitted")
+    public static let resolved = AnnotationState(rawValue: "resolved")
+    public static let returned = AnnotationState(rawValue: "returned")
+}
+
+/// Why an annotation went back to the owner: its run ended without answering it, an undo returned it, the run was stopped, or the run failed.
+public struct AnnotationReturnReason: ExtensibleString {
+    public let rawValue: String
+
+    public init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+
+    public static let unanswered = AnnotationReturnReason(rawValue: "unanswered")
+    public static let undone = AnnotationReturnReason(rawValue: "undone")
+    public static let stopped = AnnotationReturnReason(rawValue: "stopped")
+    public static let failed = AnnotationReturnReason(rawValue: "failed")
 }

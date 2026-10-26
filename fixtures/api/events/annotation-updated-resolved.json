@@ -1,0 +1,19 @@
+{
+  "id": 26,
+  "at": "2026-10-26T02:12:31.004Z",
+  "type": "annotation.updated",
+  "data": {
+    "id": "n5b8wd",
+    "documentId": "r4f7ma",
+    "version": "248e89ba3aad47311d9cf0d57bf83b038a724f1f",
+    "target": {
+      "kind": "document"
+    },
+    "comment": "开头加一段结论。",
+    "state": "resolved",
+    "runId": "m2v8pd",
+    "reply": "已在开头加上三句话的结论，并注明价格的查询日期。",
+    "createdAt": "2026-10-26T02:00:00.000Z",
+    "updatedAt": "2026-10-26T02:12:31.004Z"
+  }
+}

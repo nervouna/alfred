@@ -64,6 +64,28 @@ const WRITE_PATHS: Record<string, string[]> = {
   mcp__alfred__generate_image: ["output"],
 };
 
+/** Input fields that name a path a tool call reads without writing it, beyond PATH_TOOLS. */
+const READ_PATHS: Record<string, string[]> = {
+  mcp__alfred__send_file: ["path"],
+  mcp__alfred__render_pdf: ["source"],
+};
+
+/** Whether a path or pattern has a `.git` segment, in any case: git's own directory, which no tool may use (see src/documents/versions.ts). */
+function insideGitDir(p: string): boolean {
+  return p.split(/[\\/]/).some((segment) => segment.toLowerCase() === ".git");
+}
+
+/** A denial reason when a tool call names a `.git` segment in a path, pattern or glob, read or written. */
+function gitDirReason(toolName: string, input: Record<string, unknown>): string | undefined {
+  const keys = [...(READ_PATHS[toolName] ?? [])];
+  const pathKey = PATH_TOOLS[toolName];
+  if (pathKey) keys.push(pathKey);
+  if (toolName === "Glob" || toolName === "Grep") keys.push("path", "pattern", "glob");
+  const named: unknown[] = [...keys.map((key) => input[key]), ...writtenPaths(toolName, input)];
+  const hit = named.find((p): p is string => typeof p === "string" && insideGitDir(p));
+  return hit === undefined ? undefined : `${hit} is inside a .git directory, which no tool may use.`;
+}
+
 /** Where a run may read but not write: top-level workspace directories, and file names that count anywhere in the workspace. Names match in any case, as on a case-insensitive disk. */
 export interface ReadOnlyPaths {
   dirs: readonly string[];
@@ -104,9 +126,9 @@ export function readOnlyWrite(root: string, toolName: string, input: Record<stri
   return undefined;
 }
 
-/** Returns a denial reason when a tool call would touch anything outside `root`, or write to a path `options.readOnly` names. */
+/** Returns a denial reason when a tool call would touch anything outside `root`, a `.git` path, or write to a path `options.readOnly` names. */
 export function checkToolInput(root: string, toolName: string, input: Record<string, unknown>, options: GuardOptions = {}): string | undefined {
-  return checkWorkspace(root, toolName, input) ?? checkReadOnly(root, toolName, input, options.readOnly);
+  return gitDirReason(toolName, input) ?? checkWorkspace(root, toolName, input) ?? checkReadOnly(root, toolName, input, options.readOnly);
 }
 
 function checkReadOnly(root: string, toolName: string, input: Record<string, unknown>, readOnly: ReadOnlyPaths | undefined): string | undefined {

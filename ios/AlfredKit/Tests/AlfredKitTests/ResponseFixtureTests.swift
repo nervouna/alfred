@@ -18,6 +18,10 @@ final class ResponseFixtureTests: XCTestCase {
                 case "task-result.json": _ = try decoder.decode(TaskResult.self, from: data)
                 case "task-list.json": _ = try decoder.decode(TaskList.self, from: data)
                 case "task-detail.json": _ = try decoder.decode(TaskDetail.self, from: data)
+                case "document-result.json": _ = try decoder.decode(DocumentResult.self, from: data)
+                case "document-list.json": _ = try decoder.decode(DocumentList.self, from: data)
+                case "document-detail.json": _ = try decoder.decode(DocumentDetail.self, from: data)
+                case "revision-accepted.json": _ = try decoder.decode(RevisionAccepted.self, from: data)
                 case "error.json": _ = try decoder.decode(ErrorResponse.self, from: data)
                 default: XCTFail("\(name) has no response type")
                 }

@@ -9,7 +9,7 @@ ENV ALFRED_STATE_DIR=/data/state \
     ALFRED_MMX_BIN=/usr/local/bin/mmx
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates tzdata fonts-noto-cjk fonts-noto-color-emoji \
+ && apt-get install -y --no-install-recommends ca-certificates git tzdata fonts-noto-cjk fonts-noto-color-emoji \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

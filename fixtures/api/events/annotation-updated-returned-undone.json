@@ -1,0 +1,23 @@
+{
+  "id": 28,
+  "at": "2026-10-26T06:20:05.330Z",
+  "type": "annotation.updated",
+  "data": {
+    "id": "q3t6pk",
+    "documentId": "r4f7ma",
+    "version": "b4ab6682a13cd666c956adb2e063e4adb80de54d",
+    "target": {
+      "kind": "passage",
+      "quote": "Linode 的 2 GB 方案是 $12/月",
+      "prefix": "",
+      "suffix": "。"
+    },
+    "comment": "这一行的价格改成 2026 年 10 月官网的数字。",
+    "state": "returned",
+    "runId": "x4n7mj",
+    "reply": "已改为 2026 年 10 月官网的价格，并注明来源。",
+    "returnReason": "undone",
+    "createdAt": "2026-10-26T04:50:00.000Z",
+    "updatedAt": "2026-10-26T06:20:05.330Z"
+  }
+}

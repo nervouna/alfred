@@ -1,6 +1,6 @@
 // The command API: the owner's commands in, Alfred's events out, over a Unix
 // socket (no TCP listener). A process on the same host posts message.send,
-// run.stop, question.answer and the task commands to /commands, uploads files to /uploads (into the
+// run.stop, question.answer, the task commands and the document commands to /commands, uploads files to /uploads (into the
 // workspace's inbox, for a message to name) and follows /events as server-sent
 // events, resuming by event id. Every command is validated here by parseCommand.
 // Live events (reply text as it is written, the steps of a run) go out as frames
@@ -19,7 +19,7 @@ import { localDate, localTime, sanitizeFileName, uniquePath } from "../files.ts"
 import { describeError, log } from "../log.ts";
 import { STATE_DIR, WORKSPACE_DIR } from "../store.ts";
 import { MAX_COMMAND_BYTES, MAX_UPLOAD_BYTES, parseCommand } from "./schema.ts";
-import type { Event, LiveEvent, Task, TaskCreate, TaskUpdate, UploadResult } from "./schema.ts";
+import type { DocumentResult, DocumentRevise, DocumentUndo, Event, LiveEvent, RevisionAccepted, Task, TaskCreate, TaskUpdate, UploadResult } from "./schema.ts";
 
 /** How often an event stream gets a `: ping` comment. */
 export const HEARTBEAT_MS = 30_000;
@@ -49,6 +49,16 @@ export interface TaskCommands {
   run(taskId: string): boolean | Promise<boolean>;
 }
 
+/** A document command's answer: the body to send, or the status and the reason it was refused. */
+export type DocumentReply<T> = { ok: true; body: T } | { ok: false; status: 404 | 409; error: string };
+
+export interface DocumentCommands {
+  /** Starts a revision run that takes the batch, or refuses it. */
+  revise(command: DocumentRevise): DocumentReply<RevisionAccepted> | Promise<DocumentReply<RevisionAccepted>>;
+  /** Undoes the document's latest revision, or refuses it. */
+  undo(command: DocumentUndo): DocumentReply<DocumentResult> | Promise<DocumentReply<DocumentResult>>;
+}
+
 export interface ApiOptions {
   /** Path of the Unix socket. */
   socket: string;
@@ -57,6 +67,8 @@ export interface ApiOptions {
   events: ApiEvents;
   /** Where task commands go, once the task store is wired in; without it every task command answers 503. */
   tasks?: TaskCommands;
+  /** Where document commands go, once the document store is wired in; without it every document command answers 503. */
+  documents?: DocumentCommands;
   /** Interval between pings on an event stream; 30 s by default. */
   heartbeatMs?: number;
   /** Events read per page of a stream's backlog. */
@@ -196,7 +208,7 @@ function receiveUpload(req: http.IncomingMessage, file: string): Promise<number 
 
 /** Start the API; resolves to a function that closes it. */
 export async function startApi(opts: ApiOptions): Promise<() => Promise<void>> {
-  const { socket, handler, events, tasks } = opts;
+  const { socket, handler, events, tasks, documents } = opts;
   const heartbeatMs = opts.heartbeatMs ?? HEARTBEAT_MS;
   const pageSize = opts.pageSize ?? BACKLOG_PAGE;
 
@@ -254,6 +266,18 @@ export async function startApi(opts: ApiOptions): Promise<() => Promise<void>> {
       const reply = command.type === "task.create" ? await tasks.create(command) : await tasks.update(command);
       if (!reply.ok) return sendJson(res, reply.status, { error: reply.error });
       return sendJson(res, command.type === "task.create" ? 201 : 200, { task: reply.task });
+    }
+    // A document command never reaches the message path either. Without a document store it is refused with 503.
+    if (command.type === "document.revise" || command.type === "document.undo") {
+      if (!documents) return sendJson(res, 503, { error: "documents are not available" });
+      if (command.type === "document.revise") {
+        const reply = await documents.revise(command);
+        if (!reply.ok) return sendJson(res, reply.status, { error: reply.error });
+        return sendJson(res, 202, reply.body);
+      }
+      const reply = await documents.undo(command);
+      if (!reply.ok) return sendJson(res, reply.status, { error: reply.error });
+      return sendJson(res, 200, reply.body);
     }
     // A message's files are checked before anything is submitted: one that is not in the inbox refuses the message.
     const files = command.files ?? [];
