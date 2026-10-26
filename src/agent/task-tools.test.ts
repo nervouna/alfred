@@ -164,16 +164,16 @@ test("a free-text answer is not a confirmation, however much it sounds like one"
   assert.equal(s.store.list().length, 0);
 });
 
-test("the question cuts a long brief to about 300 characters and says how long it was", async () => {
-  const s = setup({ tap: "不要" });
+test("the question shows a long brief in full: a new task's brief, and the new brief of a change", async () => {
+  const s = setup({ tap: "不要" }, { tap: "不要" });
   const brief = `${"调研".repeat(200)}ENDMARK`;
+  assert.equal([...brief].length, 407);
   await s.call("task_create", { ...briefing, brief });
-  const text = s.asked[0]?.question ?? "";
-  assert.ok(!text.includes("ENDMARK"));
-  assert.ok(text.includes("调研".repeat(150)), "the first 300 characters");
-  assert.ok(!text.includes("调研".repeat(151)));
-  assert.ok(text.includes("共 407 字"), text);
-  assert.ok(text.length < 600, `${text.length} characters`);
+  await s.call("task_update", { taskId: existing(s).id, brief });
+
+  const [created, changed] = s.asked.map((q) => q.question);
+  assert.ok(created?.includes(`简报：${brief}`), "a new task's brief, all 407 characters");
+  assert.ok(changed?.includes(`→ ${brief}`), "a change's new brief, all 407 characters");
 });
 
 test("a one-time task in the past is refused after the tap, in one line, and nothing is created", async () => {

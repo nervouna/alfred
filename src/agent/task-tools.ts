@@ -24,7 +24,7 @@ export const TASK_TOOL_NAMES = ["mcp__alfred__task_list", "mcp__alfred__task_cre
 /** The two answers of a confirmation; only the first changes anything. */
 const CONFIRM = "确认";
 const DECLINE = "不要";
-/** How much of a brief the confirmation shows. */
+/** How much of the old brief a change's confirmation shows: the new brief is shown in full. */
 const BRIEF_CHARS = 300;
 /** How much of a brief a listing shows: its first line, cut here. */
 const LIST_BRIEF_CHARS = 100;
@@ -70,7 +70,7 @@ function money(usd: number): string {
   return `$${usd.toFixed(Math.min(Math.max(2, decimals), 6))}`;
 }
 
-/** A brief as the owner sees it: cut to BRIEF_CHARS characters, with how long it is when it was cut. */
+/** The old brief of a change as the owner sees it: cut to BRIEF_CHARS characters, with how long it is when it was cut. */
 function cut(brief: string): string {
   const chars = Array.from(brief.trim());
   return chars.length > BRIEF_CHARS ? `${chars.slice(0, BRIEF_CHARS).join("")}…（共 ${chars.length} 字）` : chars.join("");
@@ -96,7 +96,7 @@ function changeLines(current: Task, changes: TaskChanges): string[] {
   if (changes.schedule !== undefined) lines.push(`时间：${describeSchedule(current.schedule)} → ${scheduleText(changes.schedule)}`);
   if (changes.model !== undefined) lines.push(`模型：${current.model} → ${changes.model}`);
   if (changes.budgetUsd !== undefined) lines.push(`每次运行上限：${money(current.budgetUsd)} → ${money(changes.budgetUsd)}`);
-  if (changes.brief !== undefined) lines.push(`简报：${cut(current.brief)} → ${cut(changes.brief)}`);
+  if (changes.brief !== undefined) lines.push(`简报：${cut(current.brief)} → ${changes.brief}`);
   if (changes.status !== undefined) lines.push(`状态：${STATUS_NAMES[current.status]} → ${STATUS_NAMES[changes.status]}`);
   return lines;
 }
@@ -176,7 +176,7 @@ export function taskToolDefinitions(store: TaskStore, ask: AskOwner, signal?: Ab
         `时间：${scheduleText(schedule)}`,
         `模型：${model ?? DEFAULT_TASK_MODEL}`,
         `每次运行上限：${money(budgetUsd ?? DEFAULT_TASK_BUDGET_USD)}`,
-        `简报：${cut(brief)}`,
+        `简报：${brief}`,
       ]);
       const refused = await tapped(question, extra, "no task was created");
       if (refused) return refused;
