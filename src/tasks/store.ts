@@ -12,6 +12,7 @@ import {
   TaskSchema,
 } from "../api/schema.ts";
 import { type EventLog, sharedEventLog } from "../events.ts";
+import { describeError, log } from "../log.ts";
 import { TASKS_FILE, newRunId } from "../runs.ts";
 import { readJson, writeJson } from "../store.ts";
 import { MISSED_RUN_MS, nextOccurrence, occurrencesBetween } from "./schedule.ts";
@@ -40,6 +41,9 @@ export interface TaskInput {
 /** What a change sets. A field left out keeps its value. */
 export type TaskChanges = Partial<Pick<Task, "title" | "brief" | "schedule" | "model" | "budgetUsd" | "status">>;
 
+/** Told after update() has changed a task's status: the task as saved, and the status it had. */
+export type StatusListener = (task: Task, previous: Task["status"]) => void;
+
 /** A run that is due: the task, already moved on to its next time, and the time the run was due. */
 export interface DueTask {
   task: Task;
@@ -53,6 +57,7 @@ export class TaskStore {
   private readonly timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   /** Newest created first. A change replaces a task's object, so a task returned earlier does not change. */
   private tasks: Task[];
+  private readonly statusListeners = new Set<StatusListener>();
 
   constructor({ file = TASKS_FILE, events = sharedEventLog(), now = () => new Date() }: TaskStoreOptions = {}) {
     this.file = file;
@@ -67,6 +72,17 @@ export class TaskStore {
 
   get(id: string): Task | undefined {
     return this.tasks.find((task) => task.id === id);
+  }
+
+  /**
+   * Calls the listener after every update() that changes a task's status, once the change is saved and logged. It is
+   * not told of a new task, of the done that takeDue gives a one-time task as its run is taken (the owner changed
+   * nothing), or of a change that leaves the status as it was. A listener that throws is logged and does not fail the
+   * update. Returns a function that stops the listening.
+   */
+  onStatusChange(listener: StatusListener): () => void {
+    this.statusListeners.add(listener);
+    return () => void this.statusListeners.delete(listener);
   }
 
   /** A new active task. Its first run is the first scheduled time after now. */
@@ -117,7 +133,7 @@ export class TaskStore {
       }
     }
     const { nextRunAt: _previousRun, ...base } = current;
-    return this.save({
+    const saved = this.save({
       ...base,
       title: changes.title ?? current.title,
       brief: changes.brief ?? current.brief,
@@ -128,6 +144,8 @@ export class TaskStore {
       updatedAt: now.toISOString(),
       ...(nextRunAt ? { nextRunAt } : {}),
     });
+    if (saved.status !== current.status) this.announceStatus(saved, current.status);
+    return saved;
   }
 
   /**
@@ -188,6 +206,16 @@ export class TaskStore {
     if (!current) return undefined;
     const skips = [{ at: at.toISOString(), reason }, ...current.skips].slice(0, MAX_TASK_SKIPS);
     return this.save({ ...current, skips, updatedAt: this.now().toISOString() });
+  }
+
+  private announceStatus(task: Task, previous: Task["status"]): void {
+    for (const listener of this.statusListeners) {
+      try {
+        listener(task, previous);
+      } catch (err) {
+        log.error(`a listener of task ${task.id} changing from ${previous} to ${task.status} failed: ${describeError(err)}`);
+      }
+    }
   }
 
   /** Checks the task, writes the whole list with it in place (first, when it is new), then tells the log. */

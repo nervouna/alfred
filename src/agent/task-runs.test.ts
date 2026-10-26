@@ -31,6 +31,7 @@ Object.assign(process.env, {
 const { createAgentHandler } = await import("./handler.ts");
 const { EventLog } = await import("../events.ts");
 const { TaskStore } = await import("../tasks/store.ts");
+const { taskCommands } = await import("../tasks/commands.ts");
 const { readRunFile } = await import("../runs.ts");
 const { localDate } = await import("../files.ts");
 const { TASK_TOOL_NAMES } = await import("./task-tools.ts");
@@ -1013,4 +1014,184 @@ test("a queued scheduled occurrence is dropped when its task was paused or ended
   await until("the second run now to start", () => t.agent.taskQueries.length === 4 && hold.waiting === 1);
   hold.release("好");
   await until("the second run now to end", () => t.finished(ended.id));
+});
+
+/** A daily task that is not due in the tests that start at 23:30. */
+function lateEvening(s: ReturnType<typeof stack>, title: string) {
+  return s.store.create({ title, brief: `Brief of ${title}`, schedule: { kind: "daily", time: "23:55" } }, "manual");
+}
+
+test("pausing or ending a task from the app stops its live run: it ends stopped, nothing more is posted, and the task keeps the status", async () => {
+  for (const status of ["paused", "done"] as const) {
+    const s = stack();
+    const hold = held();
+    const task = evening(s, "晚报");
+    const t = start(s, { turn: hold.turn });
+    assert.equal(t.handler.runTask(task.id), true);
+    await until("the run now to start", () => hold.waiting === 1);
+    const runId = t.taskRuns(task.id)[0]?.id ?? "";
+    assert.equal(t.taskRuns(task.id)[0]?.status, "running");
+
+    const reply = await taskCommands(s.store, t.handler).update({ type: "task.update", taskId: task.id, status });
+    assert.ok(reply.ok);
+    await until(`the run to end after the task was ${status}`, () => t.finished(task.id));
+    await sleep(100);
+
+    assert.equal(t.taskRuns(task.id)[0]?.status, "stopped", status);
+    assert.equal(s.store.get(task.id)?.status, status);
+    assert.deepEqual(t.messages(), [], "no failure message, no report");
+    assert.deepEqual(t.app.texts, []);
+    assert.equal(await t.handler.stopRun(runId), false, "the run is over, so there is nothing left to stop");
+    assert.equal(t.agent.taskQueries.length, 1);
+  }
+});
+
+test("ending a task from chat stops its live run too, and the chat's own run is not touched", async () => {
+  const s = stack();
+  const hold = held();
+  const task = evening(s, "晚报");
+  const results: string[] = [];
+  const t = start(s, {
+    turn: async (prompt, signal, options) => {
+      if (isScheduled(options)) return hold.turn(prompt, signal);
+      results.push(await callTool(options, "task_update", { taskId: task.id, status: "done" }));
+      return "晚报已结束。";
+    },
+  });
+  assert.equal(t.handler.runTask(task.id), true);
+  await until("the run now to start", () => hold.waiting === 1);
+
+  await t.send("结束晚报");
+  await until("the chat run to end", () => t.chatDone(1));
+  await until("the task run to end", () => t.finished(task.id));
+  await sleep(100);
+
+  assert.equal(askedQuestions(s).length, 0, "ending asks nothing");
+  assert.match(results[0] ?? "", /Updated task/);
+  assert.equal(s.store.get(task.id)?.status, "done");
+  assert.equal(t.taskRuns(task.id)[0]?.status, "stopped");
+  assert.equal(t.chatRuns()[0]?.status, "done", "the chat run that ended the task ran to its end");
+  assert.deepEqual(t.app.texts, ["晚报已结束。"], "only the chat's reply; the stopped run posted nothing");
+  assert.deepEqual(t.messages().filter((m) => m.taskId === task.id), []);
+});
+
+test("pausing a task drops its queued occurrence and its queued run now, resuming brings neither back, and the runs of other tasks go on", async () => {
+  const s = stack();
+  const hold = held();
+  // 23:30 in Taipei: the blocker fell due at 22:50 and the task at 23:00; the last task is due at 23:55.
+  const blocker = oneTime(s, "挡路的", {}, 830);
+  const target = evening(s, "会被暂停的");
+  const last = lateEvening(s, "排在后面的");
+  clock = new Date("2026-10-27T15:30:00Z");
+  const t = start(s, { turn: hold.turn });
+  await until("the blocker's run to start", () => hold.waiting === 1 && t.agent.taskQueries.length === 1);
+  assert.match(t.agent.taskQueries[0]?.prompts[0] ?? "", /Brief of 挡路的/);
+  assert.equal(t.handler.runTask(target.id), true);
+  assert.equal(t.handler.runTask(last.id), true);
+
+  s.store.update(target.id, { status: "paused" });
+  s.store.update(target.id, { status: "active" });
+  assert.equal(t.taskRuns(blocker.id)[0]?.status, "running", "another task's live run is untouched");
+
+  hold.release("好");
+  await until("the next task's run to start", () => t.agent.taskQueries.length === 2 && hold.waiting === 1);
+  assert.match(t.agent.taskQueries[1]?.prompts[0] ?? "", /Brief of 排在后面的/, "the run after them still runs");
+  hold.release("好");
+  await until("the last run to end", () => t.finished(last.id));
+  await sleep(150);
+
+  assert.equal(t.agent.taskQueries.length, 2, "neither queued run of the paused task ever started, though the task is active again");
+  assert.deepEqual(t.taskRuns(target.id), []);
+  assert.deepEqual(s.store.get(target.id)?.skips, [], "no skip is recorded");
+  assert.deepEqual(t.messages().filter((m) => m.taskId === target.id), [], "and nothing is posted");
+  assert.deepEqual(s.store.get(last.id)?.skips, []);
+});
+
+test("ending a task drops its queued runs the same way, from the app and from chat", async () => {
+  const s = stack();
+  const hold = held();
+  const blocker = oneTime(s, "挡路的", {}, 830);
+  const byApp = evening(s, "app 结束的");
+  const byChat = evening(s, "聊天结束的");
+  const last = lateEvening(s, "排在后面的");
+  clock = new Date("2026-10-27T15:30:00Z");
+  const t = start(s, {
+    turn: async (prompt, signal, options) => {
+      if (isScheduled(options)) return hold.turn(prompt, signal);
+      await callTool(options, "task_update", { taskId: byChat.id, status: "done" });
+      return "好的。";
+    },
+  });
+  await until("the blocker's run to start", () => hold.waiting === 1 && t.agent.taskQueries.length === 1);
+  for (const task of [byApp, byChat, last]) assert.equal(t.handler.runTask(task.id), true);
+
+  assert.ok((await taskCommands(s.store, t.handler).update({ type: "task.update", taskId: byApp.id, status: "done" })).ok);
+  await t.send("结束聊天结束的");
+  await until("the chat run to end", () => t.chatDone(1));
+  assert.equal(s.store.get(byChat.id)?.status, "done");
+
+  hold.release("好");
+  await until("the last task's run to start", () => t.agent.taskQueries.length === 2 && hold.waiting === 1);
+  assert.match(t.agent.taskQueries[1]?.prompts[0] ?? "", /Brief of 排在后面的/);
+  hold.release("好");
+  await until("the last run to end", () => t.finished(last.id));
+  await sleep(150);
+
+  assert.equal(t.agent.taskQueries.length, 2);
+  assert.ok(t.finished(blocker.id));
+  for (const task of [byApp, byChat]) assert.deepEqual(t.taskRuns(task.id), [], task.title);
+});
+
+test("ending a paused task stops the run now the owner started on it", async () => {
+  const s = stack();
+  const hold = held();
+  const task = evening(s, "晚报");
+  s.store.update(task.id, { status: "paused" });
+  const t = start(s, { turn: hold.turn });
+  assert.equal(t.handler.runTask(task.id), true);
+  await until("the run now to start", () => hold.waiting === 1);
+
+  s.store.update(task.id, { status: "done" });
+  await until("the run to end", () => t.finished(task.id));
+  assert.equal(t.taskRuns(task.id)[0]?.status, "stopped");
+});
+
+test("a one-time task's own run, which the store marked done as it fell due, runs to the end, a new title included", async () => {
+  const s = stack();
+  const hold = held();
+  const task = oneTime(s, "一次性的");
+  clock = minutesAfterStart(2);
+  const t = start(s, { turn: hold.turn });
+  await until("the run to start", () => hold.waiting === 1);
+  assert.equal(s.store.get(task.id)?.status, "done", "taken, so the store has marked it done");
+
+  s.store.update(task.id, { title: "改了名的一次性任务" });
+  await sleep(100);
+  assert.equal(t.taskRuns(task.id)[0]?.status, "running", "neither the store's done nor a new title stops it");
+
+  hold.release("报告好了");
+  await until("the run to end", () => t.finished(task.id));
+  assert.equal(t.taskRuns(task.id)[0]?.status, "done");
+  assert.ok(t.messages().some((m) => m.direction === "out" && m.taskId === task.id && m.text.includes("报告好了")), "the report is posted");
+});
+
+test("changing a task's title or schedule while its run is live does not stop it", async () => {
+  const s = stack();
+  const hold = held();
+  const task = evening(s, "晚报");
+  const t = start(s, { turn: hold.turn });
+  assert.equal(t.handler.runTask(task.id), true);
+  await until("the run now to start", () => hold.waiting === 1);
+
+  const commands = taskCommands(s.store, t.handler);
+  assert.ok((await commands.update({ type: "task.update", taskId: task.id, title: "新晚报" })).ok);
+  assert.ok((await commands.update({ type: "task.update", taskId: task.id, schedule: { kind: "daily", time: "22:00" } })).ok);
+  await sleep(100);
+  assert.equal(s.store.get(task.id)?.title, "新晚报");
+  assert.equal(t.taskRuns(task.id)[0]?.status, "running");
+  assert.equal(t.agent.taskQueries.length, 1);
+
+  hold.release("好");
+  await until("the run to end", () => t.finished(task.id));
+  assert.equal(t.taskRuns(task.id)[0]?.status, "done");
 });

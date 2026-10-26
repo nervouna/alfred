@@ -31,6 +31,8 @@
 // subagents, and memory, skills and rules read-only. Its reply and files are
 // delivered as messages with its run and task ids, and the chat hears of each on
 // the owner's next message. Its spend counts toward the day's cap, not the session.
+// A task the owner pauses or ends stops: its live run is aborted as a stop aborts it, and its queued runs are
+// dropped (stopTaskRuns). The store tells the handler of every such change, whether it came from the app or from chat.
 // A scheduled occurrence that waited in the queue is dropped if its task has been paused or ended since.
 //
 // While a run works it also publishes live events (see events.ts): the main
@@ -619,6 +621,8 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
   /** Set once a shutdown has begun: nothing new starts. */
   let closing = false;
   let pollTimer: NodeJS.Timeout | undefined;
+  /** Ends the listening to the task store's changes of status. */
+  let stopListening: (() => void) | undefined;
 
   /** What is said to the owner is recorded as events, with the run it belongs to if any, and the task if it is about one. */
   const outbound = (runId?: string, taskId?: string): Outbound => recorded(opts.out, events, { workspace: WORKSPACE_DIR, runId, taskId });
@@ -1198,6 +1202,21 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
     }
   }
 
+  /**
+   * A task the owner paused or ended no longer runs: its live run is aborted, as run.stop aborts it (it ends stopped and
+   * posts nothing more), and its queued runs, occurrences and runs now alike, are dropped for good, resumed later or
+   * not. Other tasks' runs, the chat's run and background subagents go on.
+   */
+  function stopTaskRuns(task: Task): void {
+    const kept = taskQueue.filter((item) => item.taskId !== task.id);
+    const dropped = taskQueue.length - kept.length;
+    if (dropped) {
+      taskQueue.splice(0, taskQueue.length, ...kept);
+      log.info(`task ${task.id} is ${task.status}: dropping its ${dropped} queued run${dropped === 1 ? "" : "s"}`);
+    }
+    if (taskRun?.task?.id === task.id) abortRun(taskRun, `its task ${task.id} is ${task.status}`);
+  }
+
   /** Queues a run of the task now, without moving its schedule. False when there is no such task. */
   function runTask(taskId: string): boolean {
     if (closing || !tasks?.get(taskId)) return false;
@@ -1485,6 +1504,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
     // Nothing new starts: no task is taken, no queued task run or queued message starts a run.
     closing = true;
     clearInterval(pollTimer);
+    stopListening?.();
     taskQueue.length = 0;
     for (const rt of runtimes.values()) {
       if (!rt.run) continue;
@@ -1509,6 +1529,10 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
 
   // The tasks that fell due while Alfred was down are taken once the runs it lost are marked, and then every so often.
   if (tasks) {
+    // The one place that reacts when the owner pauses or ends a task, for the app and for chat alike: both change it through the store.
+    stopListening = tasks.onStatusChange((task) => {
+      if (task.status !== "active") stopTaskRuns(task);
+    });
     pollTasks();
     pollTimer = setInterval(pollTasks, opts.taskPollMs ?? TASK_POLL_MS);
     pollTimer.unref();
