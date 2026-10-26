@@ -13,6 +13,7 @@ import { MemoryLock } from "./agent/memory.ts";
 import { describeEvent, request, streamEvents } from "./api/client.ts";
 import { apiSocketPath, startApi } from "./api/server.ts";
 import { appOutbound } from "./channels.ts";
+import { startDocuments } from "./documents/startup.ts";
 import { sharedEventLog } from "./events.ts";
 import { humanAge } from "./files.ts";
 import { describeError, log, logToFile } from "./log.ts";
@@ -72,9 +73,13 @@ async function cmdRun(args: string[]): Promise<void> {
   if (!socket) throw new Error("Alfred is reached through its command API, so ALFRED_API_SOCKET=off leaves it nothing to serve");
   logToFile(LOG_FILE);
   const startedAt = new Date();
+  // The one history of the workspace and the one document store, shared by the handler and its tools, and by whatever
+  // else works on documents. Opened first: it commits what changed while Alfred was down, and imports earlier deliveries.
+  // When it fails (it logs why) Alfred runs without documents.
+  const documents = await startDocuments();
   // The only task store: it is the only writer of tasks.json, and the handler and the task commands both use it.
   const tasks = new TaskStore();
-  const agent = createAgentHandler({ out: appOutbound(), tasks });
+  const agent = createAgentHandler({ out: appOutbound(), tasks, documents });
   let closeApi: () => Promise<void>;
   try {
     closeApi = await startApi({ socket, handler: agent, events: sharedEventLog(), tasks: taskCommands(tasks, agent) });

@@ -56,7 +56,7 @@ test("no tool may use a .git path, read or written, in any case; names that only
     ["Grep", { pattern: "x", path: ".git" }],
     ["Grep", { pattern: "x", glob: ".git/*" }],
     ["mcp__alfred__move_file", { from: "notes/a.md", to: "x/.git/hooks/pre-commit" }],
-    ["mcp__alfred__send_file", { path: ".git/config" }],
+    ["mcp__alfred__deliver", { path: ".git/config" }],
     ["mcp__alfred__render_pdf", { source: "reports/.git/a.md" }],
     ["mcp__alfred__generate_image", { prompt: "x", output: ".Git/x.jpg" }],
   ];
@@ -67,7 +67,7 @@ test("no tool may use a .git path, read or written, in any case; names that only
     ["Read", { file_path: ".gitignore" }],
     ["Write", { file_path: "notes.github.md" }],
     ["Glob", { pattern: "**/.gitignore" }],
-    ["mcp__alfred__send_file", { path: "notes/.github/a.md" }],
+    ["mcp__alfred__deliver", { path: "notes/.github/a.md" }],
   ];
   for (const [tool, input] of allowed) assert.equal(checkToolInput(root, tool, input), undefined, `${tool} ${JSON.stringify(input)}`);
 });
@@ -100,7 +100,7 @@ test("a guard told what is read-only denies every tool that writes there, and le
     ["mcp__alfred__move_file", { from: "notes/a.md", to: "reports/a.md" }],
     ["mcp__alfred__render_pdf", { source: "notes/a.md" }],
     ["mcp__alfred__generate_image", { prompt: "x" }],
-    ["mcp__alfred__send_file", { path: "memory/user.md" }],
+    ["mcp__alfred__deliver", { path: "memory/user.md" }],
   ];
   for (const [tool, input] of allowed) assert.equal(checkToolInput(root, tool, input, guarded), undefined, `${tool} ${JSON.stringify(input)}`);
   assert.match(checkToolInput(root, "Write", { file_path: "/tmp/x" }, guarded) ?? "", /outside the workspace/, "the workspace check still comes first");
@@ -260,7 +260,7 @@ test("the workbench section gives the agent the workbench, card and Files links 
   assert.match(withUrl, /The workbench is at https:\/\/alfred\.example\.com\. A run's card is at https:\/\/alfred\.example\.com\/runs\/<run id>/);
   assert.match(withUrl, /https:\/\/alfred\.example\.com\/files, browses the whole workspace by folder/);
   assert.match(withUrl, /no search/);
-  assert.match(withUrl, /A report with charts stays HTML: write it where the workspace rules put deliverables, send it with send_file/);
+  assert.match(withUrl, /A report with charts stays HTML: write it where the workspace rules put deliverables, deliver it with the deliver tool/);
   assert.doesNotMatch(withUrl, /never send an HTML file/);
 
   const withoutUrl = systemPrompt(now, { workbench: true, workbenchUrl: "" });

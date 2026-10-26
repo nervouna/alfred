@@ -1,6 +1,7 @@
 // Scheduled task runs on a fake channel and a fake agent: no model is called, nothing is sent anywhere.
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -11,6 +12,7 @@ import type { SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 
 import type { Message, Run } from "../api/schema.ts";
 import type { Outbound } from "../channels.ts";
+import type { Documents } from "../documents/register.ts";
 import type { TaskInput } from "../tasks/store.ts";
 
 // Schedules are local times: pin the zone before any date is made, so the result does not depend on the machine.
@@ -30,6 +32,8 @@ Object.assign(process.env, {
 
 const { createAgentHandler } = await import("./handler.ts");
 const { EventLog } = await import("../events.ts");
+const { DocumentStore } = await import("../documents/store.ts");
+const { Versions } = await import("../documents/versions.ts");
 const { TaskStore } = await import("../tasks/store.ts");
 const { taskCommands } = await import("../tasks/commands.ts");
 const { readRunFile } = await import("../runs.ts");
@@ -216,7 +220,7 @@ function evening(s: ReturnType<typeof stack>, title: string) {
 }
 
 /** A handler on the stack's task store, a fake channel and a fake agent. It reads the stack's files, so tasks made before it starts are polled at once. */
-function start(s: ReturnType<typeof stack>, options: { turn?: TurnFn; taskPollMs?: number; tasks?: boolean } = {}) {
+function start(s: ReturnType<typeof stack>, options: { turn?: TurnFn; taskPollMs?: number; tasks?: boolean; documents?: Documents } = {}) {
   const app = fakeApp();
   const agent = fakeAgent(options.turn);
   const handler = createAgentHandler({
@@ -226,6 +230,7 @@ function start(s: ReturnType<typeof stack>, options: { turn?: TurnFn; taskPollMs
     runQuery: agent.runQuery,
     ...(options.tasks === false ? {} : { tasks: s.store }),
     taskPollMs: options.taskPollMs,
+    documents: options.documents,
   });
   cleanups.push(() => handler.shutdown());
   const messages = (): Message[] => s.events.readSince(0).flatMap((e) => (e.type === "message.created" ? [e.data] : []));
@@ -385,7 +390,7 @@ test("files the run sends are messages of the run and the task", async () => {
     turn: async (_prompt, _signal, options) => {
       fs.mkdirSync(path.dirname(path.join(workspace, report)), { recursive: true });
       fs.writeFileSync(path.join(workspace, report), "# 晨报\n");
-      await callTool(options, "send_file", { path: report, caption: "报告在这里" });
+      await callTool(options, "deliver", { path: report, caption: "报告在这里" });
       return "完成了。";
     },
   });
@@ -401,6 +406,81 @@ test("files the run sends are messages of the run and the task", async () => {
     ],
   );
   assert.ok(out.every((m) => m.runId === t.taskRuns(task.id)[0]?.id));
+});
+
+/** A real git dir and a document store of their own on the tests' workspace. */
+async function documentStack(s: ReturnType<typeof stack>) {
+  const gitDir = path.join(s.dir, "versions.git");
+  const versions = new Versions({ workspace, gitDir });
+  await versions.init();
+  const store = new DocumentStore({ file: path.join(s.dir, "documents.json"), events: s.events });
+  const git = (...args: string[]) => execFileSync("git", [`--git-dir=${gitDir}`, `--work-tree=${workspace}`, ...args], { encoding: "utf8" }).trim();
+  const documents: Documents = { versions, store };
+  return { versions, store, documents, git };
+}
+
+test("a document a task run delivers records the task, and the message names the document and the version", async () => {
+  const s = stack();
+  const d = await documentStack(s);
+  const task = oneTime(s, "晨报");
+  const report = `reports/tasks/${task.id}/2026-10-27.md`;
+  clock = minutesAfterStart(2);
+  const t = start(s, {
+    documents: d.documents,
+    turn: async (_prompt, _signal, options) => {
+      fs.mkdirSync(path.dirname(path.join(workspace, report)), { recursive: true });
+      fs.writeFileSync(path.join(workspace, report), "# 晨报 10-27\n\n三条变化\n");
+      assert.match(await callTool(options, "deliver", { path: report }), /Delivered/);
+      return "完成了。";
+    },
+  });
+  // The delivery runs git, which takes longer than the fakes do.
+  await until("the task run to end", () => t.finished(task.id), 20_000);
+
+  const [run] = t.taskRuns(task.id);
+  assert.ok(run);
+  const document = d.store.byPath(report);
+  assert.ok(document);
+  assert.deepEqual([document.taskId, document.title, document.kind], [task.id, "晨报 10-27", "markdown"]);
+  assert.deepEqual(
+    d.store.versions(document.id)?.map((v) => [v.reason, v.runId]),
+    [["delivered", run.id]],
+  );
+  const file = t.messages().flatMap((m) => m.files).find((f) => f.path === report);
+  assert.deepEqual(file, { path: report, kind: "file", documentId: document.id, version: document.version });
+  assert.equal(d.git("log", "-1", "--format=%s"), `Deliver ${report} (run ${run.id})`);
+});
+
+test("a task run commits what it wrote when it ends, as Run <id>: <task title>", async () => {
+  const s = stack();
+  const d = await documentStack(s);
+  const task = oneTime(s, "整理");
+  clock = minutesAfterStart(2);
+  const t = start(s, {
+    documents: d.documents,
+    turn: async (_prompt, _signal, options) => {
+      fs.mkdirSync(path.join(workspace, "notes"), { recursive: true });
+      fs.writeFileSync(path.join(workspace, "notes/task-run-note.md"), "# 记录\n");
+      const hook = {
+        hook_event_name: "PostToolUse",
+        tool_name: "Write",
+        tool_input: { file_path: "notes/task-run-note.md" },
+        tool_response: {},
+        tool_use_id: "toolu_w",
+      };
+      for (const matcher of options.hooks?.PostToolUse ?? []) {
+        for (const h of matcher.hooks) await h(hook as never, "toolu_w", { signal: new AbortController().signal });
+      }
+      return "写好了。";
+    },
+  });
+  await until("the task run to end", () => t.finished(task.id));
+  await until("the commit", () => d.git("log", "-1", "--format=%s").startsWith("Run "), 20_000);
+
+  const [run] = t.taskRuns(task.id);
+  assert.ok(run);
+  assert.equal(d.git("log", "-1", "--format=%s"), `Run ${run.id}: 整理`);
+  assert.equal(d.git("show", "--name-only", "--format=", "HEAD"), "notes/task-run-note.md");
 });
 
 test("a task run's spend counts toward the owner's day and total, and not toward the chat session", async () => {
@@ -704,7 +784,7 @@ test("the next chat message lists the delivery once, and the one after it does n
       if (!isScheduled(options)) return `echo: ${prompt}`;
       fs.mkdirSync(path.dirname(path.join(workspace, report)), { recursive: true });
       fs.writeFileSync(path.join(workspace, report), "# 晨报\n");
-      await callTool(options, "send_file", { path: report });
+      await callTool(options, "deliver", { path: report });
       return "三条变化。\n第二行不会进摘要。";
     },
   });

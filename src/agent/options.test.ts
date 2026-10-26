@@ -51,9 +51,9 @@ test("tasks offer the subagent roles with their default models, and no role can 
     assert.ok(agent, name);
     assert.equal(agent.model, MODELS[role.model], name);
     assert.equal(agent.maxTurns, role.maxTurns, name);
-    assert.ok(!agent.tools?.includes("mcp__alfred__send_file"), `${name} lists send_file`);
+    assert.ok(!agent.tools?.includes("mcp__alfred__deliver"), `${name} lists deliver`);
     assert.ok(!agent.tools?.includes("Agent"), `${name} lists Agent`);
-    assert.ok(agent.disallowedTools?.includes("mcp__alfred__send_file"), `${name} does not disallow send_file`);
+    assert.ok(agent.disallowedTools?.includes("mcp__alfred__deliver"), `${name} does not disallow deliver`);
     assert.ok(agent.disallowedTools?.includes("Agent"), `${name} does not disallow Agent`);
     assert.equal(agent.prompt, role.focus, `${name}: the shared rules come from the SubagentStart hook`);
   }
@@ -155,8 +155,10 @@ test("the reply rules are for the app: HTML reports are sent as they are, a PDF 
   assert.match(section, /phone screen/);
   assert.match(section, /under about 1500 characters/);
   assert.match(section, /Markdown renders in the app, and an image shows when it is a file in the workspace/);
-  assert.match(section, /self-contained HTML file with its charts drawn as inline SVG, sent as it is with send_file/);
+  assert.match(section, /self-contained HTML file with its charts drawn as inline SVG, delivered as it is with the deliver tool/);
   assert.match(section, /inline scripts and SVG charts work, with no network access/);
+  assert.match(section, /A file you deliver becomes a document the owner can annotate in the app, and every version of it is kept/);
+  assert.match(section, /edit the same file and deliver it again under the same path; never write a copy under a new name/);
   assert.match(section, /PDF with render_pdf only when the user asks for one, or for a document meant to be kept or forwarded/);
   assert.match(section, /ambiguous/);
   assert.doesNotMatch(prompt, /never send (an )?HTML/i);
@@ -200,7 +202,7 @@ test("the task tools are offered to a run that can ask and has a task store, and
   const tasks = await taskStore();
   const ask = async () => ({ cancelled: true as const });
   const names = TASK_TOOL_NAMES.map((name) => name.replace("mcp__alfred__", ""));
-  const base = ["send_file", "move_file", "render_pdf", "generate_image"];
+  const base = ["deliver", "move_file", "render_pdf", "generate_image"];
 
   const chat = agentOptions({ out: appOutbound(), model: "sonnet", ask, tasks });
   assert.deepEqual(alfredTools(chat), [...base, ...names]);

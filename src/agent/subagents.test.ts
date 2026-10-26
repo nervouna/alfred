@@ -85,21 +85,21 @@ test("subagentGuard denies a subagent's memory write and lets the main thread ma
   assert.equal(await decide(preToolUse("Write", { file_path: "reports/a.md" }, { id: "agent-1", type: "writer" })), undefined);
 });
 
-test("checkSubagentTool refuses send_file and the task tools, and nothing else", () => {
-  assert.match(checkSubagentTool("mcp__alfred__send_file") ?? "", /only Alfred talks to the user/);
+test("checkSubagentTool refuses deliver and the task tools, and nothing else", () => {
+  assert.match(checkSubagentTool("mcp__alfred__deliver") ?? "", /only Alfred talks to the user/);
   for (const tool of TASK_TOOL_NAMES) assert.match(checkSubagentTool(tool) ?? "", /Subagents may not manage the owner's tasks: only Alfred does/, tool);
   for (const tool of ["Agent", "TaskStop", "Read", "Write", "Skill", "WebFetch", "mcp__alfred__render_pdf"]) assert.equal(checkSubagentTool(tool), undefined, tool);
 });
 
-test("subagentGuard denies send_file and skill writes to every subagent, built-in types and forked skills included", async () => {
+test("subagentGuard denies deliver and skill writes to every subagent, built-in types and forked skills included", async () => {
   for (const type of ["researcher", "general-purpose", "alfred:scout"]) {
-    const send = await decide(preToolUse("mcp__alfred__send_file", { path: "reports/a.pdf" }, { id: "agent-1", type }));
-    assert.equal(send && "permissionDecision" in send ? send.permissionDecision : undefined, "deny", `${type} send_file`);
+    const send = await decide(preToolUse("mcp__alfred__deliver", { path: "reports/a.pdf" }, { id: "agent-1", type }));
+    assert.equal(send && "permissionDecision" in send ? send.permissionDecision : undefined, "deny", `${type} deliver`);
     const skillWrite = await decide(preToolUse("Write", { file_path: "skills/x/SKILL.md", content: "x" }, { id: "agent-1", type }));
     assert.equal(skillWrite && "permissionDecision" in skillWrite ? skillWrite.permissionDecision : undefined, "deny", `${type} skills/`);
     assert.equal(await decide(preToolUse("TaskStop", { task_id: "t" }, { id: "agent-1", type })), undefined, `${type} TaskStop`);
   }
-  assert.equal(await decide(preToolUse("mcp__alfred__send_file", { path: "reports/a.pdf" })), undefined, "the main thread sends files");
+  assert.equal(await decide(preToolUse("mcp__alfred__deliver", { path: "reports/a.pdf" })), undefined, "the main thread sends files");
   assert.equal(await decide(preToolUse("Write", { file_path: "skills/x/SKILL.md", content: "x" })), undefined, "the main thread writes skills");
 });
 

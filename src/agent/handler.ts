@@ -48,6 +48,7 @@ import type { HookCallbackMatcher, Options, Query, SDKPartialAssistantMessage, S
 import type { Question, Task } from "../api/schema.ts";
 import { InvalidAnswer, SerialQueue, recordInbound, recorded, workspaceRelative } from "../channels.ts";
 import type { Inbound, Intake, Outbound } from "../channels.ts";
+import type { Documents } from "../documents/register.ts";
 import { type EventLog, sharedEventLog } from "../events.ts";
 import { firstLine, humanAge, localDate, localStamp } from "../files.ts";
 import { describeError, log } from "../log.ts";
@@ -234,6 +235,12 @@ export interface AgentHandlerOptions {
   tasks?: TaskStore;
   /** How often the tasks are asked which are due; 30 s by default. Tests drive it. */
   taskPollMs?: number;
+  /**
+   * The history of the workspace and the document store, shared with everything else that works on documents (see
+   * documents/startup.ts). With them a delivered file becomes a document, and every run's files are committed when it
+   * ends. Without them Alfred delivers files as before and commits nothing.
+   */
+  documents?: Documents;
 }
 
 /** What the handler offers: the intake queue and the stop for the channel, a run of a task, and a shutdown for the process. */
@@ -399,7 +406,7 @@ export function taskPrompt(task: Pick<Task, "id" | "title" | "brief">, scheduled
   const due = `${scheduledAt.toLocaleDateString("en-US", { weekday: "long" })} ${localStamp(scheduledAt)} (${zone})`;
   return [
     `[Alfred] This is a scheduled run of the task ${JSON.stringify(task.title)} (task id ${task.id}), due ${due}. The owner is not watching: ask no questions, make reasonable assumptions and state them in your report. You may read memory/, skills/ and the ALFRED.md rules files but not change them, and background subagents are not available.`,
-    `Write the report under reports/tasks/${task.id}/ (one file per run, named by its date), send it to the owner with send_file, and end with a short summary as your final reply. ${previous ? `The previous report is ${previous}.` : "There is no previous report."}`,
+    `Write the report under reports/tasks/${task.id}/ (one file per run, named by its date), deliver it to the owner with the deliver tool, and end with a short summary as your final reply. ${previous ? `The previous report is ${previous}.` : "There is no previous report."}`,
     `Task brief:\n${task.brief}`,
   ].join("\n\n");
 }
@@ -457,6 +464,8 @@ export function agentOptions(params: {
    * to it and to its subagents; and its background Agent calls are denied, whatever `admission` says.
    */
   task?: { budgetUsd: number };
+  /** The history of the workspace and the document store: with them the deliver and move_file tools work on documents. */
+  documents?: Documents;
 }): Options {
   const memory = capIndex(syncMemoryIndex(WORKSPACE_DIR));
   if (memory.lines.length < memory.total) {
@@ -489,7 +498,7 @@ export function agentOptions(params: {
     permissionMode: "dontAsk",
     // Not a way to grant anything: the CLI enables AskUserQuestion only when a canUseTool is set (see questions.ts).
     canUseTool: params.ask ? denyPermissionPrompts : undefined,
-    mcpServers: { alfred: createAlfredTools(params.out, params.abortController?.signal, params.run, taskTools) },
+    mcpServers: { alfred: createAlfredTools(params.out, params.abortController?.signal, params.run, taskTools, params.documents) },
     hooks: {
       PreToolUse: [
         workspaceGuard(WORKSPACE_DIR, params.task ? { readOnly: PROTECTED_PATHS } : {}),
@@ -615,6 +624,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
   /** The owner's messages, in the order they arrived. */
   const intakeQueue = new SerialQueue();
   const tasks = opts.tasks;
+  const documents = opts.documents;
   /** Runs of tasks waiting for their turn, in the order they came. */
   const taskQueue: QueuedTaskRun[] = [];
   /** The run of a task in progress. One runs at a time, whatever the chat is doing. */
@@ -628,6 +638,34 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
 
   /** What is said to the owner is recorded as events, with the run it belongs to if any, and the task if it is about one. */
   const outbound = (runId?: string, taskId?: string): Outbound => recorded(opts.out, events, { workspace: WORKSPACE_DIR, runId, taskId });
+
+  /**
+   * Commits what an ended run wrote and the paths it moved files away from, as `Run <id>: <title>`, and gives the
+   * documents among the files the commit changed a `changed` version, unless a delivery of the run recorded it
+   * already (the store skips a document already at the version). A run that wrote nothing, a run lost at a shutdown
+   * (the next start commits what it left) and a handler without documents commit nothing. It never throws: a failure is
+   * logged, and the run's replies and record are not touched by it.
+   */
+  async function commitRun(recorder: RunRecorder): Promise<void> {
+    if (!documents || recorder.record.status === "lost") return;
+    const paths = [...new Set([...recorder.record.files.map((f) => f.path), ...recorder.movedFrom])].filter((p) => p !== "");
+    if (paths.length === 0) return;
+    try {
+      const commit = await documents.versions.commit(`Run ${recorder.id}: ${recorder.record.title.replace(/\s+/g, " ").trim()}`, { paths });
+      if (!commit) return;
+      log.info(`committed ${commit.files.length} file(s) of run ${recorder.id} as ${commit.version.slice(0, 8)}`);
+      documents.store.recordVersion({ paths: commit.files, version: commit.version, at: new Date(commit.at), reason: "changed", runId: recorder.id });
+    } catch (err) {
+      log.warn(`committing the files of run ${recorder.id} failed: ${describeError(err)}`);
+    }
+  }
+
+  /** commitRun for a background subagent that ended, off the run's own path; a shutdown waits for it. */
+  function commitSubagent(recorder: RunRecorder): void {
+    const commit = commitRun(recorder);
+    inFlight.add(commit);
+    void commit.finally(() => inFlight.delete(commit));
+  }
 
   const spentToday = (user: AgentUserState): number => (user.spendDay === localDate() ? (user.spendDayUsd ?? 0) : 0);
   const overBudget = (userId: string): boolean => spentToday(store.get(userId)) >= DAILY_BUDGET_USD;
@@ -683,6 +721,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
         ask: scheduled ? undefined : (questions, signal) => askOwner(userId, run, questions, signal),
         tasks,
         task: scheduled && { budgetUsd: scheduled.budgetUsd },
+        documents,
       }),
     });
     run.query = q;
@@ -869,6 +908,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
       events,
       max: MAX_BACKGROUND_RUNS,
       overBudget: () => overBudget(userId),
+      onEnd: commitSubagent,
       release: (brief) => {
         run.releaseUuid = run.input.pushSystem(releaseMessage(brief));
         log.info(`run ${brief.recorder.id} handed back to the agent: a background slot is free`);
@@ -1027,6 +1067,8 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
       if (!run.shutdown) await notifyRuleChanges(run.out, rulesBefore);
       endTurn(run);
       rt.run = undefined;
+      // Last, so that no reply and no notice waits for it.
+      await commitRun(recorder);
     }
   }
 
@@ -1069,8 +1111,8 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
       out: {
         channel: out.channel,
         text: out.text,
-        async file(absPath, caption) {
-          const kind = await out.file(absPath, caption);
+        async file(absPath, caption, document) {
+          const kind = await out.file(absPath, caption, document);
           sent.push(workspaceRelative(WORKSPACE_DIR, absPath));
           return kind;
         },
@@ -1174,6 +1216,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
       }
       endTurn(run);
       taskRun = undefined;
+      await commitRun(recorder);
     }
   }
 

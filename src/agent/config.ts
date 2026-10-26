@@ -173,7 +173,7 @@ export function isSubagentRole(value: unknown): value is SubagentRoleName {
 }
 
 /** Tools the roles go without: only Alfred talks to the user, and a role does its part itself. */
-export const SUBAGENT_DISALLOWED_TOOLS = ["mcp__alfred__send_file", "Agent", "TaskStop"];
+export const SUBAGENT_DISALLOWED_TOOLS = ["mcp__alfred__deliver", "Agent", "TaskStop"];
 
 /** Rules every subagent gets when it starts, whatever its type (subagents.ts: subagentRulesHook). */
 export const SUBAGENT_RULES = `You are a subagent of Alfred, a personal research assistant. Alfred gave you a brief. Your final message goes back to Alfred, never to the user, so write it for Alfred: what you found or did, in the shape the brief asks for.
@@ -330,7 +330,7 @@ function workbenchSection(url: string): string {
   return `# Workbench
 The user can also follow your work in a read-only web workbench. Each task is a run with a short id, given at the top of the task's first message, and its card lists every file the run wrote, so you never need to send a file just so it can be found.
 ${where}
-- HTML reports open on the workbench in a sandbox where inline scripts, styles and SVG charts work, with no network access. A report with charts stays HTML: write it where the workspace rules put deliverables, send it with send_file, and render a PDF only when the user wants one to keep or forward.
+- HTML reports open on the workbench in a sandbox where inline scripts, styles and SVG charts work, with no network access. A report with charts stays HTML: write it where the workspace rules put deliverables, deliver it with the deliver tool, and render a PDF only when the user wants one to keep or forward.
 - When a message names a run id, its record (title, status and files) is attached to the message. Open the run's files when they matter for the request.`;
 }
 
@@ -392,9 +392,10 @@ Your working directory is the workspace, and nothing outside it is accessible. F
 
 # Replying in the app
 - Reply in Simplified Chinese unless the user writes in another language.
-- Write for a phone screen: lead with the answer, keep paragraphs short and lists compact. Markdown renders in the app, and an image shows when it is a file in the workspace: send it with send_file.
-- Keep chat replies under about 1500 characters. For anything longer, such as full reports, comparisons or collected material, write a Markdown file where the workspace rules put deliverables, deliver it with send_file, and reply with a short summary.
-- The app opens .md, .pdf, images, video, text files and .html reports. A report with charts or wide tables is one self-contained HTML file with its charts drawn as inline SVG, sent as it is with send_file: the app opens it in a sandbox where inline scripts and SVG charts work, with no network access.
+- Write for a phone screen: lead with the answer, keep paragraphs short and lists compact. Markdown renders in the app, and an image shows when it is a file in the workspace: deliver it with the deliver tool.
+- Keep chat replies under about 1500 characters. For anything longer, such as full reports, comparisons or collected material, write a Markdown file where the workspace rules put deliverables, deliver it with the deliver tool, and reply with a short summary.
+- The app opens .md, .pdf, images, video, text files and .html reports. A report with charts or wide tables is one self-contained HTML file with its charts drawn as inline SVG, delivered as it is with the deliver tool: the app opens it in a sandbox where inline scripts and SVG charts work, with no network access.
+- A file you deliver becomes a document the owner can annotate in the app, and every version of it is kept. To change a document you delivered, edit the same file and deliver it again under the same path; never write a copy under a new name.
 - Make a PDF with render_pdf only when the user asks for one, or for a document meant to be kept or forwarded. Rendering is sandboxed: only workspace images, stylesheets and fonts load, by relative path, e.g. ![](../images/<date>/cover.jpg) from reports/; network URLs, files outside the workspace, iframes and scripts do not.
 - If a request is ambiguous in a way that changes the result, ask one short question. Otherwise proceed and state your assumptions.`;
   const sections = [context.questions ? `${core}\n${ASK_LINE}` : core];

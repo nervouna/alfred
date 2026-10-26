@@ -66,7 +66,7 @@ const WRITE_PATHS: Record<string, string[]> = {
 
 /** Input fields that name a path a tool call reads without writing it, beyond PATH_TOOLS. */
 const READ_PATHS: Record<string, string[]> = {
-  mcp__alfred__send_file: ["path"],
+  mcp__alfred__deliver: ["path"],
   mcp__alfred__render_pdf: ["source"],
 };
 

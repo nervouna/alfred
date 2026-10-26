@@ -41,7 +41,7 @@ export interface RunFileChange {
 
 /** A send that failed, as an earlier version recorded it on the run. */
 export interface Undelivered {
-  /** A text reply, or a file sent with send_file. */
+  /** A text reply, or a file the deliver tool sent. */
   kind: "reply" | "file";
   path?: string;
   at: string;
@@ -190,7 +190,7 @@ export function stepDetail(tool: string, input: Record<string, unknown>, workspa
     case "Agent":
       detail = `${String(input.subagent_type ?? "?")}「${String(input.description ?? "")}」`;
       break;
-    case "mcp__alfred__send_file":
+    case "mcp__alfred__deliver":
       detail = rel(input.path);
       break;
     case "mcp__alfred__move_file":
@@ -224,6 +224,8 @@ export class RunRecorder {
   private timer?: NodeJS.Timeout;
   private lastWrite = 0;
   private finished = false;
+  /** Paths the run moved files away from. They leave `files`, but the run's commit must still record the removal. Not part of the run's record. */
+  private readonly movedAway = new Set<string>();
 
   constructor(init: {
     kind: RunKind;
@@ -273,6 +275,11 @@ export class RunRecorder {
     return this.file.files.length > 0;
   }
 
+  /** The paths (workspace-relative) the run moved files away from, kept beside `files`: both are what its end commits. */
+  get movedFrom(): readonly string[] {
+    return [...this.movedAway];
+  }
+
   /** A tool call of the run. Besides the timeline, it is published as a live run.step event (never stored in the log). */
   step(tool: string, detail: string, agent?: string): void {
     const step: RunStep = { at: new Date().toISOString(), tool: toolName(tool), detail, ...(agent ? { agent } : {}) };
@@ -292,9 +299,10 @@ export class RunRecorder {
     this.schedule();
   }
 
-  /** A file moved away: the old path leaves the list. */
+  /** A file moved away: the old path leaves the list, and is kept in `movedFrom`. */
   moved(fromRel: string, toRel: string): void {
     this.file.files = this.file.files.filter((f) => f.path !== fromRel);
+    this.movedAway.add(fromRel);
     this.wrote(toRel, "move_file");
   }
 

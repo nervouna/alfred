@@ -44,8 +44,14 @@
 //                its end, then a short question; ends with one pass or fail line per check: the first turn's
 //                usage writes the prompt cache for an hour, a compaction is reported and logged, the reply names
 //                the file's last line and the short question is answered; then the spend
+//   documents    the real handler on haiku with the workspace's history and the document store, as `run`
+//                opens them: a three-line Markdown note is delivered, then one line of it is changed and it is
+//                delivered again; ends with one pass or fail line per check: one document with two delivered
+//                versions, both commits name their runs, the second message's file carries the second version;
+//                then the spend
 //   prompt <text>  one message on the default model, then the spend per model
 
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -59,6 +65,8 @@ import { AGENT_CONFIG_DIR } from "../src/agent/config.ts";
 import { createAgentHandler } from "../src/agent/handler.ts";
 import { request, streamEvents } from "../src/api/client.ts";
 import { startApi } from "../src/api/server.ts";
+import { startDocuments } from "../src/documents/startup.ts";
+import { VERSIONS_GIT_DIR } from "../src/documents/versions.ts";
 import { sharedEventLog } from "../src/events.ts";
 import { listRunFiles } from "../src/runs.ts";
 import { WORKSPACE_DIR } from "../src/store.ts";
@@ -941,6 +949,89 @@ async function compact(): Promise<number> {
   return failed;
 }
 
+/** The documents scenario: a note is delivered, changed and delivered again, on the real handler with the history and the document store. Returns the number of checks that failed. */
+async function documents(): Promise<number> {
+  let failed = 0;
+  const check = (name: string, problems: string[]) => {
+    if (problems.length) failed++;
+    console.log(`[${problems.length ? "fail" : "pass"}] ${name}${problems.length ? `: ${problems.join("; ")}` : ""}`);
+  };
+  // Opened as `run` opens them: the history of the workspace, and the document store.
+  const opened = await startDocuments();
+  if (!opened) {
+    check("the history and the document store open", ["startDocuments failed (see the log above)"]);
+    return failed;
+  }
+  const NOTE = "notes/smoke-note.md";
+  const git = (...args: string[]) => execFileSync("git", [`--git-dir=${VERSIONS_GIT_DIR}`, ...args], { encoding: "utf8" }).trim();
+  const stack = await startStack(createLocalHandler({ documents: opened }));
+  try {
+    await stack.send("/model haiku");
+    await sleep(1500);
+    await stack.send(
+      `写一份三行的 Markdown 小记，保存到 ${NOTE}：第一行是一级标题“海边小记”，后两行各写一句话。写好后用 deliver 工具发给我，发完只回复“发了”。`,
+    );
+    await idle();
+    const first = opened.store.byPath(NOTE);
+    console.log(`[doc] ${at()} after the first message: ${first ? `${first.id} version ${first.version.slice(0, 8)}` : "no document"}`);
+    await stack.send(`把 ${NOTE} 的第三行改成另一句话，直接改这个文件，不要另存新文件，改好后再用 deliver 工具发给我，发完只回复“改好了”。`);
+    await idle();
+  } finally {
+    await stack.stop();
+  }
+
+  const documentsNow = opened.store.list();
+  const document = documentsNow.find((d) => d.path === NOTE);
+  const versions = document ? (opened.store.versions(document.id) ?? []) : [];
+  check("one document, the note, is registered", documentsNow.length === 1 && document ? [] : [`${documentsNow.length} document(s): ${documentsNow.map((d) => d.path).join(", ") || "-"}`]);
+  check(
+    "the document has two versions, both delivered",
+    versions.length === 2 && versions.every((v) => v.reason === "delivered") ? [] : [`versions: ${versions.map((v) => v.reason).join(", ") || "-"}`],
+  );
+  const [second, first] = versions;
+  if (document) console.log(`[doc] ${document.id} "${document.title}" ${document.kind} at ${document.version.slice(0, 8)}`);
+
+  const subject = (version: string) => {
+    try {
+      return git("log", "-1", "--format=%s", version);
+    } catch {
+      return "-";
+    }
+  };
+  check(
+    "both commits name their runs",
+    [first, second].flatMap((v, i) => {
+      const want = `Deliver ${NOTE} (run ${v?.runId ?? "?"})`;
+      return v?.runId && subject(v.version) === want ? [] : [`version ${i + 1}: commit says "${v ? subject(v.version) : "-"}", wanted "${want}"`];
+    }),
+  );
+  check(
+    "the two versions are different runs' commits with different content",
+    first && second && first.runId !== second.runId && first.version !== second.version && git("show", `${first.version}:${NOTE}`) !== git("show", `${second.version}:${NOTE}`)
+      ? []
+      : ["the same run, the same commit or the same content"],
+  );
+
+  const delivered = sharedEventLog()
+    .readSince(0, 100_000)
+    .flatMap((e) => (e.type === "message.created" && e.data.direction === "out" ? e.data.files.filter((f) => f.path === NOTE).map((f) => ({ file: f, runId: e.data.runId })) : []));
+  console.log(`[files] ${delivered.map((d) => `${d.file.documentId ?? "-"}@${d.file.version?.slice(0, 8) ?? "-"} run=${d.runId ?? "-"}`).join(", ") || "-"}`);
+  const last = delivered.at(-1);
+  const problems: string[] = [];
+  if (delivered.length < 2) problems.push(`${delivered.length} message(s) carried the note`);
+  if (!second || last?.file.version !== second.version) problems.push(`the last message names ${last?.file.version?.slice(0, 8) ?? "no version"}, the second version is ${second?.version.slice(0, 8) ?? "-"}`);
+  if (!document || last?.file.documentId !== document.id) problems.push(`the last message names document ${last?.file.documentId ?? "-"}`);
+  if (last && second && last.runId !== second.runId) problems.push(`the last message is of run ${last.runId ?? "-"}, the second version of run ${second.runId ?? "-"}`);
+  check("the second message's file carries the second version of the document", problems);
+
+  console.log("\n[commits]");
+  console.log(git("log", "--format=  %h %s"));
+  summary();
+  const runs = listRunFiles().filter((f) => f.kind === "task");
+  console.log(`[spend] $${runs.reduce((sum, f) => sum + f.costUsd, 0).toFixed(4)} across ${runs.length} run(s)`);
+  return failed;
+}
+
 let failedRules = 0;
 if (scenario === "background") {
   const stack = await startStack();
@@ -1016,8 +1107,10 @@ if (scenario === "background") {
   failedRules = await chatTasks();
 } else if (scenario === "compact") {
   failedRules = await compact();
+} else if (scenario === "documents") {
+  failedRules = await documents();
 } else {
-  console.error("usage: node scripts/handler-smoke.ts background|restart|stop|nested|api|stream|attach|ask|scheduled|tasks|compact|prompt <text>");
+  console.error("usage: node scripts/handler-smoke.ts background|restart|stop|nested|api|stream|attach|ask|scheduled|tasks|compact|documents|prompt <text>");
   process.exit(2);
 }
 process.exit(failedRules ? 1 : 0);
