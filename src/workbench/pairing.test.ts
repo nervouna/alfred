@@ -22,7 +22,7 @@ test("the pairing built from the settings and a device validates as a Pairing", 
   });
 });
 
-test("a trailing slash on the URL is dropped, as for the links in WeChat replies", () => {
+test("a trailing slash on the URL is dropped, as for the links in replies", () => {
   assert.equal(pairingSettings({ ...ENV, ALFRED_WORKBENCH_URL: " https://alfred.example.com/ " }).server, "https://alfred.example.com");
 });
 

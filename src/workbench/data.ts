@@ -13,8 +13,6 @@ import { readJson } from "../store.ts";
 
 /** A heartbeat older than this means Alfred is down. */
 export const HEARTBEAT_STALE_MS = 90_000;
-/** WeChat stops delivering pushes about this long after the owner's last message (#24). */
-export const PUSH_WINDOW_MS = 24 * 3_600_000;
 
 /**
  * Runs newest first. A finished run's record is its line in runs.jsonl; only
@@ -57,9 +55,6 @@ export function alfredStatus(now = Date.now()): AlfredStatus {
     pid: Number(beat.pid),
     startedAt: String(beat.startedAt),
     updatedAt: String(beat.updatedAt),
-    lastPollAt: beat.lastPollAt,
-    lastPollOk: beat.lastPollOk,
-    ownerLastInboundAt: beat.ownerLastInboundAt,
     memory: {
       rssBytes: Number(beat.memory?.rssBytes ?? 0),
       cgroupBytes: beat.memory?.cgroupBytes,

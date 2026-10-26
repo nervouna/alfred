@@ -306,7 +306,7 @@ const EXTRACTION_JSON_SCHEMA = {
   additionalProperties: false,
 };
 
-const EXTRACTION_SYSTEM_PROMPT = `You maintain the long-term memory of Alfred, a personal research assistant that works for one person over WeChat. You read conversation excerpts that are new since the last scan and decide what is worth remembering in future sessions.
+const EXTRACTION_SYSTEM_PROMPT = `You maintain the long-term memory of Alfred, a personal research assistant that works for one person through a chat app. You read conversation excerpts that are new since the last scan and decide what is worth remembering in future sessions.
 
 Keep:
 - user: facts about the user (role, background, circumstances)

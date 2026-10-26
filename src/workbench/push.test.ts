@@ -70,13 +70,16 @@ function storeWithPhone(): Store {
   return store;
 }
 
-test("the push rule: an app reply always pushes; a WeChat reply pushes only when WeChat refused it", () => {
+test("the push rule: an outbound app message pushes, and nothing else about messages does", () => {
   assert.ok(notificationFor(messageEvent(1, { channel: "app" })));
   assert.equal(notificationFor(messageEvent(2, { channel: "app", direction: "in" })), undefined, "an inbound message");
-  assert.equal(notificationFor(messageEvent(3, { channel: "wechat" })), undefined, "WeChat delivered it");
-  assert.ok(notificationFor(messageEvent(4, { channel: "wechat", error: "ret=-2" })), "WeChat refused it");
-  assert.equal(notificationFor(messageEvent(5, { channel: "wechat", direction: "in", error: "x" })), undefined);
   assert.equal(notificationFor(runEvent(6)), undefined, "a run update");
+});
+
+test("a message of the retired channel, in the log from before, never pushes, whether it was delivered or failed", () => {
+  assert.equal(notificationFor(messageEvent(3, { channel: "wechat" })), undefined, "delivered");
+  assert.equal(notificationFor(messageEvent(4, { channel: "wechat", error: "ret=-2" })), undefined, "failed");
+  assert.equal(notificationFor(messageEvent(5, { channel: "wechat", direction: "in", error: "x" })), undefined, "inbound");
 });
 
 /** A question.asked event; the defaults are one question for run abcdef. */
@@ -129,14 +132,12 @@ test("a notification says Alfred, plays the default sound in the chat thread, an
   });
 });
 
-test("the body is the text cut to 100 characters with an ellipsis; a file-only message shows its first file; a WeChat failure says so", () => {
+test("the body is the text cut to 100 characters with an ellipsis; a file-only message shows its first file", () => {
   const bodyOf = (event: Event) => notificationFor(event)?.aps.alert.body;
   assert.equal(bodyOf(messageEvent(1, { text: "a".repeat(100) })), "a".repeat(100), "exactly 100 is not cut");
   assert.equal(bodyOf(messageEvent(2, { text: "a".repeat(101) })), `${"a".repeat(100)}…`);
   assert.equal(bodyOf(messageEvent(3, { text: "好".repeat(150) })), `${"好".repeat(100)}…`, "counted in characters, not bytes");
   assert.equal(bodyOf(messageEvent(4, { text: "", files: [{ path: "reports/报告.pdf" }, { path: "notes/a.md" }] })), "文件：报告.pdf");
-  assert.equal(bodyOf(messageEvent(5, { channel: "wechat", error: "ret=-2", text: "你好" })), "微信未送达：你好");
-  assert.equal(bodyOf(messageEvent(6, { channel: "wechat", error: "ret=-2", text: "", files: [{ path: "images/a.png" }] })), "微信未送达：文件：a.png");
 });
 
 test("a notification goes to every unrevoked device with a registration, and to no other", async () => {

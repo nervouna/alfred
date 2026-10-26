@@ -1,15 +1,15 @@
-// Runs one prompt through the production agent options without WeChat.
+// Runs one prompt through the production agent options, without the app.
 // usage: node scripts/agent-smoke.ts [--model sonnet|opus|haiku] [--resume <session>]
 //          [--steer-after <seconds> <follow-up>] [--stop-after <seconds>] [--no-subagents] [--skills] <prompt>
 // The prompt goes through the same streaming input as in production; --steer-after
-// pushes a follow-up into it mid-run, the way a WeChat message sent during a task does.
+// pushes a follow-up into it mid-run, the way a message sent during a task does.
 // --stop-after aborts the run the way /stop does. --no-subagents drops the Agent tool
 // and the roles, for comparing a run against one that delegates. --skills prints the
 // skills the session lists, from getContextUsage(). Lines from inside a subagent are
 // marked with its Agent call's id. The first request's input tokens are printed, to
 // compare the prompt prefix across changes.
 // The alfred tools are wired to a stub, so send_file fails instead of messaging anyone.
-// Like the bot, it seeds the workspace, records the run for the workbench under
+// Like Alfred, it seeds the workspace, records the run for the workbench under
 // $ALFRED_STATE_DIR/workbench, and prints the ALFRED.md change notice after the run.
 
 import { execFileSync } from "node:child_process";
@@ -56,8 +56,8 @@ for (let i = 0; i < args.length; i++) {
 const prompt = words.join(" ");
 if (!prompt) throw new Error(USAGE);
 
-const unavailable = () => Promise.reject(new Error("WeChat is not available in the smoke test"));
-const out: Outbound = { channel: "wechat", text: unavailable, file: unavailable, typing: unavailable };
+const unavailable = () => Promise.reject(new Error("the app is not available in the smoke test"));
+const out: Outbound = { channel: "app", text: unavailable, file: unavailable };
 
 prepareWorkspace();
 const rulesBefore = snapshotRules(WORKSPACE_DIR);

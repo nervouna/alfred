@@ -1,12 +1,7 @@
-import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
 import { isRulesFileName } from "./agent/rules.ts";
-import { downloadInboundMedia, imageExtension } from "./ilink/inbound.ts";
-import type { InboundMedia } from "./ilink/inbound.ts";
-import { log } from "./log.ts";
-import { WORKSPACE_DIR } from "./store.ts";
 
 function pad(n: number): string {
   return String(n).padStart(2, "0");
@@ -52,40 +47,4 @@ export function humanAge(ms: number): string {
   if (s < 120) return `${s}s`;
   if (s < 7200) return `${Math.round(s / 60)}min`;
   return `${(s / 3600).toFixed(1)}h`;
-}
-
-export interface SavedMedia {
-  filePath: string;
-  /** Path relative to the workspace, as shown to the user and the agent. */
-  relPath: string;
-  size: number;
-  /** Undefined when the server declared no md5. */
-  md5Ok?: boolean;
-}
-
-/** Download an inbound media item into workspace/inbox/<date>/. */
-export async function saveInboundMedia(m: InboundMedia, cdnBaseUrl: string): Promise<SavedMedia> {
-  const data = await downloadInboundMedia(m, cdnBaseUrl);
-  const time = localTime();
-  const fileName =
-    m.kind === "file"
-      ? sanitizeFileName(m.fileName, `file-${time}.bin`)
-      : m.kind === "image"
-        ? `image-${time}${imageExtension(data)}`
-        : m.kind === "video"
-          ? `video-${time}.mp4`
-          : `voice-${time}.silk`;
-  const dir = path.join(WORKSPACE_DIR, "inbox", localDate());
-  fs.mkdirSync(dir, { recursive: true });
-  const filePath = uniquePath(dir, fileName);
-  fs.writeFileSync(filePath, data);
-  log.info(`saved ${m.kind} ${filePath} (${data.length} bytes)`);
-
-  const md5 = crypto.createHash("md5").update(data).digest("hex");
-  return {
-    filePath,
-    relPath: path.relative(WORKSPACE_DIR, filePath),
-    size: data.length,
-    md5Ok: m.declaredMd5 ? m.declaredMd5.toLowerCase() === md5 : undefined,
-  };
 }

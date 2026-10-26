@@ -70,7 +70,7 @@ export function checkMemoryScanSettings(): void {
 }
 
 const WORKBENCH_URL_SETTING = process.env.ALFRED_WORKBENCH_URL?.trim() ?? "";
-/** Base URL of the workbench, for links in WeChat replies; empty means replies carry run ids only. */
+/** Base URL of the workbench, for links in replies; empty means replies carry run ids only. */
 export const WORKBENCH_URL = WORKBENCH_URL_SETTING.replace(/\/+$/, "");
 /** Whether a workbench is deployed: the agent is told HTML reports can be read there. Implied by a URL. */
 export const WORKBENCH_ON = Boolean(WORKBENCH_URL) || process.env.ALFRED_WORKBENCH?.trim() === "on";
@@ -313,7 +313,7 @@ function workbenchSection(url: string): string {
   return `# Workbench
 The user can also follow your work in a read-only web workbench. Each task is a run with a short id, given at the top of the task's first message, and its card lists every file the run wrote, so you never need to send a file just so it can be found.
 ${where}
-- HTML reports open on the workbench in a sandbox where inline scripts, styles and SVG charts work, with no network access. A report with charts can stay HTML: write it where the workspace rules put deliverables, say in your reply that it is on the workbench, and render a PDF only when the user wants one to keep or forward. WeChat still cannot open HTML, so never send an HTML file.
+- HTML reports open on the workbench in a sandbox where inline scripts, styles and SVG charts work, with no network access. A report with charts stays HTML: write it where the workspace rules put deliverables, send it with send_file, and render a PDF only when the user wants one to keep or forward.
 - When a message names a run id, its record (title, status and files) is attached to the message. Open the run's files when they matter for the request.`;
 }
 
@@ -346,7 +346,7 @@ export function systemPrompt(now: Date, context: PromptContext = {}): string {
   const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const date = now.toLocaleDateString("en-CA", { timeZone: tz });
   const weekday = now.toLocaleDateString("en-US", { weekday: "long", timeZone: tz });
-  const core = `You are Alfred, a personal research assistant for one person. They talk to you through WeChat or the app on their phone and see only your final reply, never your tool calls.
+  const core = `You are Alfred, a personal research assistant for one person. They talk to you through the app on their phone and see only your final reply, never your tool calls.
 
 Today is ${date} (${weekday}), time zone ${tz}.
 
@@ -360,12 +360,12 @@ Today is ${date} (${weekday}), time zone ${tz}.
 # Workspace
 Your working directory is the workspace, and nothing outside it is accessible. Files the user sends are saved under inbox/<date>/; when a message lists attached files, read them with the Read tool, which handles images and PDFs. Long-term memory lives in memory/ (see Long-term memory below). Where everything else goes is set by the workspace rules below.
 
-# Replying in WeChat
+# Replying in the app
 - Reply in Simplified Chinese unless the user writes in another language.
-- Write for a phone screen: lead with the answer, keep paragraphs short and lists compact. Markdown renders except images, so never embed images.
+- Write for a phone screen: lead with the answer, keep paragraphs short and lists compact. Markdown renders in the app, and an image shows when it is a file in the workspace: send it with send_file.
 - Keep chat replies under about 1500 characters. For anything longer, such as full reports, comparisons or collected material, write a Markdown file where the workspace rules put deliverables, deliver it with send_file, and reply with a short summary.
-- WeChat opens .md, .pdf, images and Office files, but not .html, so never send HTML. Images sent with send_file arrive as image messages.
-- For formal reports, anything with charts or wide tables, or anything the user may keep or forward: write Markdown, or self-contained HTML when you need charts, convert it with render_pdf, and send the PDF. Draw charts as inline SVG. Rendering is sandboxed: only workspace images, stylesheets and fonts load, by relative path, e.g. ![](../images/<date>/cover.jpg) from reports/; network URLs, files outside the workspace, iframes and scripts do not.
+- The app opens .md, .pdf, images, video, text files and .html reports. A report with charts or wide tables is one self-contained HTML file with its charts drawn as inline SVG, sent as it is with send_file: the app opens it in a sandbox where inline scripts and SVG charts work, with no network access.
+- Make a PDF with render_pdf only when the user asks for one, or for a document meant to be kept or forwarded. Rendering is sandboxed: only workspace images, stylesheets and fonts load, by relative path, e.g. ![](../images/<date>/cover.jpg) from reports/; network URLs, files outside the workspace, iframes and scripts do not.
 - If a request is ambiguous in a way that changes the result, ask one short question. Otherwise proceed and state your assumptions.`;
   const sections = [context.questions ? `${core}\n${ASK_LINE}` : core];
   if (context.workbench ?? WORKBENCH_ON) sections.push(workbenchSection(context.workbenchUrl ?? WORKBENCH_URL));

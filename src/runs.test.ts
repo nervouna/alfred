@@ -10,8 +10,21 @@ process.env.ALFRED_STATE_DIR = path.join(tmp, "state");
 after(() => fs.rmSync(tmp, { recursive: true, force: true }));
 
 const { EVENTS_LOG, EventLog } = await import("./events.ts");
-const { RUNS_LOG, RUN_FILES_DIR, RunRecorder, findRun, markLostRuns, newRunId, pruneRunFiles, readRunFile, readRunLog, runIdCandidates, stepDetail } =
-  await import("./runs.ts");
+const {
+  RUNS_LOG,
+  RUN_FILES_DIR,
+  RunRecorder,
+  STATUS_FILE,
+  findRun,
+  markLostRuns,
+  newRunId,
+  pruneRunFiles,
+  readRunFile,
+  readRunLog,
+  runIdCandidates,
+  startHeartbeat,
+  stepDetail,
+} = await import("./runs.ts");
 
 /** The run.updated events in a log, oldest first, as run id and status. */
 function runUpdates(log: InstanceType<typeof EventLog>): { id: string; status: string }[] {
@@ -50,7 +63,6 @@ test("a recorded run keeps its steps and files in its run file, then lands in ru
   run.wrote("reports/a.md", "Edit");
   run.wrote("notes/tmp.md", "Write");
   run.moved("notes/tmp.md", "notes/final.md");
-  run.undelivered({ kind: "reply", error: "sendMessage failed: ret=-2" });
   run.update({ costUsd: 0.25, modelCostUsd: { "claude-sonnet-5-5": 0.25 } });
   run.finish("done");
 
@@ -63,7 +75,7 @@ test("a recorded run keeps its steps and files in its run file, then lands in ru
     { path: "reports/a.md", tool: "Edit" },
     { path: "notes/final.md", tool: "move_file" },
   ]);
-  assert.equal(file?.undelivered?.[0]?.kind, "reply");
+  assert.equal(file?.undelivered, undefined, "nothing records failed sends any more");
 
   const logged = readRunLog().find((r) => r.id === run.id);
   assert.equal(logged?.costUsd, 0.25);
@@ -128,7 +140,6 @@ test("steps, file writes and cost updates append no events", () => {
   run.step("WebSearch", "vps pricing");
   run.wrote("reports/a.md", "Write");
   run.moved("reports/a.md", "reports/b.md");
-  run.undelivered({ kind: "reply", error: "sendMessage failed: ret=-2" });
   run.update({ costUsd: 0.25 });
   assert.equal(runUpdates(events).filter((u) => u.id === run.id).length, 1, "the construction event only");
   run.finish("done");
@@ -180,4 +191,44 @@ test("a recorder without an events option writes to the shared log in the state 
   const run = new RunRecorder({ kind: "task", title: "默认日志" });
   run.finish("done");
   assert.ok(runUpdates(new EventLog(EVENTS_LOG)).some((u) => u.id === run.id && u.status === "done"));
+});
+
+test("a record written by an earlier version, with failed sends on it, still loads from the log and from its run file", () => {
+  const old = {
+    id: "w8h5ne",
+    kind: "task",
+    title: "旧的报告",
+    status: "done",
+    startedAt: "2026-10-20T01:00:00.000Z",
+    endedAt: "2026-10-20T01:05:00.000Z",
+    costUsd: 0.1,
+    toolCalls: 2,
+    files: [{ path: "reports/old.md", tool: "Write" }],
+    undelivered: [{ kind: "file", path: "reports/old.pdf", at: "2026-10-20T01:05:00.000Z", error: "sendMessage failed: ret=-2" }],
+  };
+  fs.mkdirSync(path.dirname(RUNS_LOG), { recursive: true });
+  fs.appendFileSync(RUNS_LOG, `${JSON.stringify(old)}\n`);
+  fs.mkdirSync(RUN_FILES_DIR, { recursive: true });
+  fs.writeFileSync(path.join(RUN_FILES_DIR, "w8h5ne.json"), JSON.stringify({ ...old, updatedAt: old.endedAt, steps: [] }));
+
+  assert.deepEqual(readRunLog().find((r) => r.id === "w8h5ne"), old);
+  assert.deepEqual(readRunFile("w8h5ne")?.undelivered, old.undelivered);
+  assert.equal(findRun("w8h5ne")?.title, "旧的报告");
+  assert.equal(pruneRunFiles(Date.parse("2026-10-21T00:00:00Z")), 0, "it is kept for the retention period like any other run");
+});
+
+test("the heartbeat is written at once and again on a clean stop, which marks Alfred as down", () => {
+  const stop = startHeartbeat(new Date("2026-10-26T01:00:00.000Z"));
+  const beat = JSON.parse(fs.readFileSync(STATUS_FILE, "utf8")) as Record<string, unknown>;
+  assert.equal(beat.pid, process.pid);
+  assert.equal(beat.startedAt, "2026-10-26T01:00:00.000Z");
+  assert.ok(typeof beat.updatedAt === "string" && Date.now() - Date.parse(beat.updatedAt) < 5000);
+  assert.equal(beat.stoppedAt, undefined);
+  assert.ok(typeof (beat.memory as { rssBytes: number }).rssBytes === "number");
+  assert.ok(!("lastPollAt" in beat) && !("ownerLastInboundAt" in beat), "nothing polls, and no channel keeps a push window");
+
+  stop();
+  const stopped = JSON.parse(fs.readFileSync(STATUS_FILE, "utf8")) as Record<string, unknown>;
+  assert.ok(typeof stopped.stoppedAt === "string");
+  assert.equal(stopped.startedAt, beat.startedAt);
 });

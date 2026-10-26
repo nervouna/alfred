@@ -56,9 +56,6 @@ function fakeOutbound() {
       sent.push(absPath);
       return "file";
     },
-    async typing() {
-      return async () => {};
-    },
   };
   return { out, sent };
 }
@@ -102,6 +99,43 @@ test("send_file sends a file for a call that is not stopped, and refuses one who
   const delivered = await send({ path: "notes/send-me.md" }, callWith(new AbortController().signal));
   assert.notEqual(delivered.isError, true, textOf(delivered));
   assert.equal(sent.length, 1);
+});
+
+test("send_file sends an HTML report as it is", async () => {
+  write("reports/chart.html", "<!doctype html><title>t</title><svg></svg>");
+  write("reports/old.htm", "<p>x</p>");
+  const { out, sent } = fakeOutbound();
+  const send = tool("send_file", out);
+
+  for (const file of ["reports/chart.html", "reports/old.htm"]) {
+    const result = await send({ path: file }, callWith(new AbortController().signal));
+    assert.notEqual(result.isError, true, textOf(result));
+  }
+  assert.deepEqual(sent.map((p) => path.relative(workspace, p)), ["reports/chart.html", "reports/old.htm"]);
+});
+
+test("send_file says what the app opens, HTML reports included", () => {
+  const def = alfredToolDefinitions(fakeOutbound().out).find((d) => d.name === "send_file");
+  assert.ok(def);
+  assert.match(def.description, /in the app/);
+  assert.match(def.description, /Markdown, PDF, images, video, text files and HTML reports/);
+  assert.match(def.description, /inline scripts and SVG charts work, with no network access/);
+  assert.doesNotMatch(def.description, /cannot open/i);
+});
+
+test("send_file reports a send the channel refused, and the file stays", async () => {
+  write("notes/refused.md", "# x\n");
+  const out: Outbound = {
+    channel: "app",
+    async text() {},
+    async file() {
+      throw new Error("disk full");
+    },
+  };
+  const result = await tool("send_file", out)({ path: "notes/refused.md" }, callWith(new AbortController().signal));
+  assert.equal(result.isError, true);
+  assert.match(textOf(result), /Sending failed: disk full\. The file stays in the workspace\./);
+  assert.equal(exists("notes/refused.md"), true);
 });
 
 test("send_file also refuses when only the run's signal is aborted", async () => {

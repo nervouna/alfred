@@ -220,7 +220,7 @@ export async function startApi(opts: ApiOptions): Promise<() => Promise<void>> {
 
     const { command } = parsed;
     if (command.type === "run.stop") {
-      if (await handler.stopRun(command.runId, "app")) return sendJson(res, 202, { stopped: true });
+      if (await handler.stopRun(command.runId)) return sendJson(res, 202, { stopped: true });
       return sendJson(res, 404, { error: `no live or queued run ${command.runId}` });
     }
     if (command.type === "question.answer") {
@@ -240,7 +240,7 @@ export async function startApi(opts: ApiOptions): Promise<() => Promise<void>> {
     // Remembered before the handler is awaited, so a second post of the same id meanwhile is a duplicate.
     remember(command.clientId);
     try {
-      await handler.submit({ channel: "app", text: command.text, clientId: command.clientId, files });
+      await handler.submit({ text: command.text, clientId: command.clientId, files });
     } catch (err) {
       accepted.delete(command.clientId);
       throw err;
@@ -421,7 +421,7 @@ export async function startApi(opts: ApiOptions): Promise<() => Promise<void>> {
   } finally {
     process.umask(umask);
   }
-  // After startup a server error is logged, not thrown: it must not take the bot down.
+  // After startup a server error is logged, not thrown: it must not take Alfred down.
   server.on("error", (err) => log.error(`api server error: ${describeError(err)}`));
   log.info(`api listening on ${socket}`);
 

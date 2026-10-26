@@ -138,11 +138,27 @@ test("a run that cannot ask, such as the smoke test's, does not offer AskUserQue
   assert.doesNotMatch(String(options.systemPrompt), /AskUserQuestion/);
 });
 
-test("the system prompt says the owner talks through WeChat or the app, and when to ask: a choice that blocks progress", () => {
+test("the system prompt says the owner talks through the app, and when to ask: a choice that blocks progress", () => {
   prepareWorkspace();
   const prompt = String(agentOptions({ out: appOutbound(), model: "sonnet", ask: async () => ({ cancelled: true as const }) }).systemPrompt);
-  assert.match(prompt, /through WeChat or the app/);
-  assert.doesNotMatch(prompt, /talk to you through WeChat on their phone/);
+  assert.match(prompt, /talk to you through the app on their phone/);
   assert.match(prompt, /AskUserQuestion/);
   assert.match(prompt, /never for things you can decide/);
+});
+
+test("the reply rules are for the app: HTML reports are sent as they are, a PDF only on request or to keep", () => {
+  prepareWorkspace();
+  const prompt = String(agentOptions({ out: appOutbound(), model: "sonnet" }).systemPrompt);
+  const section = /# Replying in the app\n([\s\S]*?)\n\n/.exec(prompt)?.[1] ?? "";
+  assert.ok(section, "the section is there");
+  assert.match(section, /Simplified Chinese/);
+  assert.match(section, /phone screen/);
+  assert.match(section, /under about 1500 characters/);
+  assert.match(section, /Markdown renders in the app, and an image shows when it is a file in the workspace/);
+  assert.match(section, /self-contained HTML file with its charts drawn as inline SVG, sent as it is with send_file/);
+  assert.match(section, /inline scripts and SVG charts work, with no network access/);
+  assert.match(section, /PDF with render_pdf only when the user asks for one, or for a document meant to be kept or forwarded/);
+  assert.match(section, /ambiguous/);
+  assert.doesNotMatch(prompt, /never send (an )?HTML/i);
+  assert.deepEqual(prompt.match(/^# Replying in .*$/gm), ["# Replying in the app"], "one reply section, and it is the app's");
 });

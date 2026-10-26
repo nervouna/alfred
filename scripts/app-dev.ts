@@ -1,4 +1,4 @@
-// A local Alfred for the app in the simulator: the real agent handler without WeChat, behind the
+// A local Alfred for the app in the simulator: the real agent handler on the app channel, behind the
 // command API on <ALFRED_STATE_DIR>/api/alfred.sock, and the workbench on 127.0.0.1 with one paired
 // device. It prints the pairing to paste into the app, then every event as it happens: [event] for
 // stored ones, [live] for message deltas and steps. Ctrl-C or SIGTERM stops everything; it exits 0.
@@ -25,7 +25,7 @@ import { STATE_DIR, WORKSPACE_DIR } from "../src/store.ts";
 import { DeviceStore } from "../src/workbench/devices.ts";
 import { buildPairing } from "../src/workbench/pairing.ts";
 import { startWorkbench } from "../src/workbench/server.ts";
-import { createLocalHandler, fakeWeChat } from "./local-stack.ts";
+import { createLocalHandler } from "./local-stack.ts";
 
 const REQUIRED = ["ALFRED_STATE_DIR", "ALFRED_WORKSPACE", "ALFRED_ANTHROPIC_API_KEY"];
 const USAGE = "usage: node scripts/app-dev.ts [--port <port>] [--model <sonnet|opus|haiku>] [--repair]";
@@ -113,8 +113,7 @@ async function main(options: Options): Promise<void> {
   // Each cleanup undoes one setup step; they run in reverse, so the workbench goes first and the handler last.
   const cleanups: (() => Promise<void> | void)[] = [];
   try {
-    const wechat = fakeWeChat((text, refused) => console.log(`[wechat${refused ? " ✗" : ""}] ${text.replace(/\n/g, " ⏎ ")}`));
-    const handler = createLocalHandler(wechat.channel);
+    const handler = createLocalHandler();
     cleanups.push(() => handler.shutdown());
     cleanups.push(await startApi({ socket, handler, events: sharedEventLog() }));
     cleanups.push(
@@ -126,7 +125,7 @@ async function main(options: Options): Promise<void> {
     const devices = new DeviceStore(path.join(STATE_DIR, "app"));
     cleanups.push(await startWorkbench({ workspace: WORKSPACE_DIR, tcp: { host: "127.0.0.1", port: options.port }, devices }));
 
-    await handler.submit({ channel: "app", text: `/model ${options.model}`, files: [], clientId: "app-dev-model" });
+    await handler.submit({ text: `/model ${options.model}`, files: [], clientId: "app-dev-model" });
     pairSimulator(devices, server, options.repair);
     log.info(`app-dev is up at ${server} with the command API on ${socket}; Ctrl-C stops it`);
     await stop;

@@ -4,7 +4,7 @@ import { test } from "node:test";
 import type { HookInput } from "@anthropic-ai/claude-agent-sdk";
 
 import type { Question } from "../api/schema.ts";
-import { QUESTION_STOPPED, QUESTION_TOOL, SUBAGENT_QUESTION_DENIAL, answersFromReply, parseQuestionInput, questionHook, questionText } from "./questions.ts";
+import { QUESTION_STOPPED, QUESTION_TOOL, SUBAGENT_QUESTION_DENIAL, answersFromReply, parseQuestionInput, questionHook } from "./questions.ts";
 import type { QuestionOutcome } from "./questions.ts";
 
 const FORMAT: Question = {
@@ -27,62 +27,14 @@ const VENDORS: Question = {
   multiSelect: true,
 };
 
-test("one question is its header and text, a numbered line per option, and how to answer", () => {
-  assert.equal(
-    questionText([FORMAT]),
-    ["【报告格式】报告用哪种格式？", "1. 短表格：一张对比表", "2. 长文章：完整分析", "回复编号或直接打字回答。"].join("\n"),
-  );
+test("a plain message answers a question with its text, trimmed, and a number is not read as an option", () => {
+  assert.deepEqual(answersFromReply("  都行，你定  ", [FORMAT]), { [FORMAT.question]: "都行，你定" });
+  assert.deepEqual(answersFromReply("2", [FORMAT]), { [FORMAT.question]: "2" });
+  assert.deepEqual(answersFromReply("1 3", [VENDORS]), { [VENDORS.question]: "1 3" });
+  assert.deepEqual(answersFromReply("长文章", [FORMAT]), { [FORMAT.question]: "长文章" });
 });
 
-test("a multi-select question says several numbers may be sent, and an option without a description is a bare label", () => {
-  assert.equal(
-    questionText([VENDORS]),
-    ["【供应商】要对比哪些供应商？", "1. Hetzner：欧洲，价格最低", "2. Vultr", "3. DigitalOcean：文档好", "可以回复多个编号，用空格分开。"].join("\n"),
-  );
-});
-
-test("several questions are numbered blocks, answered together by one message", () => {
-  assert.equal(
-    questionText([FORMAT, VENDORS]),
-    [
-      "问题 1/2",
-      "【报告格式】报告用哪种格式？",
-      "1. 短表格：一张对比表",
-      "2. 长文章：完整分析",
-      "",
-      "问题 2/2",
-      "【供应商】要对比哪些供应商？",
-      "1. Hetzner：欧洲，价格最低",
-      "2. Vultr",
-      "3. DigitalOcean：文档好",
-      "",
-      "直接打字回答，这一条消息会作为所有问题的答案。",
-    ].join("\n"),
-  );
-});
-
-test("with one question, a reply of only option numbers is the labels of those options", () => {
-  assert.deepEqual(answersFromReply("2", [FORMAT]), { [FORMAT.question]: "长文章" });
-  assert.deepEqual(answersFromReply(" 1\n", [FORMAT]), { [FORMAT.question]: "短表格" });
-  assert.deepEqual(answersFromReply("２", [FORMAT]), { [FORMAT.question]: "长文章" }, "a full-width digit");
-  assert.deepEqual(answersFromReply("1 3", [VENDORS]), { [VENDORS.question]: "Hetzner, DigitalOcean" }, "joined with a comma and a space");
-  assert.deepEqual(answersFromReply("3,1", [VENDORS]), { [VENDORS.question]: "DigitalOcean, Hetzner" }, "in the order given");
-  assert.deepEqual(answersFromReply("1，2、3", [VENDORS]), { [VENDORS.question]: "Hetzner, Vultr, DigitalOcean" });
-  assert.deepEqual(answersFromReply("2 2", [VENDORS]), { [VENDORS.question]: "Vultr" }, "a number given twice counts once");
-  assert.deepEqual(answersFromReply("2", [VENDORS]), { [VENDORS.question]: "Vultr" }, "one number on a multi-select question");
-});
-
-test("anything else is free text: several numbers on a single-select question, a number with no option, words", () => {
-  assert.deepEqual(answersFromReply("1 2", [FORMAT]), { [FORMAT.question]: "1 2" });
-  assert.deepEqual(answersFromReply("3", [FORMAT]), { [FORMAT.question]: "3" }, "only two options");
-  assert.deepEqual(answersFromReply("0", [FORMAT]), { [FORMAT.question]: "0" });
-  assert.deepEqual(answersFromReply("1 5", [VENDORS]), { [VENDORS.question]: "1 5" }, "one number is no option");
-  assert.deepEqual(answersFromReply("选 1", [FORMAT]), { [FORMAT.question]: "选 1" });
-  assert.deepEqual(answersFromReply("  都行，你定  ", [FORMAT]), { [FORMAT.question]: "都行，你定" }, "trimmed");
-  assert.deepEqual(answersFromReply("1.5", [FORMAT]), { [FORMAT.question]: "1.5" });
-});
-
-test("with several questions the reply is free text, given as the answer to each of them", () => {
+test("with several questions the text is given as the answer to each of them", () => {
   assert.deepEqual(answersFromReply("1", [FORMAT, VENDORS]), { [FORMAT.question]: "1", [VENDORS.question]: "1" });
   assert.deepEqual(answersFromReply("都按默认", [FORMAT, VENDORS]), { [FORMAT.question]: "都按默认", [VENDORS.question]: "都按默认" });
 });

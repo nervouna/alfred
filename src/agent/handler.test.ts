@@ -1,4 +1,4 @@
-// The handler on fake channels and a fake agent: no model is called, nothing is sent anywhere.
+// The handler on a fake channel and a fake agent: no model is called, nothing is sent anywhere.
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -9,7 +9,7 @@ import { after, test } from "node:test";
 import type { Options, query } from "@anthropic-ai/claude-agent-sdk";
 import type { SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 
-import type { Channel, LiveEvent, Message, Run } from "../api/schema.ts";
+import type { LiveEvent, Message, Run } from "../api/schema.ts";
 import type { Inbound, Outbound } from "../channels.ts";
 
 // store.ts and config.ts read these at import time, so set them before loading the modules under test.
@@ -27,7 +27,6 @@ const { createAgentHandler } = await import("./handler.ts");
 const { EventLog, isLiveEvent } = await import("../events.ts");
 const { readRunFile } = await import("../runs.ts");
 const { InvalidAnswer, appOutbound } = await import("../channels.ts");
-const { questionText } = await import("./questions.ts");
 
 const cleanups: (() => Promise<void>)[] = [];
 after(async () => {
@@ -233,12 +232,12 @@ const reportTurn = (text: string) => [
 ];
 
 /** A channel that records what it is asked to send and refuses every text while `refusing` is set. */
-function fakeChannel(channel: Channel) {
+function fakeApp() {
   const texts: string[] = [];
   const files: { path: string; caption?: string }[] = [];
-  const state = { refusing: false, typing: 0, waiting: false, hold: undefined as Promise<void> | undefined };
+  const state = { refusing: false, waiting: false, hold: undefined as Promise<void> | undefined };
   const out: Outbound = {
-    channel,
+    channel: "app",
     async text(text) {
       const hold = state.hold;
       state.hold = undefined;
@@ -247,7 +246,7 @@ function fakeChannel(channel: Channel) {
         await hold;
         state.waiting = false;
       }
-      if (state.refusing) throw new Error("sendMessage failed: ret=-2");
+      if (state.refusing) throw new Error("the channel refused the message");
       texts.push(text);
     },
     async file(absPath, caption) {
@@ -255,29 +254,23 @@ function fakeChannel(channel: Channel) {
       files.push({ path: absPath, caption });
       return "file";
     },
-    async typing() {
-      state.typing++;
-      return async () => {};
-    },
   };
   return { out, texts, files, state };
 }
 
-let owners = 0;
+let states = 0;
 let logs = 0;
 
-/** A handler on fake channels, a log of its own and an owner of its own. */
-function setup(options: { turn?: TurnFn; progressMs?: number; interruptMs?: number; owner?: string } = {}) {
-  const wechat = fakeChannel("wechat");
-  const app = fakeChannel("app");
+/** A handler on a fake channel, a log of its own and a state file of its own (or the given one). */
+function setup(options: { turn?: TurnFn; interruptMs?: number; stateFile?: string } = {}) {
+  const app = fakeApp();
   const events = new EventLog(path.join(tmp, `events-${logs++}`, "events.jsonl"));
   const agent = fakeAgent(options.turn);
   const handler = createAgentHandler({
-    owner: options.owner ?? `owner-${owners++}`,
-    channels: { wechat: wechat.out, app: app.out },
+    out: app.out,
     events,
+    stateFile: options.stateFile ?? path.join(tmp, `state-${states++}`, "agent-state.json"),
     runQuery: agent.runQuery,
-    progressMs: options.progressMs,
     interruptMs: options.interruptMs,
   });
   cleanups.push(() => handler.shutdown());
@@ -290,87 +283,73 @@ function setup(options: { turn?: TurnFn; progressMs?: number; interruptMs?: numb
   const questions = () => events.readSince(0).flatMap((e) => (e.type === "question.asked" ? [e.data] : []));
   const answered = () => events.readSince(0).flatMap((e) => (e.type === "question.answered" ? [e.data] : []));
   const finished = (n = 1) => runs().filter((r) => r.kind === "task" && r.status !== "running").length >= n;
-  const send = (channel: Channel, text: string, more: Partial<Inbound> = {}) => handler.submit({ channel, text, files: [], ...more });
+  const send = (text: string, more: Partial<Inbound> = {}) => handler.submit({ text, files: [], ...more });
   /** The run's id once it started, and the ids of the background subagents it started so far. */
   const taskId = (): string => runs().findLast((r) => r.kind === "task")?.id ?? "";
   const subagentIds = (): string[] => [...new Set(runs().filter((r) => r.kind === "subagent").map((r) => r.id))];
   const statusOf = (id: string): string | undefined => runs().findLast((r) => r.id === id)?.status;
-  return { handler, wechat, app, events, agent, live, messages, runs, questions, answered, finished, send, taskId, subagentIds, statusOf };
+  return { handler, app, events, agent, live, messages, runs, questions, answered, finished, send, taskId, subagentIds, statusOf };
 }
 
 const STEERED = "收到，会在当前步骤结束后转给 Alfred。";
 const QUEUED = "收到，排在当前任务之后处理。发 /stop 可以停止当前任务。";
 
-test("a run started from the app replies only on the app channel", async () => {
+test("a run replies on the app channel, and the reply is a message event of the run", async () => {
   const t = setup();
-  await t.send("app", "你好", { clientId: "c-1" });
+  await t.send("你好", { clientId: "c-1" });
   await until("the run to finish", () => t.finished());
 
   assert.deepEqual(t.app.texts, ["echo: 你好"]);
-  assert.deepEqual(t.wechat.texts, []);
-  assert.equal(t.wechat.state.typing, 0, "the WeChat typing indicator stays off for a run the app started");
+  const reply = t.messages().find((m) => m.direction === "out");
+  assert.deepEqual([reply?.channel, reply?.text, reply?.runId], ["app", "echo: 你好", t.taskId()]);
 });
 
-test("a run started from WeChat replies only on WeChat", async () => {
-  const t = setup();
-  await t.send("wechat", "你好");
-  await until("the run to finish", () => t.finished());
-
-  assert.deepEqual(t.wechat.texts, ["echo: 你好"]);
-  assert.deepEqual(t.app.texts, []);
-  assert.equal(t.wechat.state.typing, 1);
-});
-
-test("a command's reply goes to the channel it came from, during a run too", async () => {
+test("a command is answered at once, during a run too", async () => {
   const hold = held();
   const t = setup({ turn: hold.turn });
-  await t.send("app", "/help");
-  await t.send("wechat", "/model");
+  await t.send("/help");
+  await t.send("/model");
   assert.match(t.app.texts[0] ?? "", /^Alfred 调研助手/);
-  assert.match(t.wechat.texts[0] ?? "", /^当前模型：/);
-  assert.equal(t.app.texts.length + t.wechat.texts.length, 2);
+  assert.match(t.app.texts[1] ?? "", /^当前模型：/);
 
-  await t.send("wechat", "查一下");
+  await t.send("查一下");
   await until("the run to start", () => hold.waiting === 1);
-  await t.send("app", "/status");
-  assert.match(t.app.texts.at(-1) ?? "", /任务：运行 \w{6}/, "the status of the run WeChat started comes back on the app");
-  assert.equal(t.wechat.texts.length, 1, "nothing about it on WeChat");
+  await t.send("/status");
+  assert.match(t.app.texts.at(-1) ?? "", /任务：运行 \w{6}/, "the status shows the run");
 
   hold.release("好了");
   await until("the run to finish", () => t.finished());
 });
 
-test("an app message during a run WeChat started steers it, and the output stays on WeChat", async () => {
+test("a message during a run steers it: it is acknowledged, and the same run answers it", async () => {
   const hold = held();
   const t = setup({ turn: hold.turn });
-  await t.send("wechat", "查 VPS 价格");
+  await t.send("查 VPS 价格");
   await until("the run to start", () => hold.waiting === 1);
-  await t.send("app", "只看便宜的", { clientId: "c-2" });
+  await t.send("只看便宜的", { clientId: "c-2" });
 
-  assert.deepEqual(t.app.texts, [STEERED], "the acknowledgement goes to the message's channel");
-  assert.deepEqual(t.wechat.texts, []);
+  assert.deepEqual(t.app.texts, [STEERED]);
   hold.release("第一轮");
   await until("the second turn", () => hold.waiting === 1);
   hold.release("第二轮");
   await until("the run to finish", () => t.finished());
 
-  assert.deepEqual(t.wechat.texts, ["第一轮", "第二轮"]);
-  assert.deepEqual(t.app.texts, [STEERED]);
+  assert.deepEqual(t.app.texts, [STEERED, "第一轮", "第二轮"]);
   assert.deepEqual(t.agent.prompts, ["查 VPS 价格", "只看便宜的"], "one run, two messages");
 });
 
-test("every message is recorded with its channel, files, client id and run", async () => {
+test("every message is recorded with its files, client id and run", async () => {
   const hold = held();
   const t = setup({ turn: hold.turn });
   const image = { path: "inbox/2026-10-25/image-083110.jpg", kind: "image" as const };
 
-  await t.send("wechat", "", { files: [image] });
-  assert.match(t.wechat.texts[0] ?? "", /^已保存 inbox\/2026-10-25\/image-083110\.jpg，告诉我要怎么处理。/);
+  await t.send("", { files: [image], clientId: "c-3a" });
+  assert.match(t.app.texts[0] ?? "", /^已保存 inbox\/2026-10-25\/image-083110\.jpg，告诉我要怎么处理。/);
 
-  await t.send("app", "看看这张图", { clientId: "c-3" });
+  await t.send("看看这张图", { clientId: "c-3" });
   await until("the run to start", () => hold.waiting === 1);
   assert.match(t.agent.prompts[0] ?? "", /^Attached files \(workspace paths\):\n- inbox\/2026-10-25\/image-083110\.jpg\n\n看看这张图$/);
-  await t.send("app", "再补一句", { clientId: "c-4" });
+  await t.send("再补一句", { clientId: "c-4" });
   hold.release("看到了");
   await until("the second turn", () => hold.waiting === 1);
   hold.release("补充收到");
@@ -380,8 +359,8 @@ test("every message is recorded with its channel, files, client id and run", asy
   assert.ok(runId);
   const view = t.messages().map((m) => [m.channel, m.direction, m.text, m.files.map((f) => f.path), m.clientId, m.runId]);
   assert.deepEqual(view, [
-    ["wechat", "in", "", [image.path], undefined, undefined],
-    ["wechat", "out", t.wechat.texts[0], [], undefined, undefined],
+    ["app", "in", "", [image.path], "c-3a", undefined],
+    ["app", "out", t.app.texts[0], [], undefined, undefined],
     ["app", "in", "看看这张图", [], "c-3", runId],
     ["app", "in", "再补一句", [], "c-4", runId],
     ["app", "out", STEERED, [], undefined, undefined],
@@ -391,16 +370,15 @@ test("every message is recorded with its channel, files, client id and run", asy
   assert.deepEqual(t.messages()[0]?.files, [image]);
 });
 
-test("an app message's files are attached to the next message, as WeChat media is, and the saved line goes to the app", async () => {
+test("files of a message are attached to the next message, and a message of only files is answered with the saved line", async () => {
   const hold = held();
   const t = setup({ turn: hold.turn });
   const brief = { path: "inbox/2026-10-25/brief.pdf", kind: "file" as const };
 
-  await t.send("app", "", { files: [brief], clientId: "c-f1" });
+  await t.send("", { files: [brief], clientId: "c-f1" });
   assert.deepEqual(t.app.texts, [`已保存 ${brief.path}，告诉我要怎么处理。`]);
-  assert.deepEqual(t.wechat.texts, []);
 
-  await t.send("app", "看看这份", { clientId: "c-f2" });
+  await t.send("看看这份", { clientId: "c-f2" });
   await until("the run to start", () => hold.waiting === 1);
   assert.match(t.agent.prompts[0] ?? "", /^Attached files \(workspace paths\):\n- inbox\/2026-10-25\/brief\.pdf\n\n看看这份$/);
   hold.release("看完了");
@@ -418,7 +396,7 @@ test("an app message's files are attached to the next message, as WeChat media i
 
 test("a command and what it replies are recorded without a run", async () => {
   const t = setup();
-  await t.send("app", "/help", { clientId: "c-5" });
+  await t.send("/help", { clientId: "c-5" });
 
   const [request, response, ...rest] = t.messages();
   assert.equal(rest.length, 0);
@@ -426,72 +404,34 @@ test("a command and what it replies are recorded without a run", async () => {
   assert.deepEqual([response?.channel, response?.direction, response?.runId], ["app", "out", undefined]);
 });
 
-test("a WeChat send that fails is recorded with its error, and the run is noted as undelivered on the next message's channel", async () => {
+test("a reply the channel refuses is recorded with its error and logged; the run still ends done and nothing is noted later", async () => {
   const t = setup();
-  t.wechat.state.refusing = true;
-  await t.send("wechat", "写好了就告诉我");
+  t.app.state.refusing = true;
+  await t.send("写好了就告诉我");
   await until("the run to finish", () => t.finished());
 
-  const failed = t.messages().find((m) => m.direction === "out" && m.channel === "wechat");
+  const failed = t.messages().find((m) => m.direction === "out");
   assert.equal(failed?.text, "echo: 写好了就告诉我");
-  assert.equal(failed?.error, "sendMessage failed: ret=-2");
+  assert.equal(failed?.error, "the channel refused the message");
   assert.ok(failed?.runId);
-  assert.deepEqual(t.wechat.texts, []);
+  assert.deepEqual(t.app.texts, []);
+  assert.equal(t.statusOf(t.taskId()), "done");
+  assert.equal(readRunFile(t.taskId())?.undelivered, undefined, "nothing is recorded on the run's card");
 
-  t.wechat.state.refusing = false;
-  await t.send("app", "/status");
-  assert.match(t.app.texts[0] ?? "", /的结果没送到微信/);
-  assert.match(t.app.texts[1] ?? "", /^模型：/);
-  assert.deepEqual(t.wechat.texts, [], "the note went where the message came from");
-  assert.equal(t.messages().filter((m) => m.error).length, 1);
+  t.app.state.refusing = false;
+  await t.send("/status");
+  assert.equal(t.app.texts.length, 1, "no note about the reply that did not arrive");
+  assert.match(t.app.texts[0] ?? "", /^模型：/);
 });
 
-test("a progress note goes to WeChat only: never to the app, and never recorded", async () => {
-  const slow = async (prompt: string, signal: AbortSignal) => {
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, 250);
-      signal.addEventListener("abort", () => (clearTimeout(timer), resolve()), { once: true });
-    });
-    return `echo: ${prompt}`;
-  };
-  const t = setup({ turn: slow, progressMs: 40 });
-
-  await t.send("app", "慢一点的任务");
-  await until("the app run to finish", () => t.finished(1));
-  assert.deepEqual(t.app.texts, ["echo: 慢一点的任务"], "no progress note on the app channel");
-  assert.equal(t.wechat.texts.length, 0, "and none on WeChat for a run the app started");
-
-  await t.send("wechat", "慢一点的任务");
-  await until("the WeChat run to finish", () => t.finished(2));
-  const notes = t.wechat.texts.filter((text) => text.startsWith("仍在处理（"));
-  assert.ok(notes.length >= 1, "a long run that WeChat started gets progress notes");
-  assert.equal(t.wechat.texts.at(-1), "echo: 慢一点的任务");
-  assert.equal(
-    t.messages().filter((m) => m.text.includes("仍在处理")).length,
-    0,
-    "progress notes are not events",
-  );
-  assert.equal(t.messages().filter((m) => m.direction === "out" && m.channel === "wechat").length, 1);
-});
-
-test("messages are taken in arrival order across channels, whatever their channel and however long each takes to prepare", async () => {
+test("messages are taken in arrival order: the first starts the run, the others steer it", async () => {
   const hold = held();
   const t = setup({ turn: hold.turn });
-  const slow = async (): Promise<Inbound> => {
-    await sleep(60);
-    return { channel: "wechat", text: "第一条", files: [] };
-  };
-  const done = [
-    t.handler.submit(slow),
-    t.send("app", "第二条", { clientId: "c-6" }),
-    t.send("wechat", "第三条"),
-    t.send("app", "第四条", { clientId: "c-7" }),
-  ];
-  await Promise.all(done);
+  await Promise.all([t.send("第一条"), t.send("第二条", { clientId: "c-6" }), t.send("第三条"), t.send("第四条", { clientId: "c-7" })]);
 
   assert.deepEqual(
-    t.messages().filter((m) => m.direction === "in").map((m) => [m.channel, m.text]),
-    [["wechat", "第一条"], ["app", "第二条"], ["wechat", "第三条"], ["app", "第四条"]],
+    t.messages().filter((m) => m.direction === "in").map((m) => m.text),
+    ["第一条", "第二条", "第三条", "第四条"],
   );
   const runId = t.runs().find((r) => r.kind === "task")?.id;
   assert.deepEqual(
@@ -499,8 +439,7 @@ test("messages are taken in arrival order across channels, whatever their channe
     [runId, runId, runId, runId],
     "the first started the run, the others steered it",
   );
-  assert.deepEqual(t.wechat.texts, [STEERED], "only the message that came from WeChat is acknowledged on WeChat");
-  assert.deepEqual(t.app.texts, [STEERED, STEERED]);
+  assert.deepEqual(t.app.texts, [STEERED, STEERED, STEERED]);
   await until("the run to start", () => hold.waiting === 1);
   hold.release("1");
   await until("the next turn", () => hold.waiting === 1);
@@ -512,161 +451,99 @@ test("messages are taken in arrival order across channels, whatever their channe
   await until("the run to finish", () => t.finished());
 });
 
-test("stopRun stops the live run and says so on the channel it was asked from; an unknown id stops nothing", async () => {
+test("stopRun stops the live run and says so; an unknown id stops nothing", async () => {
   const hold = held();
   const t = setup({ turn: hold.turn });
-  assert.equal(await t.handler.stopRun("k7m2qa", "app"), false, "nothing runs yet");
+  assert.equal(await t.handler.stopRun("k7m2qa"), false, "nothing runs yet");
 
-  await t.send("wechat", "长任务");
+  await t.send("长任务");
   await until("the run to start", () => hold.waiting === 1);
   const runId = t.runs().find((r) => r.kind === "task")?.id ?? "";
 
-  assert.equal(await t.handler.stopRun("k7m2qa", "app"), false);
+  assert.equal(await t.handler.stopRun("k7m2qa"), false);
   assert.deepEqual(t.app.texts, [], "an unknown id sends nothing");
-  assert.equal(await t.handler.stopRun(runId, "app"), true);
+  assert.equal(await t.handler.stopRun(runId), true);
   assert.deepEqual(t.app.texts, ["已停止当前任务。"]);
-  assert.deepEqual(t.wechat.texts, []);
 
   await until("the run to stop", () => t.runs().some((r) => r.id === runId && r.status === "stopped"));
-  assert.equal(await t.handler.stopRun(runId, "app"), false, "the run is over");
+  assert.equal(await t.handler.stopRun(runId), false, "the run is over");
 });
 
-test("/stop <run id> goes through stopRun, and its reply goes to the command's channel", async () => {
+test("/stop <run id> goes through stopRun", async () => {
   const hold = held();
   const t = setup({ turn: hold.turn });
-  await t.send("app", "长任务");
+  await t.send("长任务");
   await until("the run to start", () => hold.waiting === 1);
   const runId = t.runs().find((r) => r.kind === "task")?.id ?? "";
 
-  await t.send("wechat", "/stop zzzzzz");
-  assert.deepEqual(t.wechat.texts, ["没有进行中或排队的运行 zzzzzz。发 /status 查看。"]);
-  await t.send("wechat", `/stop ${runId}`);
-  assert.deepEqual(t.wechat.texts.at(-1), "已停止当前任务。");
-  assert.deepEqual(t.app.texts, []);
+  await t.send("/stop zzzzzz");
+  assert.deepEqual(t.app.texts, ["没有进行中或排队的运行 zzzzzz。发 /status 查看。"]);
+  await t.send(`/stop ${runId}`);
+  assert.deepEqual(t.app.texts.at(-1), "已停止当前任务。");
   await until("the run to stop", () => t.runs().some((r) => r.id === runId && r.status === "stopped"));
 });
 
-test("a message that arrives once the task takes no more input is queued, and the next task goes to the channel of the first one queued", async () => {
+test("messages that arrive once the task takes no more input are queued, and start the next task together", async () => {
   const t = setup();
   let release = () => {};
-  t.wechat.state.hold = new Promise<void>((resolve) => (release = resolve));
-  await t.send("wechat", "第一个任务");
-  await until("the final reply to be on its way", () => t.wechat.state.waiting);
+  t.app.state.hold = new Promise<void>((resolve) => (release = resolve));
+  await t.send("第一个任务");
+  await until("the final reply to be on its way", () => t.app.state.waiting);
 
-  await t.send("app", "补充任务");
-  await t.send("wechat", "第二条");
-  assert.deepEqual(t.app.texts, [QUEUED], "the acknowledgement goes to the message's channel");
-  assert.deepEqual(t.wechat.texts, [QUEUED]);
+  await t.send("补充任务");
+  await t.send("第二条");
+  assert.deepEqual(t.app.texts, [QUEUED, QUEUED]);
   assert.deepEqual(
     t.messages().filter((m) => m.direction === "in").map((m) => [m.channel, m.text, m.runId]),
-    [["wechat", "第一个任务", t.runs()[0]?.id], ["app", "补充任务", undefined], ["wechat", "第二条", undefined]],
+    [["app", "第一个任务", t.runs()[0]?.id], ["app", "补充任务", undefined], ["app", "第二条", undefined]],
     "a queued message belongs to no run yet",
   );
 
   release();
   await until("the second task to finish", () => t.finished(2));
-  assert.deepEqual(t.wechat.texts, [QUEUED, "echo: 第一个任务"]);
-  assert.deepEqual(t.app.texts, [QUEUED, "echo: 补充任务\n\n---\n\n第二条"]);
+  assert.deepEqual(t.app.texts, [QUEUED, QUEUED, "echo: 第一个任务", "echo: 补充任务\n\n---\n\n第二条"]);
   assert.equal(t.messages().filter((m) => m.direction === "in").length, 3, "the queued messages are not recorded again when their task starts");
 });
 
-test("the notice for rules a run changed goes to the channel of the message that started it", async () => {
+test("the notice for rules a run changed is recorded with the run that changed them", async () => {
   const writesRules = async (prompt: string) => {
     fs.mkdirSync(path.join(tmp, "workspace", "notes"), { recursive: true });
     fs.writeFileSync(path.join(tmp, "workspace", "notes", "ALFRED.md"), `rules ${prompt}`);
     return "写好了";
   };
   const t = setup({ turn: writesRules });
-  await t.send("app", "加一条规则");
+  await t.send("加一条规则");
   await until("the run to finish", () => t.finished());
   await until("the notice", () => t.app.texts.length === 2);
 
   assert.deepEqual(t.app.texts, ["写好了", "已新建 notes/ALFRED.md"]);
-  assert.deepEqual(t.wechat.texts, []);
   const notice = t.messages().find((m) => m.text.startsWith("已新建"));
   assert.equal(notice?.channel, "app");
   assert.equal(notice?.runId, t.runs()[0]?.id, "the notice belongs to the run that changed the rules");
 });
 
-test("the note about a run a restart cut short goes to the channel of the next message, and only once", async () => {
+test("the note about a run a restart cut short comes with the next message, is recorded after it, and is said only once", async () => {
   const hold = held();
-  const first = setup({ turn: hold.turn, owner: "owner-restart" });
-  await first.send("wechat", "长任务");
+  const stateFile = path.join(tmp, `state-${states++}`, "agent-state.json");
+  const first = setup({ turn: hold.turn, stateFile });
+  await first.send("长任务");
   await until("the run to start", () => hold.waiting === 1);
   await first.handler.shutdown();
   await until("the run to be lost", () => first.runs().some((r) => r.kind === "task" && r.status === "lost"));
 
-  const second = setup({ owner: "owner-restart" });
-  await second.send("app", "/status");
+  const second = setup({ stateFile });
+  await second.send("/status");
   assert.match(second.app.texts[0] ?? "", /^Alfred 重启时中断了 1 个任务：「长任务」/);
   assert.match(second.app.texts[1] ?? "", /^模型：/);
-  assert.deepEqual(second.wechat.texts, []);
   const [inbound, note, reply] = second.messages().slice(-3);
   assert.deepEqual([inbound?.direction, inbound?.text], ["in", "/status"], "the message is recorded before the note it triggered");
   assert.deepEqual([note?.direction, note?.channel], ["out", "app"]);
   assert.match(note?.text ?? "", /^Alfred 重启时中断了 1 个任务/);
   assert.match(reply?.text ?? "", /^模型：/);
-  await second.send("wechat", "/help");
-  assert.match(second.wechat.texts[0] ?? "", /^Alfred 调研助手/, "the note was said once");
+  await second.send("/help");
+  assert.match(second.app.texts[2] ?? "", /^Alfred 调研助手/, "the note was said once");
 });
 
-test("the note about undelivered results is recorded after the message that starts a run, which carries the run's id", async () => {
-  const t = setup();
-  t.wechat.state.refusing = true;
-  await t.send("wechat", "写好了就告诉我");
-  await until("the run to finish", () => t.finished());
-  t.wechat.state.refusing = false;
-
-  await t.send("wechat", "再来一个");
-  await until("the second run to finish", () => t.finished(2));
-
-  const all = t.messages();
-  const inbound = all.findIndex((m) => m.direction === "in" && m.text === "再来一个");
-  const note = all.findIndex((m) => m.direction === "out" && /的结果没送到微信/.test(m.text));
-  assert.ok(inbound >= 0 && note >= 0, "both are recorded");
-  assert.ok(inbound < note, "the message comes first in the log");
-  assert.equal(all[inbound]?.runId, t.taskId(), "and carries the id of the run it started");
-  assert.equal(all[note]?.runId, undefined);
-  assert.match(t.wechat.texts[0] ?? "", /的结果没送到微信/, "WeChat still gets the note, before the reply");
-  assert.equal(t.wechat.texts[1], "echo: 再来一个");
-});
-
-test("the note about undelivered results is recorded after a follow-up that steers the run", async () => {
-  const hold = held();
-  const t = setup({ turn: hold.turn });
-  t.wechat.state.refusing = true;
-  await t.send("wechat", "第一个");
-  await until("the run to start", () => hold.waiting === 1);
-  hold.release("好了");
-  await until("the first run to finish", () => t.finished());
-  t.wechat.state.refusing = false;
-  await t.send("wechat", "第二个");
-  await until("the second run to start", () => hold.waiting === 1);
-  await t.send("app", "补充一句", { clientId: "c-note" });
-
-  const all = t.messages();
-  const note = all.findIndex((m) => m.direction === "out" && /的结果没送到微信/.test(m.text));
-  const first = all.findIndex((m) => m.direction === "in" && m.text === "第二个");
-  assert.ok(first >= 0 && note > first, "the note follows the message that triggered it");
-  hold.release("全部完成");
-  await until("the follow-up's turn", () => hold.waiting === 1);
-  hold.release("补充完成");
-  await until("the second run to finish", () => t.finished(2));
-});
-
-test("the line about media that could not be saved is recorded after the message it belongs to", async () => {
-  const t = setup();
-  await t.send("wechat", "看看这个", { failed: ["图片 inbox/2026-10-25/image-1.jpg 保存失败"] });
-  await until("the run to finish", () => t.finished());
-
-  const view = t.messages().map((m) => [m.direction, m.text, m.runId ? "run" : "-"]);
-  assert.deepEqual(view, [
-    ["in", "看看这个", "run"],
-    ["out", "图片 inbox/2026-10-25/image-1.jpg 保存失败", "-"],
-    ["out", "echo: 看看这个", "run"],
-  ]);
-  assert.deepEqual(t.wechat.texts, ["图片 inbox/2026-10-25/image-1.jpg 保存失败", "echo: 看看这个"], "WeChat gets the same lines in the same order");
-});
 
 test("the main agent's text is published as message.delta, with one stream id for each text block", async () => {
   const t = setup({
@@ -690,7 +567,7 @@ test("the main agent's text is published as message.delta, with one stream id fo
       return "你好，再见。";
     },
   });
-  await t.send("wechat", "打个招呼");
+  await t.send("打个招呼");
   await until("the run to finish", () => t.finished());
 
   const runId = t.taskId();
@@ -705,7 +582,7 @@ test("the main agent's text is published as message.delta, with one stream id fo
     ],
     "thinking, tool input and empty deltas are not streamed; a block keeps its id and the next one has another",
   );
-  assert.deepEqual(t.wechat.texts, ["你好，再见。"], "WeChat gets the reply as before");
+  assert.deepEqual(t.app.texts, ["你好，再见。"], "the reply is sent as before");
   assert.ok(t.events.readSince(0).every((e) => e.type === "message.created" || e.type === "run.updated"), "no delta is stored");
 });
 
@@ -728,7 +605,7 @@ test("a subagent's stream events publish nothing, and do not disturb the main ag
       return "主代理";
     },
   });
-  await t.send("app", "派活");
+  await t.send("派活");
   await until("the run to finish", () => t.finished());
 
   assert.deepEqual(
@@ -749,7 +626,7 @@ test("every step publishes run.step with its recorder's run id: the task's, a fo
       return "好了";
     },
   });
-  await t.send("app", "查价格");
+  await t.send("查价格");
   await until("the run to finish", () => t.finished());
   await until("the subagent's run to finish", () => t.subagentIds().every((id) => t.statusOf(id) === "done"));
 
@@ -776,60 +653,60 @@ test("every step publishes run.step with its recorder's run id: the task's, a fo
 test("stopping interrupts the current turn instead of aborting the run, and the turn sends no reply", async () => {
   const hold = held();
   const t = setup({ turn: hold.turn });
-  await t.send("wechat", "长任务");
+  await t.send("长任务");
   await until("the run to start", () => hold.waiting === 1);
   const runId = t.taskId();
 
-  assert.equal(await t.handler.stopRun(runId, "app"), true);
+  assert.equal(await t.handler.stopRun(runId), true);
   assert.equal(t.agent.calls.interrupt, 1);
   assert.equal(t.agent.signals[0]?.aborted, false, "the run is not aborted");
   assert.deepEqual(t.app.texts, ["已停止当前任务。"]);
   await until("the run to stop", () => t.statusOf(runId) === "stopped");
 
   assert.equal(t.agent.signals[0]?.aborted, false, "not aborted afterwards either");
-  assert.deepEqual(t.wechat.texts, [], "neither the interrupted turn's text nor an error line");
+  assert.deepEqual(t.app.texts, ["已停止当前任务。"], "neither the interrupted turn's text nor an error line");
   assert.ok(!t.messages().some((m) => m.text.includes("执行出错") || m.text.includes("出错了")));
   assert.equal(t.runs().findLast((r) => r.id === runId)?.costUsd, 0.02, "the turn's spend is accounted");
-  assert.equal(await t.handler.stopRun(runId, "app"), false, "the run is over");
+  assert.equal(await t.handler.stopRun(runId), false, "the run is over");
 });
 
 test("an interrupt that lands before the model did anything is a stop, not a failed resume", async () => {
   const first = held();
-  const owner = "owner-early";
-  const t = setup({ turn: first.turn, owner });
-  await t.send("wechat", "第一个");
+  const stateFile = path.join(tmp, `state-${states++}`, "agent-state.json");
+  const t = setup({ turn: first.turn, stateFile });
+  await t.send("第一个");
   await until("the first run to start", () => first.waiting === 1);
   first.release("好了");
   await until("the first run to finish", () => t.finished());
 
   // The second run resumes the first one's session; its interrupted result counts no turns.
   const second = held(INTERRUPTED_EARLY);
-  const u = setup({ turn: second.turn, owner });
-  await u.send("wechat", "第二个");
+  const u = setup({ turn: second.turn, stateFile });
+  await u.send("第二个");
   await until("the second run to start", () => second.waiting === 1);
-  assert.equal(await u.handler.stopRun(u.taskId(), "wechat"), true);
+  assert.equal(await u.handler.stopRun(u.taskId()), true);
   await until("the second run to stop", () => u.statusOf(u.taskId()) === "stopped");
 
-  assert.deepEqual(u.wechat.texts, ["已停止当前任务。"], "no new session, no error");
+  assert.deepEqual(u.app.texts, ["已停止当前任务。"], "no new session, no error");
   assert.deepEqual(u.agent.prompts, ["第二个"], "the message was not sent again");
 });
 
 test("a stop keeps the messages already handed to the run: the next turn answers them", async () => {
   const hold = held();
   const t = setup({ turn: hold.turn });
-  await t.send("wechat", "第一条");
+  await t.send("第一条");
   await until("the first turn", () => hold.waiting === 1);
-  await t.send("app", "补充一条", { clientId: "c-9" });
+  await t.send("补充一条", { clientId: "c-9" });
   assert.deepEqual(t.app.texts, [STEERED]);
   const runId = t.taskId();
 
-  assert.equal(await t.handler.stopRun(runId, "wechat"), true);
+  assert.equal(await t.handler.stopRun(runId), true);
   await until("the follow-up's turn", () => hold.waiting === 1 && t.agent.prompts.length === 2);
   hold.release("补充的答复");
   await until("the run to finish", () => t.finished());
 
   assert.deepEqual(t.agent.prompts, ["第一条", "补充一条"]);
-  assert.deepEqual(t.wechat.texts, ["已停止当前任务。", "补充的答复"]);
+  assert.deepEqual(t.app.texts, [STEERED, "已停止当前任务。", "补充的答复"]);
   assert.equal(t.statusOf(runId), "done", "the interrupted turn was not its last");
   assert.equal(t.agent.signals[0]?.aborted, false);
 });
@@ -837,17 +714,17 @@ test("a stop keeps the messages already handed to the run: the next turn answers
 test("a stop keeps the messages queued behind the run: they start the next task", async () => {
   const t = setup();
   let release = () => {};
-  t.wechat.state.hold = new Promise<void>((resolve) => (release = resolve));
-  await t.send("wechat", "第一个任务");
-  await until("the final reply to be on its way", () => t.wechat.state.waiting);
-  await t.send("app", "排队的消息");
+  t.app.state.hold = new Promise<void>((resolve) => (release = resolve));
+  await t.send("第一个任务");
+  await until("the final reply to be on its way", () => t.app.state.waiting);
+  await t.send("排队的消息");
   assert.deepEqual(t.app.texts, [QUEUED]);
 
-  assert.equal(await t.handler.stopRun(t.taskId(), "app"), true);
+  assert.equal(await t.handler.stopRun(t.taskId()), true);
   assert.deepEqual(t.app.texts, [QUEUED, "已停止当前任务。"], "nothing is said about dropped messages");
   release();
   await until("the next task to finish", () => t.finished(2));
-  assert.deepEqual(t.app.texts, [QUEUED, "已停止当前任务。", "echo: 排队的消息"]);
+  assert.deepEqual(t.app.texts, [QUEUED, "已停止当前任务。", "echo: 第一个任务", "echo: 排队的消息"]);
 });
 
 test("a stop leaves background subagents running and names them in the reply; the run goes on until they report", async () => {
@@ -859,12 +736,12 @@ test("a stop leaves background subagents running and names them in the reply; th
       return hold.turn(prompt, signal, turn);
     },
   });
-  await t.send("wechat", "派两个后台任务");
+  await t.send("派两个后台任务");
   await until("both subagents to be running", () => t.subagentIds().length === 2 && hold.waiting === 1);
   const runId = t.taskId();
   const ids = t.subagentIds();
 
-  assert.equal(await t.handler.stopRun(runId, "app"), true);
+  assert.equal(await t.handler.stopRun(runId), true);
   const reply = t.app.texts[0] ?? "";
   const named = /^已停止当前任务。后台运行 (\w{6})、(\w{6}) 仍在继续，发 \/stop <id> 停止。$/.exec(reply);
   assert.ok(named, reply);
@@ -877,7 +754,7 @@ test("a stop leaves background subagents running and names them in the reply; th
   for (const id of ids) assert.equal(t.statusOf(id), "running", "so do the subagents");
   assert.deepEqual(t.agent.calls.stopTask, [], "none was stopped");
   assert.equal(t.agent.signals[0]?.aborted, false);
-  assert.deepEqual(t.wechat.texts, [], "the interrupted turn said nothing");
+  assert.deepEqual(t.app.texts, [reply], "the interrupted turn said nothing");
 
   // They report; the report starts a turn of its own, and the run ends as usual.
   t.agent.emit(taskNotification("agent-1"));
@@ -885,7 +762,7 @@ test("a stop leaves background subagents running and names them in the reply; th
   for (const message of reportTurn("后台任务的报告")) t.agent.emit(message);
   await until("the run to finish", () => t.finished());
   assert.equal(t.statusOf(runId), "done");
-  assert.ok((t.wechat.texts[0] ?? "").startsWith("后台任务的报告"));
+  assert.ok((t.app.texts[1] ?? "").startsWith("后台任务的报告"));
 });
 
 test("with one background subagent left, the stop reply names that one", async () => {
@@ -896,11 +773,11 @@ test("with one background subagent left, the stop reply names that one", async (
       return hold.turn(prompt, signal, turn);
     },
   });
-  await t.send("app", "派一个后台任务");
+  await t.send("派一个后台任务");
   await until("the subagent to be running", () => t.subagentIds().length === 1 && hold.waiting === 1);
   const [id] = t.subagentIds();
 
-  assert.equal(await t.handler.stopRun(t.taskId(), "app"), true);
+  assert.equal(await t.handler.stopRun(t.taskId()), true);
   assert.deepEqual(t.app.texts, [`已停止当前任务。后台运行 ${id} 仍在继续，发 /stop <id> 停止。`]);
   t.agent.emit(taskNotification("agent-1"));
   for (const message of reportTurn("报告")) t.agent.emit(message);
@@ -913,25 +790,24 @@ test("if the interrupted turn does not end within the grace period, the run is a
   console.error = (...args: unknown[]) => void logged.push(args.join(" "));
   t.after(() => (console.error = error));
   const h = setup({ turn: stubborn, interruptMs: 40 });
-  await h.send("app", "长任务");
+  await h.send("长任务");
   await until("the turn to start", () => h.agent.prompts.length === 1);
   const runId = h.taskId();
 
-  assert.equal(await h.handler.stopRun(runId, "wechat"), true);
+  assert.equal(await h.handler.stopRun(runId), true);
   assert.equal(h.agent.calls.interrupt, 1);
   assert.equal(h.agent.signals[0]?.aborted, false, "the interrupt comes first");
   await until("the abort", () => h.agent.signals[0]?.aborted === true);
   await until("the run to stop", () => h.statusOf(runId) === "stopped");
 
   assert.match(logged.join("\n"), new RegExp(`run ${runId}: the interrupted turn did not end within 0\\.04s; aborting the run`));
-  assert.deepEqual(h.wechat.texts, ["已停止当前任务。"]);
-  assert.deepEqual(h.app.texts, [], "no error line on the run's channel either");
+  assert.deepEqual(h.app.texts, ["已停止当前任务。"], "no error line either");
 });
 
 test("the abort fallback waits 10 s by default", async () => {
   const hold = held();
   const t = setup({ turn: hold.turn });
-  await t.send("app", "长任务");
+  await t.send("长任务");
   await until("the turn to start", () => hold.waiting === 1);
   const timers: number[] = [];
   const { setTimeout: set } = globalThis;
@@ -940,7 +816,7 @@ test("the abort fallback waits 10 s by default", async () => {
     return set(fn, ms);
   }) as typeof setTimeout;
   try {
-    await t.handler.stopRun(t.taskId(), "app");
+    await t.handler.stopRun(t.taskId());
   } finally {
     globalThis.setTimeout = set;
   }
@@ -951,11 +827,11 @@ test("the abort fallback waits 10 s by default", async () => {
 test("the abort fallback is dropped when the interrupted turn ends in time", async () => {
   const hold = held();
   const t = setup({ turn: hold.turn, interruptMs: 300 });
-  await t.send("app", "长任务");
+  await t.send("长任务");
   await until("the turn to start", () => hold.waiting === 1);
   const runId = t.taskId();
 
-  assert.equal(await t.handler.stopRun(runId, "app"), true);
+  assert.equal(await t.handler.stopRun(runId), true);
   await until("the run to stop", () => t.statusOf(runId) === "stopped");
   await sleep(450);
   assert.equal(t.agent.signals[0]?.aborted, false, "nothing aborts the run afterwards");
@@ -1036,10 +912,10 @@ function asking(input: unknown, decisions: (Decision | undefined)[]): TurnFn {
 
 const idOfOpenQuestion = (t: ReturnType<typeof setup>): string => t.questions().at(-1)?.id ?? "";
 
-test("a question in a WeChat run is recorded, sent to WeChat as text and held until it is answered; the tool call then gets the answers", async () => {
+test("a question is recorded and held until it is answered, with no text sent: the event is the delivery; the tool call then gets the answers", async () => {
   const decisions: (Decision | undefined)[] = [];
   const t = setup({ turn: asking(FORMAT_ASK, decisions) });
-  await t.send("wechat", "出一份报告");
+  await t.send("出一份报告");
   await until("the question", () => t.questions().length === 1);
 
   const [asked] = t.questions();
@@ -1057,11 +933,8 @@ test("a question in a WeChat run is recorded, sent to WeChat as text and held un
       multiSelect: false,
     },
   ]);
-  assert.deepEqual(t.wechat.texts, [questionText(asked.questions)]);
-  assert.deepEqual(t.wechat.texts, ["【报告格式】报告用哪种格式？\n1. 短表格：一张对比表\n2. 长文章：完整分析\n回复编号或直接打字回答。"]);
   assert.deepEqual(t.app.texts, []);
-  const sentAsMessage = t.messages().find((m) => m.direction === "out" && m.text === t.wechat.texts[0]);
-  assert.deepEqual([sentAsMessage?.channel, sentAsMessage?.runId], ["wechat", asked.runId], "recorded like any text sent in the run");
+  assert.deepEqual(t.messages().map((m) => [m.direction, m.text]), [["in", "出一份报告"]], "no message for the question");
 
   await sleep(100);
   assert.deepEqual(decisions, [], "the call is held while the question is open");
@@ -1076,76 +949,61 @@ test("a question in a WeChat run is recorded, sent to WeChat as text and held un
   });
   assert.deepEqual(t.answered(), [{ id: asked.id, runId: asked.runId, answers: { [FORMAT_Q]: "长文章" } }]);
   await until("the run to finish", () => t.finished());
-  assert.equal(t.wechat.texts.at(-1), "问完了");
+  assert.equal(t.app.texts.at(-1), "问完了");
   assert.equal(await t.handler.answerQuestion(asked.id, { [FORMAT_Q]: "短表格" }), false, "it is answered once");
   assert.equal(t.answered().length, 1);
 });
 
-test("a question in an app run sends no text to any channel: the event is the delivery", async () => {
-  const decisions: (Decision | undefined)[] = [];
-  const t = setup({ turn: asking(FORMAT_ASK, decisions) });
-  await t.send("app", "出一份报告", { clientId: "c-q1" });
-  await until("the question", () => t.questions().length === 1);
-
-  assert.deepEqual(t.wechat.texts, []);
-  assert.deepEqual(t.app.texts, []);
-  assert.deepEqual(t.messages().map((m) => [m.direction, m.text]), [["in", "出一份报告"]], "no message for the question");
-  await t.handler.answerQuestion(idOfOpenQuestion(t), { [FORMAT_Q]: "短表格" });
-  await until("the run to finish", () => t.finished());
-  assert.equal(decisions[0]?.permissionDecision, "allow");
-});
-
-test("a reply of option numbers answers a single question with the labels; the message is recorded with the run id and does not steer the run", async () => {
+test("a plain message answers the question as free text, even a bare number; it is recorded with the run id and does not steer the run", async () => {
   const decisions: (Decision | undefined)[] = [];
   const t = setup({ turn: asking(VENDORS_ASK, decisions) });
-  await t.send("wechat", "对比供应商");
+  await t.send("对比供应商");
   await until("the question", () => t.questions().length === 1);
   const runId = t.taskId();
 
-  await t.send("wechat", "1 3");
+  await t.send("1 3");
   await until("the call to be allowed", () => decisions.length === 1);
-  assert.deepEqual(decisions[0]?.updatedInput?.answers, { [VENDORS_Q]: "Hetzner, DigitalOcean" });
-  assert.deepEqual(t.answered().map((a) => a.answers), [{ [VENDORS_Q]: "Hetzner, DigitalOcean" }]);
+  assert.deepEqual(decisions[0]?.updatedInput?.answers, { [VENDORS_Q]: "1 3" }, "no option numbers are read");
+  assert.deepEqual(t.answered().map((a) => a.answers), [{ [VENDORS_Q]: "1 3" }]);
   const reply = t.messages().find((m) => m.direction === "in" && m.text === "1 3");
   assert.equal(reply?.runId, runId, "recorded with the run id");
-  assert.equal(reply?.channel, "wechat");
+  assert.equal(reply?.channel, "app");
   await until("the run to finish", () => t.finished());
   assert.deepEqual(t.agent.prompts, ["对比供应商"], "the reply was not pushed as a follow-up");
-  assert.ok(!t.wechat.texts.includes(STEERED), "and not acknowledged as one");
-  assert.deepEqual(t.wechat.texts.slice(1), ["问完了"]);
+  assert.deepEqual(t.app.texts, ["问完了"], "and not acknowledged as one");
 });
 
-test("other text is free text, given as the answer to every question of the ask, from either channel", async () => {
+test("the text is given as the answer to every question of the ask", async () => {
   const decisions: (Decision | undefined)[] = [];
   const both = { questions: [...FORMAT_ASK.questions, ...VENDORS_ASK.questions] };
   const t = setup({ turn: asking(both, decisions) });
-  await t.send("wechat", "出报告");
+  await t.send("出报告");
   await until("the question", () => t.questions().length === 1);
 
-  await t.send("app", "1", { clientId: "c-free" });
+  await t.send("1", { clientId: "c-free" });
   await until("the call to be allowed", () => decisions.length === 1);
   assert.deepEqual(decisions[0]?.updatedInput?.answers, { [FORMAT_Q]: "1", [VENDORS_Q]: "1" }, "with several questions, even a number is text");
-  const reply = t.messages().find((m) => m.direction === "in" && m.channel === "app");
+  const reply = t.messages().find((m) => m.direction === "in" && m.text === "1");
   assert.equal(reply?.runId, t.taskId());
   await until("the run to finish", () => t.finished());
-  assert.deepEqual(t.app.texts, [], "no acknowledgement either");
+  assert.deepEqual(t.app.texts, ["问完了"], "no acknowledgement either");
 });
 
-test("free text answers a single question too, and a number that is no option is text", async () => {
+test("free text answers a single question too, trimmed, and so does a number", async () => {
   const decisions: (Decision | undefined)[] = [];
   const t = setup({ turn: asking(FORMAT_ASK, decisions) });
-  await t.send("wechat", "出报告");
+  await t.send("出报告");
   await until("the question", () => t.questions().length === 1);
-  await t.send("wechat", "7");
+  await t.send("7");
   await until("the call to be allowed", () => decisions.length === 1);
   assert.deepEqual(decisions[0]?.updatedInput?.answers, { [FORMAT_Q]: "7" });
   await until("the run to finish", () => t.finished());
 
   const again: (Decision | undefined)[] = [];
   const u = setup({ turn: asking(FORMAT_ASK, again) });
-  await u.send("wechat", "出报告");
+  await u.send("出报告");
   await until("the question", () => u.questions().length === 1);
-  await u.send("wechat", "  两个都要，先出表格  ");
+  await u.send("  两个都要，先出表格  ");
   await until("the call to be allowed", () => again.length === 1);
   assert.deepEqual(again[0]?.updatedInput?.answers, { [FORMAT_Q]: "两个都要，先出表格" });
   await until("the run to finish", () => u.finished());
@@ -1154,16 +1012,15 @@ test("free text answers a single question too, and a number that is no option is
 test("a slash command does not answer the question, and neither does a message with no text", async () => {
   const decisions: (Decision | undefined)[] = [];
   const t = setup({ turn: asking(FORMAT_ASK, decisions) });
-  await t.send("wechat", "出报告");
+  await t.send("出报告");
   await until("the question", () => t.questions().length === 1);
-  const asked = t.wechat.texts.length;
 
-  await t.send("wechat", "/status");
-  await t.send("app", "/help", { clientId: "c-help" });
-  await t.send("wechat", "", { files: [{ path: "inbox/2026-10-26/a.jpg", kind: "image" as const }] });
-  assert.match(t.wechat.texts[asked] ?? "", /^模型：/, "/status was answered");
-  assert.match(t.app.texts[0] ?? "", /^Alfred 调研助手/, "/help was answered");
-  assert.match(t.wechat.texts.at(-1) ?? "", /^已保存 inbox\/2026-10-26\/a\.jpg/, "a message with only a file was saved");
+  await t.send("/status");
+  await t.send("/help", { clientId: "c-help" });
+  await t.send("", { files: [{ path: "inbox/2026-10-26/a.jpg", kind: "image" as const }] });
+  assert.match(t.app.texts[0] ?? "", /^模型：/, "/status was answered");
+  assert.match(t.app.texts[1] ?? "", /^Alfred 调研助手/, "/help was answered");
+  assert.match(t.app.texts.at(-1) ?? "", /^已保存 inbox\/2026-10-26\/a\.jpg/, "a message with only a file was saved");
   assert.deepEqual(decisions, [], "still held");
   assert.deepEqual(t.answered(), []);
 
@@ -1175,7 +1032,7 @@ test("question.answer for an unknown question is refused, and a key that is not 
   const decisions: (Decision | undefined)[] = [];
   const t = setup({ turn: asking(FORMAT_ASK, decisions) });
   assert.equal(await t.handler.answerQuestion("q-none", { [FORMAT_Q]: "x" }), false, "nothing is open yet");
-  await t.send("wechat", "出报告");
+  await t.send("出报告");
   await until("the question", () => t.questions().length === 1);
   const id = idOfOpenQuestion(t);
 
@@ -1197,7 +1054,7 @@ test("question.answer for an unknown question is refused, and a key that is not 
 test("an answer by question.answer may leave a question of the ask unanswered", async () => {
   const decisions: (Decision | undefined)[] = [];
   const t = setup({ turn: asking({ questions: [...FORMAT_ASK.questions, ...VENDORS_ASK.questions] }, decisions) });
-  await t.send("app", "出报告", { clientId: "c-part" });
+  await t.send("出报告", { clientId: "c-part" });
   await until("the question", () => t.questions().length === 1);
   await t.handler.answerQuestion(idOfOpenQuestion(t), { [VENDORS_Q]: "Vultr" });
   await until("the run to finish", () => t.finished());
@@ -1207,17 +1064,17 @@ test("an answer by question.answer may leave a question of the ask unanswered", 
 test("/stop cancels an open question: it is recorded as cancelled, the call is denied with the reason, and the run ends stopped", async () => {
   const decisions: (Decision | undefined)[] = [];
   const t = setup({ turn: asking(FORMAT_ASK, decisions) });
-  await t.send("wechat", "出报告");
+  await t.send("出报告");
   await until("the question", () => t.questions().length === 1);
   const asked = t.questions()[0];
 
-  await t.send("wechat", "/stop");
+  await t.send("/stop");
   await until("the call to be denied", () => decisions.length === 1);
   assert.deepEqual(decisions[0], { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "The user stopped the run" });
   assert.deepEqual(t.answered(), [{ id: asked?.id, runId: asked?.runId, answers: {}, cancelled: true }]);
   await until("the run to finish", () => t.finished());
   assert.equal(t.statusOf(t.taskId()), "stopped");
-  assert.ok(t.wechat.texts.includes("已停止当前任务。"));
+  assert.ok(t.app.texts.includes("已停止当前任务。"));
   assert.equal(t.agent.calls.interrupt, 1);
   assert.equal(await t.handler.answerQuestion(asked?.id ?? "", { [FORMAT_Q]: "x" }), false, "a cancelled question cannot be answered");
   assert.equal(t.answered().length, 1);
@@ -1226,10 +1083,10 @@ test("/stop cancels an open question: it is recorded as cancelled, the call is d
 test("run.stop for the run (stopRun) cancels the question the same way", async () => {
   const decisions: (Decision | undefined)[] = [];
   const t = setup({ turn: asking(FORMAT_ASK, decisions) });
-  await t.send("app", "出报告", { clientId: "c-stopq" });
+  await t.send("出报告", { clientId: "c-stopq" });
   await until("the question", () => t.questions().length === 1);
 
-  assert.equal(await t.handler.stopRun(t.taskId(), "app"), true);
+  assert.equal(await t.handler.stopRun(t.taskId()), true);
   await until("the run to finish", () => t.finished());
   assert.equal(decisions[0]?.permissionDecision, "deny");
   assert.equal(decisions[0]?.permissionDecisionReason, "The user stopped the run");
@@ -1247,7 +1104,7 @@ test("an aborted signal on the held call cancels the question", async () => {
       return INTERRUPTED;
     },
   });
-  await t.send("wechat", "出报告");
+  await t.send("出报告");
   await until("the question", () => t.questions().length === 1);
   abort.abort();
   await until("the call to be denied", () => decisions.length === 1);
@@ -1268,17 +1125,17 @@ test("a signal that is already aborted records nothing", async () => {
       return "完";
     },
   });
-  await t.send("wechat", "出报告");
+  await t.send("出报告");
   await until("the run to finish", () => t.finished());
   assert.equal(decisions[0]?.permissionDecision, "deny");
   assert.deepEqual([t.questions(), t.answered()], [[], []]);
-  assert.deepEqual(t.wechat.texts, ["完"]);
+  assert.deepEqual(t.app.texts, ["完"]);
 });
 
 test("shutdown cancels an open question", async () => {
   const decisions: (Decision | undefined)[] = [];
   const t = setup({ turn: asking(FORMAT_ASK, decisions) });
-  await t.send("wechat", "出报告");
+  await t.send("出报告");
   await until("the question", () => t.questions().length === 1);
   const asked = t.questions()[0];
 
@@ -1297,7 +1154,7 @@ test("a run that ends with a question open cancels it", async () => {
       return signal.aborted ? "x" : "完";
     },
   });
-  await t.send("wechat", "出报告");
+  await t.send("出报告");
   await until("the run to finish", () => t.finished());
   assert.deepEqual(t.answered().map((a) => [a.cancelled, a.answers]), [[true, {}]]);
   assert.equal(await t.handler.answerQuestion(idOfOpenQuestion(t), { [FORMAT_Q]: "x" }), false);
@@ -1311,14 +1168,14 @@ test("a subagent's call is denied at once with a message to tell the main agent 
       return "完";
     },
   });
-  await t.send("wechat", "出报告");
+  await t.send("出报告");
   await until("the run to finish", () => t.finished());
 
   assert.equal(decisions[0]?.permissionDecision, "deny");
   assert.match(decisions[0]?.permissionDecisionReason ?? "", /Tell the main agent what you need to know/);
   assert.match(decisions[0]?.permissionDecisionReason ?? "", /it will ask/);
   assert.deepEqual([t.questions(), t.answered()], [[], []]);
-  assert.deepEqual(t.wechat.texts, ["完"]);
+  assert.deepEqual(t.app.texts, ["完"]);
 });
 
 test("input that does not fit the tool is denied and asks nothing", async () => {
@@ -1330,13 +1187,13 @@ test("input that does not fit the tool is denied and asks nothing", async () => 
       return "完";
     },
   });
-  await t.send("wechat", "出报告");
+  await t.send("出报告");
   await until("the run to finish", () => t.finished());
   assert.deepEqual(decisions.map((d) => d?.permissionDecision), ["deny", "deny"]);
   assert.deepEqual([t.questions(), t.answered()], [[], []]);
 });
 
-test("a free-text message answers every open question when the agent asked in parallel", async () => {
+test("a plain message answers every open question when the agent asked in parallel", async () => {
   const decisions: (Decision | undefined)[] = [];
   const t = setup({
     turn: async (_prompt, _signal, turn) => {
@@ -1345,43 +1202,30 @@ test("a free-text message answers every open question when the agent asked in pa
       return "完";
     },
   });
-  await t.send("wechat", "出报告");
+  await t.send("出报告");
   await until("both questions", () => t.questions().length === 2);
 
-  await t.send("wechat", "2");
+  await t.send("2");
   await until("both calls", () => decisions.length === 2);
-  assert.deepEqual(decisions[0]?.updatedInput?.answers, { [FORMAT_Q]: "长文章" }, "a number maps within the ask it answers");
-  assert.deepEqual(decisions[1]?.updatedInput?.answers, { [VENDORS_Q]: "Vultr" });
+  assert.deepEqual(decisions[0]?.updatedInput?.answers, { [FORMAT_Q]: "2" });
+  assert.deepEqual(decisions[1]?.updatedInput?.answers, { [VENDORS_Q]: "2" });
   assert.equal(t.answered().length, 2);
   await until("the run to finish", () => t.finished());
 });
 
-test("no progress note goes to WeChat while a question waits for the owner", async () => {
-  const decisions: (Decision | undefined)[] = [];
-  const t = setup({ turn: asking(FORMAT_ASK, decisions), progressMs: 20 });
-  await t.send("wechat", "出报告");
-  await until("the question", () => t.questions().length === 1);
-  const before = t.wechat.texts.length;
-  await sleep(150);
-  assert.equal(t.wechat.texts.length, before, "no 仍在处理 note");
-  await t.handler.answerQuestion(idOfOpenQuestion(t), { [FORMAT_Q]: "短表格" });
-  await until("the run to finish", () => t.finished());
-});
-
-test("the question is recorded before its text is sent, so the owner's quick reply finds it open", async () => {
+test("a question is open as soon as it is recorded, so the owner's quick reply finds it", async () => {
   const decisions: (Decision | undefined)[] = [];
   const t = setup({ turn: asking(VENDORS_ASK, decisions) });
   const order: string[] = [];
   t.events.subscribe((event) => {
     if (!isLiveEvent(event)) order.push(event.type === "message.created" ? `message:${event.data.direction}` : event.type);
   });
-  await t.send("wechat", "对比供应商");
+  await t.send("对比供应商");
   await until("the question", () => t.questions().length === 1);
-  await until("its text", () => t.wechat.texts.length === 1);
-  await t.send("wechat", "2");
+  await t.send("2");
   await until("the run to finish", () => t.finished());
   assert.deepEqual(
     order.filter((o) => o.startsWith("question") || o.startsWith("message")),
-    ["message:in", "question.asked", "message:out", "message:in", "question.answered", "message:out"],
+    ["message:in", "question.asked", "message:in", "question.answered", "message:out"],
   );
 });
