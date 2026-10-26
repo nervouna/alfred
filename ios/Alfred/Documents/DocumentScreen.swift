@@ -131,6 +131,11 @@ struct DocumentScreen: View {
         return model.annotationDrafts.list.batch(documentId: documentId, in: anchorText)
     }
 
+    /// What went wrong with the last thing the owner did, or that the drafts cannot be kept on the phone.
+    private var shownNotice: String? {
+        notice ?? (model.annotationDrafts.saveFailed ? "草稿没能存到手机上，退出应用后会丢失" : nil)
+    }
+
     private var revisionBanner: AnnotationPresentation.RevisionBanner? {
         AnnotationPresentation.revisionBanner(runs: RunPresentation.merged(loaded: detail?.runs ?? [], timeline: model.timeline), documentId: documentId)
     }
@@ -195,11 +200,11 @@ struct DocumentScreen: View {
             }
             content
                 .environment(\.passageAnnotating, passageAnnotating)
-            if let notice {
+            if let shownNotice {
                 Button {
-                    self.notice = nil
+                    notice = nil
                 } label: {
-                    Label(notice, systemImage: "exclamationmark.triangle")
+                    Label(shownNotice, systemImage: "exclamationmark.triangle")
                         .font(.footnote)
                         .foregroundStyle(.red)
                         .multilineTextAlignment(.leading)
