@@ -7,8 +7,8 @@
 // it wants a bearer token of a paired, unrevoked device (devices.ts). On the
 // tunnel the Access JWT comes first, and may be the owner's or the app's
 // service token's; the pages accept the owner's only. Its commands, event stream
-// and uploads are forwarded to Alfred's command socket (forward.ts); its runs and
-// workspace files are read here.
+// and uploads are forwarded to Alfred's command socket (forward.ts); its runs,
+// tasks and workspace files are read here.
 
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -18,11 +18,11 @@ import path from "node:path";
 import { resolveInside } from "../agent/guard.ts";
 import { loadMemories } from "../agent/memory.ts";
 import { PushRegistrationSchema, RunSchema, StepSchema } from "../api/schema.ts";
-import type { Run, RunDetail } from "../api/schema.ts";
+import type { Run, RunDetail, TaskDetail } from "../api/schema.ts";
 import { apiSocketPath } from "../api/server.ts";
 import { describeError, log } from "../log.ts";
 import type { AccessVerifier } from "./access.ts";
-import { allRuns, alfredStatus, listSessions, readTranscript, runDetail, spendByDay, tailLog } from "./data.ts";
+import { allRuns, alfredStatus, listSessions, readTaskList, readTranscript, runDetail, spendByDay, tailLog } from "./data.ts";
 import { DeviceStore } from "./devices.ts";
 import { forwardCommand, forwardEvents, forwardUpload, jsonError, jsonReply, readBody } from "./forward.ts";
 import { html, trusted } from "./html.ts";
@@ -217,9 +217,14 @@ export interface HandlerOptions {
 const API_PREFIX = "/api/";
 const BEARER = /^Bearer ([A-Za-z0-9_-]{1,256})$/i;
 const RUN_PATH = /^\/api\/runs\/([2-9a-hjkmnp-z]{6})$/;
+const TASK_PREFIX = "/api/tasks/";
+/** A task id has the run id's alphabet and length. */
+const TASK_ID = /^[2-9a-hjkmnp-z]{6}$/;
 const FILE_PATH = "/api/files/";
 /** How many runs GET /api/runs lists, newest first. */
 const LISTED_RUNS = 100;
+/** How many of a task's runs GET /api/tasks/<id> lists, newest first. */
+const LISTED_TASK_RUNS = 50;
 /** The largest POST /api/push body: a registration is a token and an environment. */
 const MAX_PUSH_BYTES = 4096;
 /** On close, how long a request in flight gets to finish before its connection is cut. */
@@ -331,6 +336,34 @@ function runDetailReply(id: string): Response {
   return jsonReply(200, body);
 }
 
+/** GET /api/tasks: the task list the store wrote, as TaskList. A file that does not fit fails the request, and is logged. */
+function taskListReply(): Response {
+  return jsonReply(200, readTaskList());
+}
+
+/**
+ * GET /api/tasks/<id>: the task and its runs, newest first, at most 50. A malformed or unknown id is 404; runs whose
+ * record does not fit the client's schema are left out and logged, as GET /api/runs leaves them out.
+ */
+function taskDetailReply(id: string): Response {
+  const notFound = () => jsonError(404, "There is no such task.");
+  if (!TASK_ID.test(id)) return notFound();
+  const task = readTaskList().tasks.find((t) => t.id === id);
+  if (!task) return notFound();
+  const runs: Run[] = [];
+  let left = 0;
+  for (const record of allRuns()) {
+    if (record.taskId !== id) continue;
+    if (runs.length === LISTED_TASK_RUNS) break;
+    const parsed = RunSchema.safeParse(record);
+    if (parsed.success) runs.push(parsed.data);
+    else left++;
+  }
+  if (left) log.warn(`workbench left out ${left} run record(s) of task ${id} that do not fit the client's schema`);
+  const body: TaskDetail = { task, runs };
+  return jsonReply(200, body);
+}
+
 /**
  * POST /api/push: the device's APNs registration, replacing its earlier one; 204. A body that is not a
  * PushRegistration is 400 with the first problem found; a device revoked meanwhile is 401.
@@ -415,6 +448,8 @@ async function apiRoute(req: http.IncomingMessage, url: URL, ctx: ApiContext): P
   if (p === "/api/uploads") return only("POST", () => forwardUpload(req, url.searchParams.get("name"), ctx.alfred, ctx.gone));
   if (p === "/api/events") return only("GET", () => forwardEvents(req, url, ctx.alfred, ctx.gone));
   if (p === "/api/runs") return only("GET", () => runList());
+  if (p === "/api/tasks") return only("GET", () => taskListReply());
+  if (p.startsWith(TASK_PREFIX)) return only("GET", () => taskDetailReply(p.slice(TASK_PREFIX.length)));
   if (p === "/api/push") return only("POST", () => pushRegistrationReply(req, device.id, ctx.devices));
   const run = RUN_PATH.exec(p)?.[1];
   if (run) return only("GET", () => runDetailReply(run));

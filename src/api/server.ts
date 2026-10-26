@@ -1,6 +1,6 @@
 // The command API: the owner's commands in, Alfred's events out, over a Unix
 // socket (no TCP listener). A process on the same host posts message.send,
-// run.stop and question.answer to /commands, uploads files to /uploads (into the
+// run.stop, question.answer and the task commands to /commands, uploads files to /uploads (into the
 // workspace's inbox, for a message to name) and follows /events as server-sent
 // events, resuming by event id. Every command is validated here by parseCommand.
 // Live events (reply text as it is written, the steps of a run) go out as frames
@@ -19,7 +19,7 @@ import { localDate, localTime, sanitizeFileName, uniquePath } from "../files.ts"
 import { describeError, log } from "../log.ts";
 import { STATE_DIR, WORKSPACE_DIR } from "../store.ts";
 import { MAX_COMMAND_BYTES, MAX_UPLOAD_BYTES, parseCommand } from "./schema.ts";
-import type { Event, LiveEvent, UploadResult } from "./schema.ts";
+import type { Event, LiveEvent, Task, TaskCreate, TaskUpdate, UploadResult } from "./schema.ts";
 
 /** How often an event stream gets a `: ping` comment. */
 export const HEARTBEAT_MS = 30_000;
@@ -39,12 +39,24 @@ const VIDEO_EXTS = new Set([".mp4", ".mov"]);
 /** The part of the event log the API reads. */
 export type ApiEvents = Pick<EventLog, "lastId" | "readSince" | "subscribe">;
 
+/** A task command's answer: the task as the store now holds it, or the status and the reason it was refused. */
+export type TaskReply = { ok: true; task: Task } | { ok: false; status: 400 | 404; error: string };
+
+export interface TaskCommands {
+  create(command: TaskCreate): TaskReply | Promise<TaskReply>;
+  update(command: TaskUpdate): TaskReply | Promise<TaskReply>;
+  /** Starts a run of the task now, or queues it; false when there is no such task. */
+  run(taskId: string): boolean | Promise<boolean>;
+}
+
 export interface ApiOptions {
   /** Path of the Unix socket. */
   socket: string;
   /** Where commands go: the agent handler's intake. */
   handler: Intake;
   events: ApiEvents;
+  /** Where task commands go, once the task store is wired in; without it every task command answers 503. */
+  tasks?: TaskCommands;
   /** Interval between pings on an event stream; 30 s by default. */
   heartbeatMs?: number;
   /** Events read per page of a stream's backlog. */
@@ -184,7 +196,7 @@ function receiveUpload(req: http.IncomingMessage, file: string): Promise<number 
 
 /** Start the API; resolves to a function that closes it. */
 export async function startApi(opts: ApiOptions): Promise<() => Promise<void>> {
-  const { socket, handler, events } = opts;
+  const { socket, handler, events, tasks } = opts;
   const heartbeatMs = opts.heartbeatMs ?? HEARTBEAT_MS;
   const pageSize = opts.pageSize ?? BACKLOG_PAGE;
 
@@ -232,9 +244,16 @@ export async function startApi(opts: ApiOptions): Promise<() => Promise<void>> {
       }
       return sendJson(res, 404, { error: `no open question ${command.questionId}` });
     }
-    // Tasks have no store yet: until one is wired in, a task command is refused here and never reaches the message path.
-    if (command.type === "task.create" || command.type === "task.update" || command.type === "task.run") {
-      return sendJson(res, 503, { error: "tasks are not available" });
+    // A task command never reaches the message path. Without a task store (none is wired in yet) it is refused with 503.
+    if (command.type === "task.run" || command.type === "task.create" || command.type === "task.update") {
+      if (!tasks) return sendJson(res, 503, { error: "tasks are not available" });
+      if (command.type === "task.run") {
+        if (await tasks.run(command.taskId)) return sendJson(res, 202, { accepted: true });
+        return sendJson(res, 404, { error: `no task ${command.taskId}` });
+      }
+      const reply = command.type === "task.create" ? await tasks.create(command) : await tasks.update(command);
+      if (!reply.ok) return sendJson(res, reply.status, { error: reply.error });
+      return sendJson(res, command.type === "task.create" ? 201 : 200, { task: reply.task });
     }
     // A message's files are checked before anything is submitted: one that is not in the inbox refuses the message.
     const files = command.files ?? [];
