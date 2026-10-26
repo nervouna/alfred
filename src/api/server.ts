@@ -50,7 +50,7 @@ export interface TaskCommands {
 }
 
 /** A document command's answer: the body to send, or the status and the reason it was refused. */
-export type DocumentReply<T> = { ok: true; body: T } | { ok: false; status: 400 | 404 | 409; error: string };
+export type DocumentReply<T> = { ok: true; body: T } | { ok: false; status: 400 | 404 | 409 | 500; error: string };
 
 export interface DocumentCommands {
   /** Starts a revision run that takes the batch, or refuses it. */

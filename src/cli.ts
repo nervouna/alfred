@@ -89,7 +89,7 @@ async function cmdRun(args: string[]): Promise<void> {
       handler: agent,
       events: sharedEventLog(),
       tasks: taskCommands(tasks, agent),
-      ...(documents ? { documents: documentCommands(agent) } : {}),
+      ...(documents ? { documents: documentCommands(agent, documents) } : {}),
     });
   } catch (err) {
     await agent.shutdown();
