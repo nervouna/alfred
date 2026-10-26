@@ -1,7 +1,7 @@
 // A local Alfred for the app in the simulator: the real agent handler on the app channel, behind the
 // command API on <ALFRED_STATE_DIR>/api/alfred.sock, and the workbench on 127.0.0.1 with one paired
 // device. It opens the workspace's history and the document store as `run` does, so deliveries become documents and the
-// app's revisions run. It prints the pairing to paste into the app, then every event as it happens: [event] for
+// app's revisions and undos run. It prints the pairing to paste into the app, then every event as it happens: [event] for
 // stored ones, [live] for message deltas and steps. Ctrl-C or SIGTERM stops everything; it exits 0.
 // usage: node scripts/app-dev.ts [--port <port>] [--model <sonnet|opus|haiku>] [--repair] [--seed-documents]
 //   --port            the workbench's loopback port (default 8787)
@@ -271,7 +271,7 @@ async function main(options: Options): Promise<void> {
         handler,
         events: sharedEventLog(),
         tasks: taskCommands(tasks, handler),
-        ...(documents ? { documents: documentCommands(handler) } : {}),
+        ...(documents ? { documents: documentCommands(handler, documents) } : {}),
       }),
     );
     cleanups.push(
