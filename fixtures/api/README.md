@@ -2,14 +2,14 @@
 
 JSON examples of the client API defined in `src/api/schema.ts`. Alfred's tests (`src/api/schema.test.ts`) and the iOS client's Swift package tests (`ios/AlfredKit`) both read these files.
 
-- `events/`: events Alfred stores and emits, one file per shape the client decodes, `question.asked` and `question.answered` (answered and cancelled) and `task.updated` among them. Each file is a whole `Event`.
+- `events/`: events Alfred stores and emits, one file per shape the client decodes, `question.asked` and `question.answered` (answered and cancelled), `task.updated`, `document.updated` and `annotation.updated` among them. Each file is a whole `Event`.
 - `live/`: live events, streamed as they happen and never stored. Each file is a whole `LiveEvent`.
-- `commands/`: one valid command per command shape, including a `message.send` with files, a `question.answer` and the three task commands.
-- `responses/`: bodies of the app API: `UploadResult`, `RunList`, `RunDetail`, `TaskResult`, `TaskList`, `TaskDetail` and `ErrorResponse`. Each file is named after the schema it parses with.
+- `commands/`: one valid command per command shape, including a `message.send` with files, a `question.answer`, the three task commands and the two document commands.
+- `responses/`: bodies of the app API: `UploadResult`, `RunList`, `RunDetail`, `TaskResult`, `TaskList`, `TaskDetail`, `DocumentResult`, `DocumentList`, `DocumentDetail`, `RevisionAccepted` and `ErrorResponse`. Each file is named after the schema it parses with.
 - `requests/`: bodies the client sends outside the command API: `PushRegistration`.
 - `pairing/`: the payload of the pairing QR code, a `Pairing`. Its values are made up.
 - `invalid-commands/`: commands that `parseCommand` must reject.
-- `invalid/`: off-schema files that the schema their name starts with must reject. Each is named `<schema>-<case>.json`, where `<schema>` is `pairing`, `push-registration`, `upload-result`, `run-list`, `run-detail`, `task-result`, `task-list`, `task-detail` or `error`.
+- `invalid/`: off-schema files that the schema their name starts with must reject. Each is named `<schema>-<case>.json`, where `<schema>` is `pairing`, `push-registration`, `upload-result`, `run-list`, `run-detail`, `task-result`, `task-list`, `task-detail`, `document-result`, `document-list`, `document-detail`, `revision-accepted` or `error`.
 - `future/`: events a newer Alfred might send: one with an unknown `type`, one known event with an extra field, and one live event with an unknown `type`.
 
 Every file is pretty-printed JSON with a 2-space indent and a trailing newline. The files in `events/`, `live/`, `commands/`, `responses/`, `requests/` and `pairing/` contain only fields the schema defines, in the schema's key order; `invalid-commands/`, `invalid/` and `future/` are off-schema on purpose.
@@ -38,6 +38,22 @@ A task is a brief the agent runs on a schedule. Alfred emits `task.updated` with
 - `nextRunAt` is present only while the task is `active`.
 - `skips` are the runs a task missed (`missed`) or skipped because the day's spend cap was reached (`daily-cap`), newest first.
 - `task.create` leaves the model and budget to Alfred's defaults when the command omits them. `task.update` changes at least one field besides `taskId`, and `task.run` runs the task now without moving its next scheduled time.
+
+## Documents
+
+A document is a file Alfred delivered, known by its workspace path. Delivering the same path again adds a version. `document.updated` carries the whole document on every change: a new version, a move or a new title.
+
+- `kind` is `markdown`, `text`, `html`, `pdf`, `image` or `other`. `taskId` is set when a task's run delivered the document.
+- A version is a commit of the workspace, named by its 40-character lowercase hex id. Its `reason` is `delivered` (a delivery), `revised` (the end of a revision run), `undone` (an undo) or `changed` (the end of another run that changed the file). A version of any reason but `undone` may name its `runId`. An `undone` version names the revision it undid in `undoes` and has no `runId`.
+- An annotation is the owner's comment on a passage, anchored by `quote` and the text on each side of it (`prefix`, `suffix`, as W3C TextQuoteSelector), or on the whole document (`{ "kind": "document" }`). Its `version` is the version it was written on. Its `state` is `submitted` (its revision run has not answered it yet), `resolved` (answered, with its `reply`) or `returned` (back with the owner, with a `returnReason` of `unanswered`, `undone`, `stopped` or `failed`). A returned annotation that was answered before an undo keeps its `reply`.
+- `annotation.updated` carries the whole annotation: one per annotation of a submitted batch, and again on every change of state or reply.
+- `document.revise` submits a batch of 1 to 50 annotations against the version the owner annotated. Alfred answers 202 with a `RevisionAccepted`: the revision run and the batch, each annotation `submitted` to that run. `document.undo` names the revision run to undo and is answered 200 with a `DocumentResult`.
+- `GET /api/documents` is a `DocumentList`, newest updated first. `GET /api/documents/<id>` is a `DocumentDetail`: the document, its versions (newest first, the first being the current one), its annotations and its revision runs. Revision runs carry `documentId`.
+- The errors of the document commands are `ErrorResponse`: 404 for an unknown document or run, and 409 for a revise against a version that is not the current one, a second revision while one is queued or running, and an undo that is not allowed.
+- `GET /api/files/<path>?version=<commit>` is the file's bytes at that version. Without `version` it is the live file.
+- A file a delivery registered carries the `documentId` and the `version` it delivered: both or neither.
+
+The `commands/` document fixtures target the story of `document-detail.json`: the owner annotates `reports/vps.md` at its current version, and the run `s2d8kp` answers the batch.
 
 ## Compatibility rules
 

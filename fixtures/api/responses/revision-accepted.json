@@ -1,0 +1,50 @@
+{
+  "runId": "s2d8kp",
+  "annotations": [
+    {
+      "id": "g7e4xr",
+      "documentId": "r4f7ma",
+      "version": "5d726c9ddcb2d6a8fad41e6213426bdeb94c6acd",
+      "target": {
+        "kind": "passage",
+        "quote": "Hetzner 的 CX22 仍是 €4.51/月",
+        "prefix": "对比结论：",
+        "suffix": "，其余两家都上涨了。"
+      },
+      "comment": "这个价格请再核对一下官网，别用缓存的数据。",
+      "state": "submitted",
+      "runId": "s2d8kp",
+      "createdAt": "2026-10-27T01:00:00.000Z",
+      "updatedAt": "2026-10-27T01:00:00.000Z"
+    },
+    {
+      "id": "k6p3dh",
+      "documentId": "r4f7ma",
+      "version": "5d726c9ddcb2d6a8fad41e6213426bdeb94c6acd",
+      "target": {
+        "kind": "passage",
+        "quote": "DigitalOcean 的基础款降到 $4",
+        "prefix": "",
+        "suffix": "/月。"
+      },
+      "comment": "这一条的日期也写上。",
+      "state": "submitted",
+      "runId": "s2d8kp",
+      "createdAt": "2026-10-27T01:00:00.000Z",
+      "updatedAt": "2026-10-27T01:00:00.000Z"
+    },
+    {
+      "id": "t4r7ww",
+      "documentId": "r4f7ma",
+      "version": "5d726c9ddcb2d6a8fad41e6213426bdeb94c6acd",
+      "target": {
+        "kind": "document"
+      },
+      "comment": "开头加一段三句话的结论。",
+      "state": "submitted",
+      "runId": "s2d8kp",
+      "createdAt": "2026-10-27T01:00:00.000Z",
+      "updatedAt": "2026-10-27T01:00:00.000Z"
+    }
+  ]
+}

@@ -28,6 +28,17 @@ export const MAX_TASK_SKIPS = 10;
 export const DEFAULT_TASK_BUDGET_USD = 2;
 /** A new task's model, when its command gives none. */
 export const DEFAULT_TASK_MODEL = "sonnet";
+/** The most characters a document's title holds. */
+export const MAX_DOCUMENT_TITLE_CHARS = 200;
+/** The most characters an annotation's comment holds. */
+export const MAX_ANNOTATION_COMMENT_CHARS = 2000;
+/** The most characters an annotation's quoted passage holds. */
+export const MAX_ANNOTATION_QUOTE_CHARS = 2000;
+/** The most characters of text on each side of a quoted passage that anchor it. */
+export const MAX_ANNOTATION_CONTEXT_CHARS = 200;
+/** The most annotations one revision run takes. */
+export const MAX_ANNOTATIONS_PER_REVISION = 50;
+const MAX_ANNOTATION_REPLY_CHARS = 4000;
 const MAX_TEXT_CHARS = 20_000;
 const MAX_ANSWER_CHARS = 2000;
 
@@ -38,6 +49,11 @@ const RunIdSchema = z.string().regex(/^[2-9a-hjkmnp-z]{6}$/, "must be a six-char
 const TaskIdSchema = z.string().regex(/^[2-9a-hjkmnp-z]{6}$/, "must be a six-character task id");
 const ClientIdSchema = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "must be 1-64 letters, digits, _ or -");
 const QuestionIdSchema = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "must be 1-64 letters, digits, _ or -");
+// A document id and an annotation id have the run id's alphabet and length.
+const DocumentIdSchema = z.string().regex(/^[2-9a-hjkmnp-z]{6}$/, "must be a six-character document id");
+const AnnotationIdSchema = z.string().regex(/^[2-9a-hjkmnp-z]{6}$/, "must be a six-character annotation id");
+// A version is the full id of a commit in the workspace's history.
+const VersionSchema = z.string().regex(/^[0-9a-f]{40}$/, "must be a 40-character commit id");
 
 // "app" is the only channel Alfred uses now. The other is a retired one: its messages stay in the event log, so clients still read it.
 export const ChannelSchema = z.enum(["app", "wechat"]);
@@ -51,10 +67,18 @@ const WorkspacePathSchema = z
   .refine((path) => !path.startsWith("/"), "must not start with /")
   .refine((path) => !path.split("/").includes(".."), "must not contain a .. segment");
 
-export const FileRefSchema = z.object({
-  path: WorkspacePathSchema,
-  kind: FileKindSchema.optional(),
-});
+// A file a delivery registered names its document and the version it delivered: both or neither.
+export const FileRefSchema = z
+  .object({
+    path: WorkspacePathSchema,
+    kind: FileKindSchema.optional(),
+    documentId: DocumentIdSchema.optional(),
+    version: VersionSchema.optional(),
+  })
+  .refine((file) => (file.documentId === undefined) === (file.version === undefined), {
+    path: ["documentId"],
+    message: "must be set together with version, or not at all",
+  });
 
 // A file in the inbox, where inbound media and app uploads are saved.
 const InboxPathSchema = WorkspacePathSchema.refine((path) => path.startsWith("inbox/"), "must start with inbox/");
@@ -74,7 +98,7 @@ export const MessageSchema = z
   })
   .refine((message) => message.text !== "" || message.files.length > 0, "text or files must not both be empty");
 
-export const RunKindSchema = z.enum(["task", "scan", "subagent"]);
+export const RunKindSchema = z.enum(["task", "scan", "subagent", "revision"]);
 export const RunStatusSchema = z.enum(["queued", "running", "done", "stopped", "failed", "lost"]);
 
 // Compile-time check that the enums above are exactly RunKind and RunStatus in src/runs.ts.
@@ -92,6 +116,7 @@ export const RunSchema = z.object({
   id: RunIdSchema,
   kind: RunKindSchema,
   taskId: TaskIdSchema.optional(),
+  documentId: DocumentIdSchema.optional(),
   parentRunId: RunIdSchema.optional(),
   title: z.string(),
   status: RunStatusSchema,
@@ -233,6 +258,120 @@ export const TaskSchema = z
     message: "must be absent unless the task is active",
   });
 
+const DocumentTitleSchema = z
+  .string()
+  .refine((title) => title.trim() !== "", "must not be blank")
+  .refine((title) => [...title].length <= MAX_DOCUMENT_TITLE_CHARS, `must be at most ${MAX_DOCUMENT_TITLE_CHARS} characters`);
+
+/** What a document is, by its file. Which kinds take passage annotations is Alfred's check, not the schema's. */
+export const DocumentKindSchema = z.enum(["markdown", "text", "html", "pdf", "image", "other"]);
+
+/**
+ * One version of a document: a commit of the workspace. An undone version names the revision it undid and has no run;
+ * every other version may name the run that made it.
+ */
+export const DocumentVersionSchema = z
+  .object({
+    version: VersionSchema,
+    at: IsoTimestampSchema,
+    reason: z.enum(["delivered", "revised", "undone", "changed"]),
+    runId: RunIdSchema.optional(),
+    undoes: RunIdSchema.optional(),
+  })
+  .refine((version) => (version.reason === "undone") === (version.undoes !== undefined), {
+    path: ["undoes"],
+    message: "must be set exactly when the reason is undone",
+  })
+  .refine((version) => version.reason !== "undone" || version.runId === undefined, {
+    path: ["runId"],
+    message: "must be absent on an undone version",
+  });
+
+/** A file Alfred delivered, known by its workspace path. `version` is the document's current version. */
+export const DocumentSchema = z.object({
+  id: DocumentIdSchema,
+  path: WorkspacePathSchema,
+  title: DocumentTitleSchema,
+  kind: DocumentKindSchema,
+  taskId: TaskIdSchema.optional(),
+  version: VersionSchema,
+  createdAt: IsoTimestampSchema,
+  updatedAt: IsoTimestampSchema,
+});
+
+const AnnotationQuoteSchema = z
+  .string()
+  .refine((quote) => quote.trim() !== "", "must not be blank")
+  .refine((quote) => [...quote].length <= MAX_ANNOTATION_QUOTE_CHARS, `must be at most ${MAX_ANNOTATION_QUOTE_CHARS} characters`);
+
+const AnnotationContextSchema = z
+  .string()
+  .refine((text) => [...text].length <= MAX_ANNOTATION_CONTEXT_CHARS, `must be at most ${MAX_ANNOTATION_CONTEXT_CHARS} characters`);
+
+const AnnotationCommentSchema = z
+  .string()
+  .refine((comment) => comment.trim() !== "", "must not be blank")
+  .refine((comment) => [...comment].length <= MAX_ANNOTATION_COMMENT_CHARS, `must be at most ${MAX_ANNOTATION_COMMENT_CHARS} characters`);
+
+const AnnotationReplySchema = z
+  .string()
+  .min(1, "must not be empty")
+  .refine((reply) => [...reply].length <= MAX_ANNOTATION_REPLY_CHARS, `must be at most ${MAX_ANNOTATION_REPLY_CHARS} characters`);
+
+// The shapes of an annotation's target. A passage is anchored by its quote and the text on each side of it (W3C
+// TextQuoteSelector's exact, prefix and suffix). A command's target is strict; a target in an event ignores unknown keys.
+const PASSAGE_TARGET_SHAPE = {
+  kind: z.literal("passage"),
+  quote: AnnotationQuoteSchema,
+  prefix: AnnotationContextSchema,
+  suffix: AnnotationContextSchema,
+};
+const DOCUMENT_TARGET_SHAPE = { kind: z.literal("document") };
+
+/** What an annotation is on: a passage of the text, or the whole document. */
+export const AnnotationTargetSchema = z.discriminatedUnion("kind", [z.object(PASSAGE_TARGET_SHAPE), z.object(DOCUMENT_TARGET_SHAPE)]);
+const AnnotationTargetCommandSchema = z.discriminatedUnion("kind", [
+  z.strictObject(PASSAGE_TARGET_SHAPE),
+  z.strictObject(DOCUMENT_TARGET_SHAPE),
+]);
+
+/**
+ * An annotation: the owner's comment on a passage or on the whole document, and how its revision run stands with it.
+ * A resolved one has the reply that answered it; a returned one has the reason it went back to the owner.
+ */
+export const AnnotationSchema = z
+  .object({
+    id: AnnotationIdSchema,
+    documentId: DocumentIdSchema,
+    version: VersionSchema,
+    target: AnnotationTargetSchema,
+    comment: AnnotationCommentSchema,
+    state: z.enum(["submitted", "resolved", "returned"]),
+    runId: RunIdSchema,
+    reply: AnnotationReplySchema.optional(),
+    returnReason: z.enum(["unanswered", "undone", "stopped", "failed"]).optional(),
+    createdAt: IsoTimestampSchema,
+    updatedAt: IsoTimestampSchema,
+  })
+  .refine((annotation) => annotation.state !== "resolved" || annotation.reply !== undefined, {
+    path: ["reply"],
+    message: "must be set when the annotation is resolved",
+  })
+  .refine((annotation) => annotation.state !== "submitted" || annotation.reply === undefined, {
+    path: ["reply"],
+    message: "must be absent until the annotation is answered",
+  })
+  .refine((annotation) => (annotation.state === "returned") === (annotation.returnReason !== undefined), {
+    path: ["returnReason"],
+    message: "must be set exactly when the annotation is returned",
+  });
+
+/** One annotation in a document.revise command: its target and the owner's comment. */
+const AnnotationDraftSchema = z.strictObject({
+  target: AnnotationTargetCommandSchema,
+  comment: AnnotationCommentSchema,
+});
+
 const EventEnvelope = { id: z.int().positive(), at: IsoTimestampSchema };
 
 export const EventSchema = z.discriminatedUnion("type", [
@@ -241,6 +380,8 @@ export const EventSchema = z.discriminatedUnion("type", [
   z.object({ ...EventEnvelope, type: z.literal("question.asked"), data: QuestionAskedSchema }),
   z.object({ ...EventEnvelope, type: z.literal("question.answered"), data: QuestionAnsweredSchema }),
   z.object({ ...EventEnvelope, type: z.literal("task.updated"), data: TaskSchema }),
+  z.object({ ...EventEnvelope, type: z.literal("document.updated"), data: DocumentSchema }),
+  z.object({ ...EventEnvelope, type: z.literal("annotation.updated"), data: AnnotationSchema }),
 ]);
 
 const StreamIdSchema = z.string().regex(/^[A-Za-z0-9_.:-]{1,64}$/, "must be 1-64 letters, digits, _, ., : or -");
@@ -288,9 +429,56 @@ export const TaskDetailSchema = z
     message: "must all belong to the task",
   });
 
+/** The body of a successful document.undo: the document as Alfred now holds it. */
+export const DocumentResultSchema = z.object({ document: DocumentSchema });
+
+/** The body of GET /api/documents: the documents, newest updated first. */
+export const DocumentListSchema = z.object({ documents: z.array(DocumentSchema) });
+
+/**
+ * The body of GET /api/documents/<id>: a document, its versions (newest first, the first being the current one), its
+ * annotations and its revision runs (newest first). Each annotation and each run is one of the document's own.
+ */
+export const DocumentDetailSchema = z
+  .object({
+    document: DocumentSchema,
+    versions: z.array(DocumentVersionSchema).min(1, "must have at least 1 version"),
+    annotations: z.array(AnnotationSchema),
+    runs: z.array(RunSchema),
+  })
+  .refine((detail) => detail.versions[0]?.version === detail.document.version, {
+    path: ["versions"],
+    message: "must start with the document's current version",
+  })
+  .refine((detail) => detail.annotations.every((annotation) => annotation.documentId === detail.document.id), {
+    path: ["annotations"],
+    message: "must all belong to the document",
+  })
+  .refine((detail) => detail.runs.every((run) => run.documentId === detail.document.id), {
+    path: ["runs"],
+    message: "must all belong to the document",
+  });
+
+/**
+ * The body of a successful document.revise: the revision run and the batch as Alfred recorded it, each annotation
+ * submitted to that run.
+ */
+export const RevisionAcceptedSchema = z
+  .object({
+    runId: RunIdSchema,
+    annotations: z
+      .array(AnnotationSchema)
+      .min(1, "must have at least 1 annotation")
+      .max(MAX_ANNOTATIONS_PER_REVISION, `must have at most ${MAX_ANNOTATIONS_PER_REVISION} annotations`),
+  })
+  .refine((accepted) => accepted.annotations.every((annotation) => annotation.state === "submitted" && annotation.runId === accepted.runId), {
+    path: ["annotations"],
+    message: "must all be submitted to the revision run",
+  });
+
 /** The body of POST /api/uploads: the file Alfred saved under inbox/. */
 export const UploadResultSchema = z.object({
-  file: FileRefSchema.extend({ path: InboxPathSchema, kind: FileKindSchema }),
+  file: FileRefSchema.safeExtend({ path: InboxPathSchema, kind: FileKindSchema }),
 });
 
 /** The body of any error response. */
@@ -331,7 +519,8 @@ export const PushRegistrationSchema = z.strictObject({
   environment: z.enum(["development", "production"]),
 });
 
-const CommandFileSchema = FileRefSchema.extend({ path: InboxPathSchema });
+// A file the owner attaches names no document: a delivery registers those, so a command's file has no documentId or version.
+const CommandFileSchema = z.object({ path: InboxPathSchema, kind: FileKindSchema.optional() });
 
 const CommandFilesSchema = z
   .array(CommandFileSchema)
@@ -404,6 +593,24 @@ export const TaskRunSchema = z.strictObject({
   taskId: TaskIdSchema,
 });
 
+/** Revises a document in place: a revision run takes the batch. `version` is the version the owner annotated. */
+export const DocumentReviseSchema = z.strictObject({
+  type: z.literal("document.revise"),
+  documentId: DocumentIdSchema,
+  version: VersionSchema,
+  annotations: z
+    .array(AnnotationDraftSchema)
+    .min(1, "must have at least 1 annotation")
+    .max(MAX_ANNOTATIONS_PER_REVISION, `must have at most ${MAX_ANNOTATIONS_PER_REVISION} annotations`),
+});
+
+/** Undoes the latest revision of a document, named by the revision run that made it. */
+export const DocumentUndoSchema = z.strictObject({
+  type: z.literal("document.undo"),
+  documentId: DocumentIdSchema,
+  runId: RunIdSchema,
+});
+
 export const CommandSchema = z.discriminatedUnion("type", [
   MessageSendSchema,
   RunStopSchema,
@@ -411,6 +618,8 @@ export const CommandSchema = z.discriminatedUnion("type", [
   TaskCreateSchema,
   TaskUpdateSchema,
   TaskRunSchema,
+  DocumentReviseSchema,
+  DocumentUndoSchema,
 ]);
 
 export type Channel = z.infer<typeof ChannelSchema>;
@@ -433,6 +642,16 @@ export type TaskList = z.infer<typeof TaskListSchema>;
 export type TaskDetail = z.infer<typeof TaskDetailSchema>;
 export type TaskCreate = z.infer<typeof TaskCreateSchema>;
 export type TaskUpdate = z.infer<typeof TaskUpdateSchema>;
+export type Document = z.infer<typeof DocumentSchema>;
+export type DocumentVersion = z.infer<typeof DocumentVersionSchema>;
+export type Annotation = z.infer<typeof AnnotationSchema>;
+export type AnnotationTarget = z.infer<typeof AnnotationTargetSchema>;
+export type DocumentResult = z.infer<typeof DocumentResultSchema>;
+export type DocumentList = z.infer<typeof DocumentListSchema>;
+export type DocumentDetail = z.infer<typeof DocumentDetailSchema>;
+export type RevisionAccepted = z.infer<typeof RevisionAcceptedSchema>;
+export type DocumentRevise = z.infer<typeof DocumentReviseSchema>;
+export type DocumentUndo = z.infer<typeof DocumentUndoSchema>;
 export type ErrorResponse = z.infer<typeof ErrorResponseSchema>;
 export type Pairing = z.infer<typeof PairingSchema>;
 export type PushRegistration = z.infer<typeof PushRegistrationSchema>;

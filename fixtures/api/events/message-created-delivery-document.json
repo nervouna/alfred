@@ -1,0 +1,20 @@
+{
+  "id": 23,
+  "at": "2026-10-25T08:34:42.012Z",
+  "type": "message.created",
+  "data": {
+    "id": "m1013",
+    "channel": "app",
+    "direction": "out",
+    "text": "VPS 价格对比写好了，见附件。",
+    "files": [
+      {
+        "path": "reports/vps.md",
+        "documentId": "r4f7ma",
+        "version": "248e89ba3aad47311d9cf0d57bf83b038a724f1f"
+      }
+    ],
+    "at": "2026-10-25T08:34:42.012Z",
+    "runId": "k7m2qa"
+  }
+}

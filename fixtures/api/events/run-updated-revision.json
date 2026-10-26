@@ -1,0 +1,22 @@
+{
+  "id": 25,
+  "at": "2026-10-26T02:12:30.118Z",
+  "type": "run.updated",
+  "data": {
+    "id": "m2v8pd",
+    "kind": "revision",
+    "documentId": "r4f7ma",
+    "title": "补充结论和来源",
+    "status": "done",
+    "model": "claude-sonnet-5-5",
+    "startedAt": "2026-10-26T02:00:00.000Z",
+    "endedAt": "2026-10-26T02:12:30.118Z",
+    "costUsd": 0.2741,
+    "files": [
+      {
+        "path": "reports/vps.md",
+        "tool": "Edit"
+      }
+    ]
+  }
+}

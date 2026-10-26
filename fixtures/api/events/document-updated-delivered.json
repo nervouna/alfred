@@ -1,0 +1,14 @@
+{
+  "id": 22,
+  "at": "2026-10-25T08:34:42.010Z",
+  "type": "document.updated",
+  "data": {
+    "id": "r4f7ma",
+    "path": "reports/vps.md",
+    "title": "VPS 价格对比",
+    "kind": "markdown",
+    "version": "248e89ba3aad47311d9cf0d57bf83b038a724f1f",
+    "createdAt": "2026-10-25T08:34:42.010Z",
+    "updatedAt": "2026-10-25T08:34:42.010Z"
+  }
+}

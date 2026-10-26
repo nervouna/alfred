@@ -48,6 +48,30 @@ public struct AlfredClient: Sendable {
         try await get(TaskDetail.self, "/api/tasks/" + Self.encode(id))
     }
 
+    /// POST /api/commands with `document.revise`. Alfred answers 202 with the revision run and the batch.
+    public func revise(documentId: String, version: String, annotations: [AnnotationDraft]) async throws -> RevisionAccepted {
+        try JSONDecoder().decode(RevisionAccepted.self, from: await post(.documentRevise(
+            documentId: documentId,
+            version: version,
+            annotations: annotations
+        )))
+    }
+
+    /// POST /api/commands with `document.undo`. Alfred answers 200 with the document.
+    public func undoRevision(documentId: String, runId: String) async throws -> AlfredDocument {
+        try JSONDecoder().decode(DocumentResult.self, from: await post(.documentUndo(documentId: documentId, runId: runId))).document
+    }
+
+    /// GET /api/documents: the documents, newest updated first.
+    public func documents() async throws -> DocumentList {
+        try await get(DocumentList.self, "/api/documents")
+    }
+
+    /// GET /api/documents/<id>: a document with its versions, annotations and revision runs.
+    public func document(id: String) async throws -> DocumentDetail {
+        try await get(DocumentDetail.self, "/api/documents/" + Self.encode(id))
+    }
+
     /// POST /api/uploads?name=…, streamed from the file on disk. Alfred saves it under `inbox/`.
     /// `progress` is called with the fraction of the body sent, from 0 to 1, as it goes out.
     public func upload(
@@ -78,9 +102,11 @@ public struct AlfredClient: Sendable {
     }
 
     /// GET /api/files/<path>, downloaded to a temporary file. The file keeps its name; each path segment is encoded.
-    public func file(path: String) async throws -> URL {
+    /// With `version` (a commit id), it is the file's bytes at that version; without, the live file.
+    public func file(path: String, version: String? = nil) async throws -> URL {
         let segments = path.components(separatedBy: "/").map(Self.encode).joined(separator: "/")
-        let request = authorized("GET", try endpoint("/api/files/" + segments))
+        let query = version.map { "version=" + Self.encode($0) }
+        let request = authorized("GET", try endpoint("/api/files/" + segments, query: query))
         let (downloaded, response) = try await session.download(for: request)
         guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
         guard http.statusCode == 200 else {

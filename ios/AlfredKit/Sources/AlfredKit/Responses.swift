@@ -33,6 +33,32 @@ public struct TaskDetail: Decodable, Hashable, Sendable {
     public let runs: [Run]
 }
 
+/// The body of a successful `document.undo`: the document as Alfred now holds it.
+public struct DocumentResult: Decodable, Hashable, Sendable {
+    public let document: AlfredDocument
+}
+
+/// The body of `GET /api/documents`: the documents, newest updated first.
+public struct DocumentList: Decodable, Hashable, Sendable {
+    public let documents: [AlfredDocument]
+}
+
+/// The body of `GET /api/documents/<id>`: a document, its versions (newest first, the first being the current one), its
+/// annotations and its revision runs (newest first).
+public struct DocumentDetail: Decodable, Hashable, Sendable {
+    public let document: AlfredDocument
+    public let versions: [DocumentVersion]
+    public let annotations: [Annotation]
+    public let runs: [Run]
+}
+
+/// The body of a successful `document.revise`: the revision run and the batch as Alfred recorded it, each annotation
+/// submitted to that run.
+public struct RevisionAccepted: Decodable, Hashable, Sendable {
+    public let runId: String
+    public let annotations: [Annotation]
+}
+
 /// The body of any error response from the app API.
 public struct ErrorResponse: Decodable, Hashable, Sendable {
     public let error: String
