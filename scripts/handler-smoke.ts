@@ -30,6 +30,11 @@
 //                answered with a plain message.send gets a reply using the text; run.stop with a question
 //                open records it as cancelled and the run ends stopped; ends with one pass or fail line
 //                per check and the spend
+//   scheduled    the real handler on a task store, with a one-time task on haiku due a few seconds
+//                ahead and a tiny brief: the run starts by itself, a message with the task's id
+//                delivers its report, a file is written under reports/tasks/<id>/, the run is in the
+//                task's record, and its session leaves no transcript; ends with one pass or fail line
+//                per check and the spend
 //   prompt <text>  one message on the default model, then the spend per model
 
 import fs from "node:fs";
@@ -38,11 +43,14 @@ import path from "node:path";
 
 import { LiveEventSchema } from "../src/api/schema.ts";
 import type { Event, LiveEvent, Message } from "../src/api/schema.ts";
+import { AGENT_CONFIG_DIR } from "../src/agent/config.ts";
 import { createAgentHandler } from "../src/agent/handler.ts";
 import { request, streamEvents } from "../src/api/client.ts";
 import { startApi } from "../src/api/server.ts";
 import { sharedEventLog } from "../src/events.ts";
 import { listRunFiles } from "../src/runs.ts";
+import { WORKSPACE_DIR } from "../src/store.ts";
+import { TaskStore } from "../src/tasks/store.ts";
 import { createLocalHandler } from "./local-stack.ts";
 
 const scenario = process.argv[2] ?? "";
@@ -57,7 +65,8 @@ sharedEventLog().subscribe((event) => {
   const m = event.data;
   const files = m.files.length ? ` files=${m.files.map((f) => f.path).join(",")}` : "";
   const error = m.error ? ` error="${m.error.slice(0, 60)}"` : "";
-  console.log(`[event] ${at()} ${m.channel} ${m.direction} run=${m.runId ?? "-"}${files}${error} ${flat(m.text).slice(0, 80)}`);
+  const task = m.taskId ? ` task=${m.taskId}` : "";
+  console.log(`[event] ${at()} ${m.channel} ${m.direction} run=${m.runId ?? "-"}${task}${files}${error} ${flat(m.text).slice(0, 80)}`);
 });
 
 type Handler = ReturnType<typeof createAgentHandler>;
@@ -491,6 +500,72 @@ async function attach(): Promise<number> {
 }
 
 
+/** The scheduled scenario: a task falls due and runs on its own, on the real handler. Returns the number of checks that failed. */
+async function scheduled(): Promise<number> {
+  const tasks = new TaskStore();
+  // A short poll, so the task is taken a second after it falls due, not up to thirty.
+  const handler = createLocalHandler({ tasks, taskPollMs: 1000 });
+  let failed = 0;
+  const check = (name: string, problems: string[]) => {
+    if (problems.length) failed++;
+    console.log(`[${problems.length ? "fail" : "pass"}] ${name}${problems.length ? `: ${problems.join("; ")}` : ""}`);
+  };
+  try {
+    const task = tasks.create(
+      {
+        title: "日期小记",
+        brief: "Write a three-line note about today's date to the report file.",
+        schedule: { kind: "once", at: new Date(Date.now() + 5000).toISOString() },
+        model: "haiku",
+        budgetUsd: 0.3,
+      },
+      "manual",
+    );
+    console.log(`[task] ${at()} ${task.id} "${task.title}" is due at ${task.nextRunAt}`);
+
+    const events = () => sharedEventLog().readSince(0, 100_000);
+    const runOf = (status: (s: string) => boolean) =>
+      events().findLast((e) => e.type === "run.updated" && e.data.taskId === task.id && status(e.data.status));
+    const started = await waitFor(() => runOf(() => true), 60_000);
+    const ended = await waitFor(() => runOf((s) => s !== "running"), 240_000);
+    await sleep(500);
+
+    const run = ended?.type === "run.updated" ? ended.data : undefined;
+    check("the task falls due and its run starts by itself", started ? [] : ["no run of the task within 60 s"]);
+    check("the run ends done", run?.status === "done" ? [] : [`run ${run?.id ?? "-"} ended ${run?.status ?? "never"} ${run?.error ?? ""}`]);
+
+    const delivered = events().flatMap((e) => (e.type === "message.created" && e.data.direction === "out" && e.data.taskId === task.id ? [e.data] : []));
+    const reply = delivered.find((m) => m.text.trim() !== "");
+    check(
+      "a message with the task's id and the run's delivers the report",
+      reply && reply.runId === run?.id && reply.channel === "app" ? [] : [`${delivered.length} message(s) with the task's id; run ${run?.id ?? "-"}`],
+    );
+
+    const dir = path.join(WORKSPACE_DIR, "reports", "tasks", task.id);
+    const reports = fs.existsSync(dir) ? fs.readdirSync(dir).filter((name) => fs.statSync(path.join(dir, name)).isFile()) : [];
+    check("a report file exists under reports/tasks/<id>/", reports.length ? [] : [`${dir} holds no file`]);
+
+    const record = tasks.get(task.id);
+    check(
+      "the task records the run, and the one-time task is done",
+      record?.lastRunId === run?.id && record?.status === "done" ? [] : [`lastRunId=${record?.lastRunId ?? "-"} status=${record?.status ?? "-"}`],
+    );
+
+    const transcripts = fs.existsSync(AGENT_CONFIG_DIR) ? fs.readdirSync(AGENT_CONFIG_DIR, { recursive: true }).filter((name) => String(name).endsWith(".jsonl")) : [];
+    check("the run's session is not kept: no transcript", transcripts.length === 0 ? [] : [`found ${transcripts.join(", ")}`]);
+
+    summary();
+    const cost = run ? (listRunFiles().find((f) => f.id === run.id)?.costUsd ?? 0) : 0;
+    console.log(`[spend] $${cost.toFixed(4)} for run ${run?.id ?? "-"}`);
+    check("the run costs well under $0.10", cost < 0.1 ? [] : [`$${cost.toFixed(4)}`]);
+    console.log(`[reply] ${flat(reply?.text ?? "").slice(0, 200)}`);
+    console.log(`[report] ${reports.map((name) => `reports/tasks/${task.id}/${name}`).join(", ") || "-"}`);
+  } finally {
+    await handler.shutdown();
+  }
+  return failed;
+}
+
 /** The ask scenario: structured questions on the real handler, driven over HTTP only. Returns the number of checks that failed. */
 async function ask(): Promise<number> {
   const handler = newHandler();
@@ -713,8 +788,10 @@ if (scenario === "background") {
   failedRules = await attach();
 } else if (scenario === "ask") {
   failedRules = await ask();
+} else if (scenario === "scheduled") {
+  failedRules = await scheduled();
 } else {
-  console.error("usage: node scripts/handler-smoke.ts background|restart|stop|nested|api|stream|attach|ask|prompt <text>");
+  console.error("usage: node scripts/handler-smoke.ts background|restart|stop|nested|api|stream|attach|ask|scheduled|prompt <text>");
   process.exit(2);
 }
 process.exit(failedRules ? 1 : 0);

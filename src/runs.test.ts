@@ -87,6 +87,20 @@ test("a recorded run keeps its steps and files in its run file, then lands in ru
   assert.equal(readRunLog().filter((r) => r.id === run.id).length, 1, "finish runs once");
 });
 
+test("a run of a task carries the task id on its file, its event and its line in runs.jsonl", () => {
+  const events = new EventLog(path.join(tmp, "task-run-events", "events.jsonl"));
+  const run = new RunRecorder({ kind: "task", title: "晨报", taskId: "p3x9za", events });
+  run.finish("done");
+
+  assert.equal(readRunFile(run.id)?.taskId, "p3x9za");
+  assert.equal(readRunLog().find((r) => r.id === run.id)?.taskId, "p3x9za");
+  const updates = events.readSince(0).flatMap((e) => (e.type === "run.updated" ? [e.data] : []));
+  assert.deepEqual(updates.map((r) => [r.status, r.taskId]), [["running", "p3x9za"], ["done", "p3x9za"]]);
+  const chat = new RunRecorder({ kind: "task", title: "聊天", events });
+  chat.finish("done");
+  assert.equal(chat.record.taskId, undefined, "a chat run has none");
+});
+
 test("runs left running by an earlier process are marked lost at startup", () => {
   const live = new RunRecorder({ kind: "task", title: "被打断的任务" });
   const lost = markLostRuns();

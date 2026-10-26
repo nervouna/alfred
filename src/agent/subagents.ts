@@ -5,14 +5,12 @@
 // forked skills) gets the shared rules and stays away from memory, skills,
 // workspace rules and the user. It also follows which foreground subagents run.
 
-import fs from "node:fs";
-import path from "node:path";
-
 import type { HookCallbackMatcher, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 
 import { log } from "../log.ts";
 import { SUBAGENT_RULES } from "./config.ts";
-import { resolveInside } from "./guard.ts";
+import { readOnlyWrite } from "./guard.ts";
+import type { ReadOnlyPaths } from "./guard.ts";
 import { RULES_FILE } from "./rules.ts";
 import { SKILLS_DIR } from "./skills.ts";
 
@@ -47,35 +45,27 @@ export interface AgentAdmission {
   failedToStart(toolUseId: string, error: string): void;
 }
 
-/** Input fields that name a path a tool call writes to. */
-const WRITE_PATHS: Record<string, string[]> = {
-  Write: ["file_path"],
-  Edit: ["file_path"],
-  MultiEdit: ["file_path"],
-  NotebookEdit: ["notebook_path"],
-  mcp__alfred__move_file: ["from", "to"],
-  mcp__alfred__render_pdf: ["output"],
-  mcp__alfred__generate_image: ["output"],
+/**
+ * The say on Agent calls of a run nobody watches (a scheduled task): foreground subagents work as in chat, but the
+ * run ends with its report and would cut a background subagent short, so those are denied with a reason the
+ * agent can act on.
+ */
+export const unattendedAdmission: AgentAdmission = {
+  admit: (call) =>
+    call.background
+      ? "This run is unattended, so background subagents are not available. Call the Agent tool again with run_in_background: false and wait for the result."
+      : undefined,
+  failedToStart() {},
 };
 
-/** Top-level workspace directories only Alfred's main thread changes. */
-const PROTECTED_DIRS = new Set(["memory", SKILLS_DIR]);
+/** What only Alfred's main thread changes, and only when the owner asks: long-term memory, skills and the workspace rules files. */
+export const PROTECTED_PATHS: ReadOnlyPaths = { dirs: ["memory", SKILLS_DIR], names: [RULES_FILE] };
 
 /** Returns a denial reason when a subagent's tool call would change long-term memory, a skill or a workspace rules file. */
 export function checkSubagentWrite(root: string, toolName: string, input: Record<string, unknown>): string | undefined {
-  const rootReal = fs.realpathSync(root);
-  for (const key of WRITE_PATHS[toolName] ?? []) {
-    const p = input[key];
-    if (typeof p !== "string" || !p) continue;
-    const real = resolveInside(root, p);
-    if (!real) continue; // The workspace guard refuses paths outside the workspace.
-    const rel = path.relative(rootReal, real);
-    const top = rel.split(path.sep)[0]?.toLowerCase();
-    if ((top && PROTECTED_DIRS.has(top)) || path.basename(rel).toLowerCase() === RULES_FILE.toLowerCase()) {
-      return `Subagents may not change ${p}: only Alfred changes memory/, ${SKILLS_DIR}/ and ${RULES_FILE} files. Report what should change in your final message instead.`;
-    }
-  }
-  return undefined;
+  const p = readOnlyWrite(root, toolName, input, PROTECTED_PATHS);
+  if (p === undefined) return undefined;
+  return `Subagents may not change ${p}: only Alfred changes memory/, ${SKILLS_DIR}/ and ${RULES_FILE} files. Report what should change in your final message instead.`;
 }
 
 function deny(reason: string) {

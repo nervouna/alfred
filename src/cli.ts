@@ -19,6 +19,8 @@ import { describeError, log, logToFile } from "./log.ts";
 import { BROWSERS_PATH, renderPdf } from "./pdf.ts";
 import { LOG_FILE, startHeartbeat } from "./runs.ts";
 import { STATE_DIR, WORKSPACE_DIR } from "./store.ts";
+import { taskCommands } from "./tasks/commands.ts";
+import { TaskStore } from "./tasks/store.ts";
 import { AccessVerifier } from "./workbench/access.ts";
 import { ApnsClient, apnsSettings } from "./workbench/apns.ts";
 import { alfredStatus } from "./workbench/data.ts";
@@ -63,17 +65,19 @@ function untilSignal(): Promise<void> {
   });
 }
 
-/** The assistant: the agent handler with the app as its channel, behind the command API, and its memory scans. */
+/** The assistant: the agent handler with the app as its channel, running the owner's tasks, behind the command API, and its memory scans. */
 async function cmdRun(args: string[]): Promise<void> {
   if (args.length) throw new Error("usage: run");
   const socket = apiSocketPath();
   if (!socket) throw new Error("Alfred is reached through its command API, so ALFRED_API_SOCKET=off leaves it nothing to serve");
   logToFile(LOG_FILE);
   const startedAt = new Date();
-  const agent = createAgentHandler({ out: appOutbound() });
+  // The only task store: it is the only writer of tasks.json, and the handler and the task commands both use it.
+  const tasks = new TaskStore();
+  const agent = createAgentHandler({ out: appOutbound(), tasks });
   let closeApi: () => Promise<void>;
   try {
-    closeApi = await startApi({ socket, handler: agent, events: sharedEventLog() });
+    closeApi = await startApi({ socket, handler: agent, events: sharedEventLog(), tasks: taskCommands(tasks, agent) });
   } catch (err) {
     await agent.shutdown();
     throw err;
