@@ -11,11 +11,11 @@ Developed with the `orchestrate` skill: issues are specs, implementers deliver o
 - `npm test` runs `node --test` over `src/**/*.test.ts`. Tests use `node:test` and `node:assert/strict`. Modules that read `STATE_DIR` at import time are imported after the test sets `ALFRED_STATE_DIR` to a temp dir (see `src/runs.test.ts`).
 - CI (`.github/workflows/ci.yml`) runs `npm ci`, `npm run check` and `npm test` on every PR.
 - `npm run smoke` and `node scripts/handler-smoke.ts <scenario>` call the real model and cost money. They need `ALFRED_ANTHROPIC_API_KEY`. Point `ALFRED_STATE_DIR` and `ALFRED_WORKSPACE` at scratch directories for them.
-- Never run `npm start` (the WeChat bot): only the deployed instance may long-poll the bot account.
+- Never run `npm start` against the deployed instance's state: a second Alfred on the same state dir would take over its command socket and run tasks on its sessions. Run locally with scratch `ALFRED_STATE_DIR` and `ALFRED_WORKSPACE` (see `scripts/app-dev.ts`).
 
 ## Architecture in brief
 
-- The owner talks to Alfred over channels (`src/channels.ts`): WeChat (`src/channels/wechat.ts`, fed by `src/bot.ts`'s long-poll loop) and the app. Both go through one intake queue into `src/agent/handler.ts`, the Agent SDK handler (sessions, live input, stop, background subagents, delivery); a reply goes back to the channel its message came from.
+- The owner talks to Alfred only through the app. `src/cli.ts run` serves the command API (`src/api/server.ts`), and its messages go through one intake queue (`src/channels.ts`) into `src/agent/handler.ts`, the Agent SDK handler (sessions, live input, stop, background subagents, delivery). A reply is a `message.created` event, which on the app channel is its delivery. The WeChat channel is retired; its old messages stay in the event log, so the contract keeps `channel: "wechat"`.
 - `src/events.ts` is the append-only event log (messages, run lifecycle) the client resumes from by id; `src/api/schema.ts` is the client contract, tested against `fixtures/api/` on both the Node and the Swift side; `src/api/server.ts` serves commands and the event stream on a local Unix socket.
 - `src/runs.ts` records runs (one execution of the agent) under `$STATE_DIR/workbench/`; `src/workbench/` serves them read-only.
 - The workbench's `/api/` is the app's way in: `devices.ts` pairs devices and keeps only the SHA-256 of each token, every `/api/` request needs a device token, and `forward.ts` passes only the command set (checked with `parseCommand`) and the event stream and uploads on to Alfred's socket.

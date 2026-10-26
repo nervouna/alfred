@@ -421,7 +421,7 @@ export async function startApi(opts: ApiOptions): Promise<() => Promise<void>> {
   } finally {
     process.umask(umask);
   }
-  // After startup a server error is logged, not thrown: it must not take the bot down.
+  // After startup a server error is logged, not thrown: it must not take Alfred down.
   server.on("error", (err) => log.error(`api server error: ${describeError(err)}`));
   log.info(`api listening on ${socket}`);
 

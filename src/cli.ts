@@ -31,7 +31,7 @@ const USAGE = `usage: node src/cli.ts <command>
 
   run                        start the assistant: the agent behind the command API the app talks to, and memory scans
   status                     show whether Alfred is running: its API socket and its last heartbeat
-  setup-pdf                 download the headless Chrome used for PDF rendering
+  setup-pdf                  download the headless Chrome used for PDF rendering
   pdf <source> [output]      render a Markdown or HTML file to PDF
   memory-scan                extract long-term memories from new transcript entries now
   workbench [--dev]          serve the read-only workbench (--dev: no Access check, loopback only)
