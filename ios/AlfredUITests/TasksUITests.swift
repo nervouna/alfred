@@ -150,11 +150,37 @@ final class TasksUITests: XCTestCase {
     /// Taps 结束 and confirms.
     @MainActor
     private func endTask(in app: XCUIApplication) {
-        element("task.end", in: app).tap()
+        let end = element("task.end", in: app)
+        scrollBetweenBars(end, in: app)
+        end.tap()
         // The confirmation is a sheet with a button of the same name as the one that opened it.
         let confirm = app.sheets.buttons["结束"]
         XCTAssertTrue(confirm.waitForExistence(timeout: patience), "no confirmation\n\(app.debugDescription)")
         confirm.tap()
+    }
+
+    /// Scrolls the list until `target` lies between the navigation bar and the tab bar, and waits for the list to stop.
+    /// The bars are glass, so XCUITest counts a row under one as hittable, but a tap there lands on the bar: on the
+    /// navigation bar it scrolls the list to the top and presses nothing.
+    @MainActor
+    private func scrollBetweenBars(_ target: XCUIElement, in app: XCUIApplication) {
+        XCTAssertTrue(target.waitForExistence(timeout: patience), "the element to scroll to is not there\n\(app.debugDescription)")
+        let top = app.navigationBars.firstMatch.frame.maxY
+        let bottom = app.tabBars.firstMatch.frame.minY
+        var previous: CGRect?
+        XCTAssertTrue(wait(timeout: patience) {
+            let frame = target.frame
+            defer { previous = frame }
+            if frame.minY < top {
+                app.swipeDown()
+                return false
+            }
+            if frame.maxY > bottom {
+                app.swipeUp()
+                return false
+            }
+            return frame == previous
+        }, "the element did not come to rest between the bars\n\(app.debugDescription)")
     }
 
     /// Puts `text` in a field in place of what it holds. The tap lands past the end of the text, so the cursor does too.
