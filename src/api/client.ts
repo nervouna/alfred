@@ -21,9 +21,17 @@ function unreachable(socket: string, err: unknown): Error {
   return new Error(`cannot reach Alfred's API at ${socket}`, { cause: err });
 }
 
-/** One request to the API; a body is sent as JSON, or as it is when it is a Buffer (an upload). Resolves with the status and the body, whatever the status. */
-export function request(socket: string, method: string, target: string, body?: unknown): Promise<ApiResponse> {
+/**
+ * One request to the API; a body is sent as JSON, or as it is when it is a Buffer (an upload). Resolves with the status and the body, whatever the status.
+ * When `signal` aborts, the request is dropped and the promise rejects with the signal's reason.
+ */
+export function request(socket: string, method: string, target: string, body?: unknown, opts: { signal?: AbortSignal } = {}): Promise<ApiResponse> {
+  const { signal } = opts;
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason);
+      return;
+    }
     const payload = body === undefined ? undefined : Buffer.isBuffer(body) ? body : JSON.stringify(body);
     const contentType = Buffer.isBuffer(body) ? "application/octet-stream" : "application/json";
     const headers = payload === undefined ? {} : { "Content-Type": contentType, "Content-Length": Buffer.byteLength(payload) };
@@ -34,6 +42,14 @@ export function request(socket: string, method: string, target: string, body?: u
       res.on("end", () => resolve({ status: res.statusCode ?? 0, body: text }));
       res.on("error", reject);
     });
+    if (signal) {
+      const onAbort = () => {
+        reject(signal.reason);
+        req.destroy();
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      req.on("close", () => signal.removeEventListener("abort", onAbort));
+    }
     req.on("error", (err) => reject(unreachable(socket, err)));
     req.end(payload);
   });
