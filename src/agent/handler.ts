@@ -69,6 +69,7 @@ import {
   WORKBENCH_ON,
   WORKBENCH_URL,
   agentEnv,
+  checkCompactTokens,
   checkDailyBudget,
   checkMemoryScanSettings,
   checkSessionIdleHours,
@@ -584,6 +585,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
   const interruptMs = opts.interruptMs ?? INTERRUPT_GRACE_MS;
   agentEnv(); // Fail at startup, not on the first message, if the API key is missing.
   checkSessionIdleHours();
+  checkCompactTokens();
   checkMemoryScanSettings();
   checkWorkbenchSettings();
   checkDailyBudget();
@@ -697,6 +699,12 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
           if (!scheduled && sessionId !== store.get(userId).sessionId) {
             store.update(userId, { ...NO_SESSION, sessionId, sessionStartedAt: new Date().toISOString() });
           }
+        } else if (m.type === "system" && m.subtype === "compact_boundary") {
+          // Claude Code compacted the session; its metadata has the token counts, when the CLI sends them.
+          const meta = m.compact_metadata;
+          log.info(
+            `agent run compacted run=${run.recorder.id} session=${m.session_id} trigger=${meta?.trigger ?? "-"} pre_tokens=${meta?.pre_tokens ?? "-"} post_tokens=${meta?.post_tokens ?? "-"}`,
+          );
         } else if (m.type === "system" && m.subtype === "task_started") {
           if (m.tool_use_id) run.background.started(m.tool_use_id, m.task_id, m.subagent_type);
         } else if (m.type === "system" && m.subtype === "task_notification") {

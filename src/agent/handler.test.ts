@@ -804,6 +804,28 @@ test("if the interrupted turn does not end within the grace period, the run is a
   assert.deepEqual(h.app.texts, ["已停止当前运行。"], "no error line either");
 });
 
+test("a compaction the query reports is logged with its run, its session and the token counts it carries", async (t) => {
+  const logged: string[] = [];
+  const log = console.log;
+  console.log = (...args: unknown[]) => void logged.push(args.join(" "));
+  t.after(() => (console.log = log));
+  const h = setup({
+    turn: async (_prompt, _signal, turn) => {
+      turn.emit({ type: "system", subtype: "compact_boundary", session_id: SESSION, uuid: "00000000-0000-4000-8000-000000000001", compact_metadata: { trigger: "auto", pre_tokens: 91234, post_tokens: 12345 } });
+      turn.emit({ type: "system", subtype: "compact_boundary", session_id: SESSION, uuid: "00000000-0000-4000-8000-000000000002" });
+      return "压缩完成";
+    },
+  });
+  await h.send("读一个很长的文件");
+  await until("the run to finish", () => h.finished());
+
+  const runId = h.taskId();
+  const lines = logged.filter((line) => line.includes("agent run compacted"));
+  assert.equal(lines.length, 2, logged.join("\n"));
+  assert.ok(lines[0]?.includes(`agent run compacted run=${runId} session=${SESSION} trigger=auto pre_tokens=91234 post_tokens=12345`), lines[0]);
+  assert.ok(lines[1]?.includes(`agent run compacted run=${runId} session=${SESSION} trigger=- pre_tokens=- post_tokens=-`), lines[1]);
+});
+
 test("the abort fallback waits 10 s by default", async () => {
   const hold = held();
   const t = setup({ turn: hold.turn });
