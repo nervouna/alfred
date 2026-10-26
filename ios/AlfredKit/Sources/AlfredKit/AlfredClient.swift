@@ -20,10 +20,32 @@ public struct AlfredClient: Sendable {
 
     /// POST /api/commands. Any 2xx is success: Alfred answers 202 when it accepts a command and 200 for a duplicate.
     public func send(_ command: Command) async throws {
-        var request = authorized("POST", try endpoint("/api/commands"))
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONEncoder().encode(command)
-        _ = try await fetch(request, success: Self.isSuccess)
+        _ = try await post(command)
+    }
+
+    /// POST /api/commands with `task.create`. Alfred answers 201 with the task.
+    public func createTask(_ draft: TaskDraft) async throws -> AlfredTask {
+        try JSONDecoder().decode(TaskResult.self, from: await post(.taskCreate(draft))).task
+    }
+
+    /// POST /api/commands with `task.update`. Alfred answers 200 with the task.
+    public func updateTask(id: String, changes: TaskChanges) async throws -> AlfredTask {
+        try JSONDecoder().decode(TaskResult.self, from: await post(.taskUpdate(taskId: id, changes: changes))).task
+    }
+
+    /// POST /api/commands with `task.run`: the task runs now, and its next scheduled time stays as it was.
+    public func runTask(id: String) async throws {
+        try await send(.taskRun(taskId: id))
+    }
+
+    /// GET /api/tasks: the tasks, newest created first, with the zone their schedules are computed in.
+    public func tasks() async throws -> TaskList {
+        try await get(TaskList.self, "/api/tasks")
+    }
+
+    /// GET /api/tasks/<id>: a task and its runs.
+    public func task(id: String) async throws -> TaskDetail {
+        try await get(TaskDetail.self, "/api/tasks/" + Self.encode(id))
     }
 
     /// POST /api/uploads?name=…, streamed from the file on disk. Alfred saves it under `inbox/`.
@@ -90,6 +112,14 @@ public struct AlfredClient: Sendable {
         guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
         guard http.statusCode == 200 else { throw Self.failure(status: http.statusCode, body: Data()) }
         return bytes
+    }
+
+    /// Posts a command and returns the response body. Any 2xx is success.
+    private func post(_ command: Command) async throws -> Data {
+        var request = authorized("POST", try endpoint("/api/commands"))
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(command)
+        return try await fetch(request, success: Self.isSuccess)
     }
 
     private func get<T: Decodable>(_ type: T.Type, _ path: String) async throws -> T {

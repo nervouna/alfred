@@ -1,0 +1,10 @@
+{
+  "type": "task.create",
+  "title": "每日 VPS 价格",
+  "brief": "查定价页。",
+  "schedule": {
+    "kind": "daily",
+    "time": "09:00",
+    "day": 1
+  }
+}

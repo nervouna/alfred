@@ -1,0 +1,53 @@
+{
+  "task": {
+    "id": "p3r8vx",
+    "title": "每日 VPS 价格",
+    "brief": "查三家供应商官网的定价页，和昨天的报告比较，只列出变化。",
+    "origin": "manual",
+    "schedule": {
+      "kind": "daily",
+      "time": "09:00"
+    },
+    "status": "active",
+    "model": "sonnet",
+    "budgetUsd": 2,
+    "createdAt": "2026-10-20T03:10:00.000Z",
+    "updatedAt": "2026-10-26T01:03:12.004Z",
+    "nextRunAt": "2026-10-27T01:00:00.000Z",
+    "lastRunId": "b4n7cj",
+    "lastRunAt": "2026-10-26T01:00:00.000Z",
+    "skips": []
+  },
+  "runs": [
+    {
+      "id": "b4n7cj",
+      "kind": "task",
+      "taskId": "p3r8vx",
+      "title": "每日 VPS 价格",
+      "status": "done",
+      "model": "claude-sonnet-5-5",
+      "startedAt": "2026-10-26T01:00:00.000Z",
+      "endedAt": "2026-10-26T01:03:11.902Z",
+      "costUsd": 0.1874,
+      "files": [
+        {
+          "path": "reports/vps-2026-10-26.md",
+          "tool": "Write"
+        }
+      ]
+    },
+    {
+      "id": "h8q3tn",
+      "kind": "task",
+      "taskId": "p3r8vx",
+      "title": "每日 VPS 价格",
+      "status": "failed",
+      "model": "claude-sonnet-5-5",
+      "startedAt": "2026-10-25T01:00:00.000Z",
+      "endedAt": "2026-10-25T01:00:41.330Z",
+      "costUsd": 0.0117,
+      "files": [],
+      "error": "WebFetch: 403 Forbidden"
+    }
+  ]
+}

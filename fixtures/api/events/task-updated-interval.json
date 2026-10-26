@@ -1,0 +1,24 @@
+{
+  "id": 24,
+  "at": "2026-10-26T01:45:00.000Z",
+  "type": "task.updated",
+  "data": {
+    "id": "n2c7bq",
+    "title": "盯住供应商状态页",
+    "brief": "打开三家供应商的状态页，只报告新出现的故障或维护公告。",
+    "origin": "idea",
+    "schedule": {
+      "kind": "interval",
+      "hours": 6
+    },
+    "status": "active",
+    "model": "sonnet",
+    "budgetUsd": 1,
+    "createdAt": "2026-10-22T09:00:00.000Z",
+    "updatedAt": "2026-10-26T01:45:00.000Z",
+    "nextRunAt": "2026-10-26T07:45:00.000Z",
+    "lastRunId": "f4s9hd",
+    "lastRunAt": "2026-10-26T01:45:00.000Z",
+    "skips": []
+  }
+}

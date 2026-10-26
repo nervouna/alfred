@@ -1,0 +1,9 @@
+{
+  "type": "task.create",
+  "title": "   ",
+  "brief": "查定价页。",
+  "schedule": {
+    "kind": "daily",
+    "time": "09:00"
+  }
+}

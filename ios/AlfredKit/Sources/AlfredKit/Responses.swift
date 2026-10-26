@@ -16,6 +16,23 @@ public struct RunDetail: Decodable, Hashable, Sendable {
     public let steps: [Step]
 }
 
+/// The body of a successful `task.create` or `task.update`: the task as Alfred now holds it.
+public struct TaskResult: Decodable, Hashable, Sendable {
+    public let task: AlfredTask
+}
+
+/// The body of `GET /api/tasks`: the time zone the schedules are computed in, and the tasks, newest created first.
+public struct TaskList: Decodable, Hashable, Sendable {
+    public let timeZone: String
+    public let tasks: [AlfredTask]
+}
+
+/// The body of `GET /api/tasks/<id>`: a task and its runs, newest first.
+public struct TaskDetail: Decodable, Hashable, Sendable {
+    public let task: AlfredTask
+    public let runs: [Run]
+}
+
 /// The body of any error response from the app API.
 public struct ErrorResponse: Decodable, Hashable, Sendable {
     public let error: String

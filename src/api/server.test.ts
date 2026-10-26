@@ -433,6 +433,19 @@ test("a question.answer that does not fit the schema gets 400 and never reaches 
   assert.deepEqual(handler.answered, []);
 });
 
+test("each task command fixture gets 503 until tasks are wired in, and never reaches the handler", async (t) => {
+  const { socket, handler } = await start(t);
+  for (const name of ["task-create.json", "task-update-schedule.json", "task-run.json"]) {
+    const body = fs.readFileSync(new URL(`../../fixtures/api/commands/${name}`, import.meta.url), "utf8");
+    const reply = await post(socket, body);
+    assert.equal(reply.status, 503, name);
+    assert.deepEqual(reply.json(), { error: "tasks are not available" }, name);
+  }
+  assert.equal(handler.submitted.length, 0, "submit was not called");
+  assert.deepEqual(handler.stopped, []);
+  assert.deepEqual(handler.answered, []);
+});
+
 test("GET /events streams the backlog, then live events, as server-sent events", async (t) => {
   const { socket, events } = await start(t);
   appendRuns(events, 2);

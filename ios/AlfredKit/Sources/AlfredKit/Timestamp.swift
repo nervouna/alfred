@@ -21,6 +21,13 @@ extension KeyedDecodingContainer {
     }
 }
 
+extension KeyedEncodingContainer {
+    /// Encodes a date as a UTC ISO 8601 timestamp without fractional seconds, the form Alfred's schemas accept.
+    mutating func encodeTimestamp(_ date: Date, forKey key: Key) throws {
+        try encode(date.formatted(.iso8601), forKey: key)
+    }
+}
+
 private func parseTimestamp(_ text: String) -> Date? {
     if let date = try? Date.ISO8601FormatStyle(includingFractionalSeconds: true).parse(text) {
         return date

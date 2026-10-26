@@ -1,0 +1,9 @@
+{
+  "type": "task.create",
+  "title": "每日 VPS 价格",
+  "brief": "查三家供应商官网的定价页，和昨天的报告比较，只列出变化。",
+  "schedule": {
+    "kind": "daily",
+    "time": "09:00"
+  }
+}

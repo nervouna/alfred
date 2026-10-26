@@ -1,0 +1,16 @@
+{
+  "type": "task.create",
+  "title": "每周供应商动态",
+  "brief": "看三家供应商的博客和状态页，列出本周的变化。",
+  "schedule": {
+    "kind": "weekly",
+    "days": [
+      1,
+      3,
+      5
+    ],
+    "time": "08:30"
+  },
+  "model": "opus",
+  "budgetUsd": 5
+}

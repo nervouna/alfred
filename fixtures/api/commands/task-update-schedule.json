@@ -1,0 +1,9 @@
+{
+  "type": "task.update",
+  "taskId": "p3r8vx",
+  "schedule": {
+    "kind": "interval",
+    "hours": 6
+  },
+  "budgetUsd": 1
+}

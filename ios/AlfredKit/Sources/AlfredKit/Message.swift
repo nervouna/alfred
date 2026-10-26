@@ -27,11 +27,13 @@ public struct Message: Decodable, Hashable, Sendable {
     public let files: [FileRef]
     public let at: Date
     public let runId: String?
+    /// Set on a message a task's run delivered.
+    public let taskId: String?
     public let clientId: String?
     public let error: String?
 
     private enum CodingKeys: String, CodingKey {
-        case id, channel, direction, text, files, at, runId, clientId, error
+        case id, channel, direction, text, files, at, runId, taskId, clientId, error
     }
 
     public init(from decoder: any Decoder) throws {
@@ -43,6 +45,7 @@ public struct Message: Decodable, Hashable, Sendable {
         files = try container.decode([FileRef].self, forKey: .files)
         at = try container.decodeTimestamp(forKey: .at)
         runId = try container.decodeIfPresent(String.self, forKey: .runId)
+        taskId = try container.decodeIfPresent(String.self, forKey: .taskId)
         clientId = try container.decodeIfPresent(String.self, forKey: .clientId)
         error = try container.decodeIfPresent(String.self, forKey: .error)
     }

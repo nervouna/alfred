@@ -169,4 +169,65 @@ final class AlfredClientTests: XCTestCase {
             XCTAssertEqual(error.code, .notConnectedToInternet)
         }
     }
+
+    func testTasksAndTaskDetailDecodeTheirFixtures() async throws {
+        let (client, log) = try makeClient { request in
+            if request.url?.path == "/api/tasks" {
+                return StubReply(chunks: [(try? fixture("responses/task-list.json")) ?? Data()])
+            }
+            return StubReply(chunks: [(try? fixture("responses/task-detail.json")) ?? Data()])
+        }
+        let list = try await client.tasks()
+        XCTAssertEqual(list.timeZone, "Asia/Taipei")
+        XCTAssertEqual(list.tasks.count, 4)
+        let listed = try XCTUnwrap(log.entries.first)
+        XCTAssertEqual(listed.request.httpMethod, "GET")
+        XCTAssertEqual(try encodedPath(listed.request), "/api/tasks")
+        assertCredentials(listed.request)
+
+        let detail = try await client.task(id: "p3r8vx")
+        XCTAssertEqual(detail.task.id, "p3r8vx")
+        XCTAssertEqual(detail.runs.count, 2)
+        let fetched = try XCTUnwrap(log.entries.last)
+        XCTAssertEqual(try encodedPath(fetched.request), "/api/tasks/p3r8vx")
+        assertCredentials(fetched.request)
+    }
+
+    func testCreateTaskPostsTheCommandAndDecodesTheTask() async throws {
+        let (client, log) = try makeClient { _ in StubReply(status: 201, chunks: [(try? fixture("responses/task-result.json")) ?? Data()]) }
+        let draft = TaskDraft(
+            title: "每日 VPS 价格",
+            brief: "查三家供应商官网的定价页，和昨天的报告比较，只列出变化。",
+            schedule: .daily(time: TimeOfDay(hour: 9, minute: 0))
+        )
+        let created = try await client.createTask(draft)
+        XCTAssertEqual(created.id, "p3r8vx")
+        let entry = try XCTUnwrap(log.entries.first)
+        XCTAssertEqual(entry.request.httpMethod, "POST")
+        XCTAssertEqual(try encodedPath(entry.request), "/api/commands")
+        try assertSameJSON(entry.body, fixture("commands/task-create-minimal.json"))
+        assertCredentials(entry.request)
+    }
+
+    func testUpdateTaskPostsOnlyTheChangedFieldsAndDecodesTheTask() async throws {
+        let (client, log) = try makeClient { _ in StubReply(chunks: [(try? fixture("responses/task-result.json")) ?? Data()]) }
+        let updated = try await client.updateTask(
+            id: "p3r8vx",
+            changes: TaskChanges(schedule: .interval(hours: 6), budgetUsd: 1)
+        )
+        XCTAssertEqual(updated.id, "p3r8vx")
+        let entry = try XCTUnwrap(log.entries.first)
+        XCTAssertEqual(try encodedPath(entry.request), "/api/commands")
+        try assertSameJSON(entry.body, fixture("commands/task-update-schedule.json"))
+        assertCredentials(entry.request)
+    }
+
+    func testRunTaskPostsTaskRunAndAnyTwoHundredIsAccepted() async throws {
+        let (client, log) = try makeClient { _ in StubReply(status: 202, chunks: [Data(#"{"accepted":true}"#.utf8)]) }
+        try await client.runTask(id: "p3r8vx")
+        let entry = try XCTUnwrap(log.entries.first)
+        XCTAssertEqual(entry.request.httpMethod, "POST")
+        try assertSameJSON(entry.body, fixture("commands/task-run.json"))
+        assertCredentials(entry.request)
+    }
 }

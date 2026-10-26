@@ -1,0 +1,26 @@
+{
+  "id": 23,
+  "at": "2026-10-26T00:00:05.000Z",
+  "type": "task.updated",
+  "data": {
+    "id": "y9d4kx",
+    "title": "核对 Hetzner 新机型",
+    "brief": "看 Hetzner 定价页上新增的机型，列出规格和月价。",
+    "origin": "manual",
+    "schedule": {
+      "kind": "once",
+      "at": "2026-10-25T05:00:00.000Z"
+    },
+    "status": "done",
+    "model": "haiku",
+    "budgetUsd": 0.5,
+    "createdAt": "2026-10-24T11:00:00.000Z",
+    "updatedAt": "2026-10-26T00:00:05.000Z",
+    "skips": [
+      {
+        "at": "2026-10-25T05:00:00.000Z",
+        "reason": "missed"
+      }
+    ]
+  }
+}

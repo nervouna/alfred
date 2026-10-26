@@ -16,6 +16,10 @@ import {
   RunDetailSchema,
   RunListSchema,
   RunSchema,
+  TaskDetailSchema,
+  TaskListSchema,
+  TaskResultSchema,
+  TaskSchema,
   UploadResultSchema,
   parseCommand,
 } from "./schema.ts";
@@ -40,6 +44,9 @@ const SCHEMAS_BY_NAME: Record<string, ZodType> = {
   "push-registration": PushRegistrationSchema,
   "run-detail": RunDetailSchema,
   "run-list": RunListSchema,
+  "task-detail": TaskDetailSchema,
+  "task-list": TaskListSchema,
+  "task-result": TaskResultSchema,
   "upload-result": UploadResultSchema,
 };
 
@@ -323,4 +330,44 @@ test("question.answer names a question and gives each answer 1 to 2000 character
   assert.equal(answer({ questionId: "has space" }).ok, false);
   assert.equal(answer({ cancelled: true }).ok, false, "an unknown key");
   assert.deepEqual(answer({ questionId: "q 1" }), { ok: false, error: "questionId: must be 1-64 letters, digits, _ or -" });
+});
+
+const taskCreate = (schedule: unknown) => parseCommand({ type: "task.create", title: "每日 VPS 价格", brief: "查定价页。", schedule });
+
+test("a task's time of day is HH:MM from 00:00 to 23:59, in daily and weekly schedules alike", () => {
+  const daily = (time: string) => taskCreate({ kind: "daily", time }).ok;
+  assert.equal(daily("00:00"), true);
+  assert.equal(daily("23:59"), true);
+  for (const time of ["24:00", "9:00", "12:60", "12:5", "12:00:00", "1200", "12-00"]) {
+    assert.equal(daily(time), false, time);
+  }
+  const weekly = (time: string) => taskCreate({ kind: "weekly", days: [1], time }).ok;
+  assert.equal(weekly("23:59"), true);
+  assert.equal(weekly("24:00"), false, "weekly uses the same time");
+});
+
+test("a weekly task's weekdays are 1 to 7 (Monday is 1) in strictly ascending order, and an interval is 1 to 168 hours", () => {
+  const weekly = (days: unknown) => taskCreate({ kind: "weekly", days, time: "08:30" }).ok;
+  assert.equal(weekly([1]), true);
+  assert.equal(weekly([1, 3, 7]), true);
+  for (const days of [[], [0], [8], [3, 1], [1, 1], [1.5]]) assert.equal(weekly(days), false, JSON.stringify(days));
+  const interval = (hours: unknown) => taskCreate({ kind: "interval", hours }).ok;
+  assert.equal(interval(1), true);
+  assert.equal(interval(168), true);
+  for (const hours of [0, 169, 1.5]) assert.equal(interval(hours), false, String(hours));
+});
+
+test("a task.update needs a change besides its taskId", () => {
+  assert.equal(parseCommand({ type: "task.update", taskId: "p3r8vx" }).ok, false, "no change");
+  assert.equal(parseCommand({ type: "task.update", taskId: "p3r8vx", status: "paused" }).ok, true);
+  assert.equal(parseCommand({ type: "task.update", taskId: "p3r8vx", schedule: { kind: "interval", hours: 6 } }).ok, true);
+});
+
+test("a task command's schedule rejects unknown keys, and a task ignores them", () => {
+  assert.equal(taskCreate({ kind: "daily", time: "09:00", day: 1 }).ok, false, "a command");
+  const task = JSON.parse(readFixture("responses", "task-result.json")).task as Record<string, unknown>;
+  const withExtra = { ...task, schedule: { ...(task.schedule as object), day: 1 } };
+  const parsed = TaskSchema.safeParse(withExtra);
+  assert.equal(parsed.success, true, "a task");
+  assert.deepEqual(parsed.data?.schedule, { kind: "daily", time: "09:00" });
 });

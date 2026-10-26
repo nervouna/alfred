@@ -7,6 +7,7 @@
 
 import { z } from "zod";
 
+import type { ModelKey } from "../agent/config.ts";
 import type { RunKind, RunStatus, RunStep } from "../runs.ts";
 
 /** The command API's request body limit, in bytes. */
@@ -15,12 +16,26 @@ export const MAX_COMMAND_BYTES = 65_536;
 export const MAX_MESSAGE_FILES = 10;
 /** The upload limit for one file, in bytes (50 MiB). */
 export const MAX_UPLOAD_BYTES = 52_428_800;
+/** The most characters a task's title holds. */
+export const MAX_TASK_TITLE_CHARS = 80;
+/** The most a task's run may spend, in USD. */
+export const MAX_TASK_BUDGET_USD = 20;
+/** The longest interval between a task's runs, in hours: one week. */
+export const MAX_INTERVAL_HOURS = 168;
+/** The most skips a task keeps. */
+export const MAX_TASK_SKIPS = 10;
+/** A new task's per-run budget, in USD, when its command gives none. */
+export const DEFAULT_TASK_BUDGET_USD = 2;
+/** A new task's model, when its command gives none. */
+export const DEFAULT_TASK_MODEL = "sonnet";
 const MAX_TEXT_CHARS = 20_000;
 const MAX_ANSWER_CHARS = 2000;
 
 const IsoTimestampSchema = z.iso.datetime();
 // The shape newRunId in src/runs.ts draws from: no 0, o, 1, l or i.
 const RunIdSchema = z.string().regex(/^[2-9a-hjkmnp-z]{6}$/, "must be a six-character run id");
+// A task id has the run id's alphabet and length.
+const TaskIdSchema = z.string().regex(/^[2-9a-hjkmnp-z]{6}$/, "must be a six-character task id");
 const ClientIdSchema = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "must be 1-64 letters, digits, _ or -");
 const QuestionIdSchema = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "must be 1-64 letters, digits, _ or -");
 
@@ -53,6 +68,7 @@ export const MessageSchema = z
     files: z.array(FileRefSchema),
     at: IsoTimestampSchema,
     runId: RunIdSchema.optional(),
+    taskId: TaskIdSchema.optional(),
     clientId: ClientIdSchema.optional(),
     error: z.string().optional(),
   })
@@ -67,11 +83,15 @@ type Expect<T extends true> = T;
 type RunKindMatches = Expect<Equals<z.infer<typeof RunKindSchema>, RunKind>>;
 type RunStatusMatches = Expect<Equals<z.infer<typeof RunStatusSchema>, RunStatus>>;
 
+/** The model a task's runs use: the keys of MODELS in src/agent/config.ts. */
+export const ModelSchema = z.enum(["sonnet", "opus", "haiku"]);
+type ModelMatches = Expect<Equals<z.infer<typeof ModelSchema>, ModelKey>>;
+
 /** The client's view of a run record: the fields of RunRecord it shows, nothing else. */
 export const RunSchema = z.object({
   id: RunIdSchema,
   kind: RunKindSchema,
-  taskId: z.string().optional(),
+  taskId: TaskIdSchema.optional(),
   parentRunId: RunIdSchema.optional(),
   title: z.string(),
   status: RunStatusSchema,
@@ -131,6 +151,88 @@ export const QuestionAnsweredSchema = z
     message: "must be empty when the question was cancelled",
   });
 
+const TaskTitleSchema = z
+  .string()
+  .refine((title) => title.trim() !== "", "must not be blank")
+  .refine((title) => [...title].length <= MAX_TASK_TITLE_CHARS, `must be at most ${MAX_TASK_TITLE_CHARS} characters`);
+
+// A task's brief is what each run is asked to do: the same limit as a message's text.
+const TaskBriefSchema = z
+  .string()
+  .refine((brief) => brief.trim() !== "", "must not be blank")
+  .refine((brief) => [...brief].length <= MAX_TEXT_CHARS, `must be at most ${MAX_TEXT_CHARS} characters`);
+
+const TaskBudgetSchema = z
+  .number()
+  .gt(0, "must be greater than 0")
+  .max(MAX_TASK_BUDGET_USD, `must be at most ${MAX_TASK_BUDGET_USD}`);
+
+// A time of day is 24-hour HH:MM, from 00:00 to 23:59.
+const TimeOfDaySchema = z.string().regex(/^([01][0-9]|2[0-3]):[0-5][0-9]$/, "must be a 24-hour time as HH:MM");
+// ISO 8601 weekdays: 1 is Monday, 7 is Sunday.
+const WeekdaySchema = z.int().min(1, "must be 1 to 7, Monday being 1").max(7, "must be 1 to 7, Monday being 1");
+const WeekdaysSchema = z
+  .array(WeekdaySchema)
+  .min(1, "must have at least 1 weekday")
+  .max(7, "must have at most 7 weekdays")
+  .refine((days) => days.every((day, index) => index === 0 || day > (days[index - 1] ?? 0)), "must be in strictly ascending order");
+const IntervalHoursSchema = z
+  .int()
+  .min(1, "must be at least 1 hour")
+  .max(MAX_INTERVAL_HOURS, `must be at most ${MAX_INTERVAL_HOURS} hours`);
+
+// The shapes of a schedule. A command's schedule is strict; a task in an event or response ignores unknown keys.
+const ONCE_SHAPE = { kind: z.literal("once"), at: IsoTimestampSchema };
+const DAILY_SHAPE = { kind: z.literal("daily"), time: TimeOfDaySchema };
+const WEEKLY_SHAPE = { kind: z.literal("weekly"), days: WeekdaysSchema, time: TimeOfDaySchema };
+const INTERVAL_SHAPE = { kind: z.literal("interval"), hours: IntervalHoursSchema };
+
+/** When a task runs: once at a time, daily or weekly at a time, or every N hours. */
+export const ScheduleSchema = z.discriminatedUnion("kind", [
+  z.object(ONCE_SHAPE),
+  z.object(DAILY_SHAPE),
+  z.object(WEEKLY_SHAPE),
+  z.object(INTERVAL_SHAPE),
+]);
+const ScheduleCommandSchema = z.discriminatedUnion("kind", [
+  z.strictObject(ONCE_SHAPE),
+  z.strictObject(DAILY_SHAPE),
+  z.strictObject(WEEKLY_SHAPE),
+  z.strictObject(INTERVAL_SHAPE),
+]);
+
+const TaskStatusSchema = z.enum(["active", "paused", "done"]);
+const TaskOriginSchema = z.enum(["manual", "chat", "idea"]);
+
+/** A run a task missed or skipped: when it was due, and why it did not run. */
+export const TaskSkipSchema = z.object({
+  at: IsoTimestampSchema,
+  reason: z.enum(["missed", "daily-cap"]),
+});
+
+/** A task: a brief the agent runs on a schedule. `nextRunAt` is absent unless the task is active. */
+export const TaskSchema = z
+  .object({
+    id: TaskIdSchema,
+    title: TaskTitleSchema,
+    brief: TaskBriefSchema,
+    origin: TaskOriginSchema,
+    schedule: ScheduleSchema,
+    status: TaskStatusSchema,
+    model: ModelSchema,
+    budgetUsd: TaskBudgetSchema,
+    createdAt: IsoTimestampSchema,
+    updatedAt: IsoTimestampSchema,
+    nextRunAt: IsoTimestampSchema.optional(),
+    lastRunId: RunIdSchema.optional(),
+    lastRunAt: IsoTimestampSchema.optional(),
+    skips: z.array(TaskSkipSchema).max(MAX_TASK_SKIPS, `must have at most ${MAX_TASK_SKIPS} skips`),
+  })
+  .refine((task) => task.nextRunAt === undefined || task.status === "active", {
+    path: ["nextRunAt"],
+    message: "must be absent unless the task is active",
+  });
+
 const EventEnvelope = { id: z.int().positive(), at: IsoTimestampSchema };
 
 export const EventSchema = z.discriminatedUnion("type", [
@@ -138,6 +240,7 @@ export const EventSchema = z.discriminatedUnion("type", [
   z.object({ ...EventEnvelope, type: z.literal("run.updated"), data: RunSchema }),
   z.object({ ...EventEnvelope, type: z.literal("question.asked"), data: QuestionAskedSchema }),
   z.object({ ...EventEnvelope, type: z.literal("question.answered"), data: QuestionAnsweredSchema }),
+  z.object({ ...EventEnvelope, type: z.literal("task.updated"), data: TaskSchema }),
 ]);
 
 const StreamIdSchema = z.string().regex(/^[A-Za-z0-9_.:-]{1,64}$/, "must be 1-64 letters, digits, _, ., : or -");
@@ -167,6 +270,23 @@ export const RunListSchema = z.object({ runs: z.array(RunSchema) });
 
 /** The body of GET /api/runs/<id>: a run and its step timeline. */
 export const RunDetailSchema = z.object({ run: RunSchema, steps: z.array(StepSchema) });
+
+/** The body of a successful task.create or task.update: the task as Alfred now holds it. */
+export const TaskResultSchema = z.object({ task: TaskSchema });
+
+/** The body of GET /api/tasks: the time zone the schedules are computed in, and the tasks, newest created first. */
+export const TaskListSchema = z.object({
+  timeZone: z.string().min(1, "must not be empty"),
+  tasks: z.array(TaskSchema),
+});
+
+/** The body of GET /api/tasks/<id>: a task and its runs, newest first. Each run is one of the task's. */
+export const TaskDetailSchema = z
+  .object({ task: TaskSchema, runs: z.array(RunSchema) })
+  .refine((detail) => detail.runs.every((run) => run.taskId === detail.task.id), {
+    path: ["runs"],
+    message: "must all belong to the task",
+  });
 
 /** The body of POST /api/uploads: the file Alfred saved under inbox/. */
 export const UploadResultSchema = z.object({
@@ -254,7 +374,44 @@ export const QuestionAnswerSchema = z.strictObject({
   answers: z.record(z.string(), AnswerTextSchema).refine((answers) => Object.keys(answers).length > 0, "must answer at least one question"),
 });
 
-export const CommandSchema = z.discriminatedUnion("type", [MessageSendSchema, RunStopSchema, QuestionAnswerSchema]);
+export const TaskCreateSchema = z.strictObject({
+  type: z.literal("task.create"),
+  title: TaskTitleSchema,
+  brief: TaskBriefSchema,
+  schedule: ScheduleCommandSchema,
+  model: ModelSchema.optional(),
+  budgetUsd: TaskBudgetSchema.optional(),
+});
+
+const TASK_CHANGE_KEYS = ["title", "brief", "schedule", "model", "budgetUsd", "status"] as const;
+
+// A task.update changes at least one field, so an empty one is refused.
+export const TaskUpdateSchema = z
+  .strictObject({
+    type: z.literal("task.update"),
+    taskId: TaskIdSchema,
+    title: TaskTitleSchema.optional(),
+    brief: TaskBriefSchema.optional(),
+    schedule: ScheduleCommandSchema.optional(),
+    model: ModelSchema.optional(),
+    budgetUsd: TaskBudgetSchema.optional(),
+    status: TaskStatusSchema.optional(),
+  })
+  .refine((command) => TASK_CHANGE_KEYS.some((key) => command[key] !== undefined), "must change at least one field besides taskId");
+
+export const TaskRunSchema = z.strictObject({
+  type: z.literal("task.run"),
+  taskId: TaskIdSchema,
+});
+
+export const CommandSchema = z.discriminatedUnion("type", [
+  MessageSendSchema,
+  RunStopSchema,
+  QuestionAnswerSchema,
+  TaskCreateSchema,
+  TaskUpdateSchema,
+  TaskRunSchema,
+]);
 
 export type Channel = z.infer<typeof ChannelSchema>;
 export type FileRef = z.infer<typeof FileRefSchema>;
@@ -269,6 +426,11 @@ export type LiveEvent = z.infer<typeof LiveEventSchema>;
 export type RunList = z.infer<typeof RunListSchema>;
 export type RunDetail = z.infer<typeof RunDetailSchema>;
 export type UploadResult = z.infer<typeof UploadResultSchema>;
+export type Schedule = z.infer<typeof ScheduleSchema>;
+export type Task = z.infer<typeof TaskSchema>;
+export type TaskResult = z.infer<typeof TaskResultSchema>;
+export type TaskList = z.infer<typeof TaskListSchema>;
+export type TaskDetail = z.infer<typeof TaskDetailSchema>;
 export type ErrorResponse = z.infer<typeof ErrorResponseSchema>;
 export type Pairing = z.infer<typeof PairingSchema>;
 export type PushRegistration = z.infer<typeof PushRegistrationSchema>;

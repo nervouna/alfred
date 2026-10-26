@@ -76,3 +76,42 @@ public struct RunStatus: ExtensibleString {
     public static let failed = RunStatus(rawValue: "failed")
     public static let lost = RunStatus(rawValue: "lost")
 }
+
+/// Where a task came from: the owner asked for it, in a chat, or Alfred suggested it as an idea.
+public struct TaskOrigin: ExtensibleString {
+    public let rawValue: String
+
+    public init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+
+    public static let manual = TaskOrigin(rawValue: "manual")
+    public static let chat = TaskOrigin(rawValue: "chat")
+    public static let idea = TaskOrigin(rawValue: "idea")
+}
+
+/// Where a task stands: active runs on its schedule, paused waits, and done does not run again.
+public struct TaskStatus: ExtensibleString {
+    public let rawValue: String
+
+    public init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+
+    public static let active = TaskStatus(rawValue: "active")
+    public static let paused = TaskStatus(rawValue: "paused")
+    public static let done = TaskStatus(rawValue: "done")
+}
+
+/// The model a task's runs use. Alfred's model keys: `sonnet`, `opus` or `haiku`.
+public struct TaskModel: ExtensibleString {
+    public let rawValue: String
+
+    public init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+
+    public static let sonnet = TaskModel(rawValue: "sonnet")
+    public static let opus = TaskModel(rawValue: "opus")
+    public static let haiku = TaskModel(rawValue: "haiku")
+}
