@@ -127,12 +127,12 @@ struct TaskDetailView: View {
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("task.queued")
             }
-            if TaskPresentation.canToggle(task) {
-                let pauses = task.status == .active
+            if let toggle = TaskPresentation.toggle(task) {
+                let pauses = toggle.status == .paused
                 Button {
-                    Task { await change(TaskChanges(status: pauses ? .paused : .active)) }
+                    Task { await change(TaskChanges(status: toggle.status)) }
                 } label: {
-                    Label(pauses ? "暂停" : "恢复", systemImage: pauses ? "pause" : "play.circle")
+                    Label(toggle.label, systemImage: pauses ? "pause" : "play.circle")
                 }
                 .disabled(isWorking)
                 .accessibilityIdentifier(pauses ? "task.pause" : "task.resume")
@@ -163,7 +163,7 @@ struct TaskDetailView: View {
                 LabeledContent("下次运行", value: TaskPresentation.nextRun(next))
             }
             LabeledContent("模型", value: task.model.rawValue)
-            LabeledContent("单次上限", value: RunPresentation.cost(task.budgetUsd))
+            LabeledContent("单次上限", value: TaskPresentation.cap(task.budgetUsd))
             LabeledContent("来源", value: TaskPresentation.originLabel(task.origin))
         }
     }

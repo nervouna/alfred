@@ -32,15 +32,28 @@ final class TaskPresentationTests: XCTestCase {
         XCTAssertTrue(text.contains(":"), text)
     }
 
-    func testOnlyOpenTasksCanBePausedAndOnlyUnendedOnesEnded() throws {
+    func testTheStatusButtonPausesAnActiveTaskAndResumesAPausedOrEndedOne() throws {
         let active = try TestData.task("aaaaaa")
         let paused = try TestData.task("bbbbbb", status: "paused")
         let done = try TestData.task("cccccc", status: "done")
-        XCTAssertTrue(TaskPresentation.canToggle(active))
-        XCTAssertTrue(TaskPresentation.canToggle(paused))
-        XCTAssertFalse(TaskPresentation.canToggle(done))
-        XCTAssertTrue(TaskPresentation.canEnd(active))
-        XCTAssertTrue(TaskPresentation.canEnd(paused))
-        XCTAssertFalse(TaskPresentation.canEnd(done))
+        let unknown = try TestData.task("dddddd", status: "archived")
+        XCTAssertEqual(TaskPresentation.toggle(active)?.label, "暂停")
+        XCTAssertEqual(TaskPresentation.toggle(active)?.status, .paused)
+        XCTAssertEqual(TaskPresentation.toggle(paused)?.label, "恢复")
+        XCTAssertEqual(TaskPresentation.toggle(paused)?.status, .active)
+        XCTAssertEqual(TaskPresentation.toggle(done)?.label, "恢复")
+        XCTAssertEqual(TaskPresentation.toggle(done)?.status, .active)
+        XCTAssertNil(TaskPresentation.toggle(unknown), "a status this app does not know offers no status button")
+    }
+
+    func testOnlyUnendedTasksCanBeEnded() throws {
+        XCTAssertTrue(TaskPresentation.canEnd(try TestData.task("aaaaaa")))
+        XCTAssertTrue(TaskPresentation.canEnd(try TestData.task("bbbbbb", status: "paused")))
+        XCTAssertFalse(TaskPresentation.canEnd(try TestData.task("cccccc", status: "done")))
+    }
+
+    func testTheCapShowsTwoDecimalsAsTheOwnerSetsIt() {
+        XCTAssertEqual(TaskPresentation.cap(0.3), "$0.30")
+        XCTAssertEqual(TaskPresentation.cap(2), "$2.00")
     }
 }

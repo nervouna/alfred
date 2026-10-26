@@ -200,6 +200,22 @@ final class AppModelTasksTests: XCTestCase {
         XCTAssertEqual(model.taskCatalog.task(id: "aaaaaa")?.status, .active)
     }
 
+    func testResumingAnEndedTaskListsItAmongTheOpenTasksAgain() async throws {
+        let (model, server) = try makeModel(
+            updates: [try event(1, TestData.taskObject("aaaaaa", status: "done", updatedAt: "2026-10-26T09:00:00.000Z"))],
+            commands: [try result(TestData.taskObject("aaaaaa", status: "active", updatedAt: "2026-10-26T10:00:00.000Z"))]
+        )
+        model.foreground()
+        await eventually { model.taskCatalog.ended.count == 1 }
+
+        try await model.updateTask(id: "aaaaaa", changes: TaskChanges(status: .active))
+
+        let sent = try XCTUnwrap(server.requests(to: "/api/commands").first?.chatCommand)
+        XCTAssertEqual(sent["status"] as? String, "active")
+        XCTAssertEqual(model.taskCatalog.open.map(\.id), ["aaaaaa"])
+        XCTAssertEqual(model.taskCatalog.ended, [])
+    }
+
     func testRunningATaskPostsTaskRun() async throws {
         let (model, server) = try makeModel()
         try await model.runTask(id: "aaaaaa")
