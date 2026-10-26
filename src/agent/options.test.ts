@@ -178,3 +178,71 @@ test("an unattended run, such as a scheduled task's, keeps no session, has its o
   assert.equal(chat.persistSession, undefined);
   assert.equal(chat.maxBudgetUsd, MAX_BUDGET_USD);
 });
+
+/** The tools of Alfred's in-process MCP server in these options, by name. */
+function alfredTools(options: ReturnType<typeof agentOptions>): string[] {
+  const server = options.mcpServers?.alfred as unknown as { instance: { _registeredTools: Record<string, unknown> } };
+  return Object.keys(server.instance._registeredTools);
+}
+
+let taskStores = 0;
+/** A task store of its own in the temp dir. */
+async function taskStore() {
+  const { TaskStore } = await import("../tasks/store.ts");
+  const { EventLog } = await import("../events.ts");
+  const n = taskStores++;
+  return new TaskStore({ file: path.join(tmp, `tasks-${n}.json`), events: new EventLog(path.join(tmp, `events-${n}.jsonl`)) });
+}
+
+test("the task tools are offered to a run that can ask and has a task store, and to no other run", async () => {
+  const { TASK_TOOL_NAMES } = await import("./task-tools.ts");
+  prepareWorkspace();
+  const tasks = await taskStore();
+  const ask = async () => ({ cancelled: true as const });
+  const names = TASK_TOOL_NAMES.map((name) => name.replace("mcp__alfred__", ""));
+  const base = ["send_file", "move_file", "render_pdf", "generate_image"];
+
+  const chat = agentOptions({ out: appOutbound(), model: "sonnet", ask, tasks });
+  assert.deepEqual(alfredTools(chat), [...base, ...names]);
+  for (const name of TASK_TOOL_NAMES) assert.ok(chat.allowedTools?.includes(name), name);
+  assert.match(String(chat.systemPrompt), /^# Tasks$/m);
+
+  const others = {
+    "a run of a task, whatever it is given": agentOptions({ out: appOutbound(), model: "sonnet", ask, tasks, task: { budgetUsd: 1 } }),
+    "a run without a task store": agentOptions({ out: appOutbound(), model: "sonnet", ask }),
+    "a run that cannot ask, so could not confirm": agentOptions({ out: appOutbound(), model: "sonnet", tasks }),
+  };
+  for (const [what, options] of Object.entries(others)) {
+    assert.deepEqual(alfredTools(options), base, what);
+    assert.ok(!options.allowedTools?.some((name) => name.includes("task_")), what);
+    assert.doesNotMatch(String(options.systemPrompt), /^# Tasks$/m, what);
+  }
+});
+
+test("a run that waits on the owner's tap is not cut off after a day: the tools' server waits as long as a question does", async () => {
+  const { QUESTION_HOOK_TIMEOUT_SECONDS } = await import("./questions.ts");
+  prepareWorkspace();
+  const tasks = await taskStore();
+  const server = (o: ReturnType<typeof agentOptions>) => o.mcpServers?.alfred as unknown as { timeout?: number };
+  const chat = agentOptions({ out: appOutbound(), model: "sonnet", ask: async () => ({ cancelled: true as const }), tasks });
+  assert.equal(server(chat).timeout, QUESTION_HOOK_TIMEOUT_SECONDS * 1000);
+  assert.equal(server(agentOptions({ out: appOutbound(), model: "sonnet" })).timeout, undefined, "the other runs keep the SDK's default");
+});
+
+test("the Tasks section is short and says: only on request, the tap is the owner's, the zone, the models, and pause without asking", async () => {
+  prepareWorkspace();
+  const tasks = await taskStore();
+  const prompt = String(agentOptions({ out: appOutbound(), model: "sonnet", ask: async () => ({ cancelled: true as const }), tasks }).systemPrompt);
+  const section = /^# Tasks\n([\s\S]*?)(?:\n\n|(?![\s\S]))/m.exec(prompt)?.[1] ?? "";
+  assert.ok(section, "the section is there");
+  assert.ok(section.split(/\s+/).length <= 120, `${section.split(/\s+/).length} words`);
+  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  assert.match(section, /only when the owner asks for scheduled or recurring work, never on your own initiative/);
+  assert.match(section, /waits for the owner's tap in the app/);
+  assert.match(section, /say what you proposed and what happened/);
+  assert.match(section, /do not repeat the question/);
+  assert.ok(section.includes(zone), "names the owner's zone");
+  assert.match(section, /haiku or sonnet/);
+  assert.match(section, /per-run cap/);
+  assert.match(section, /[Pp]ause or end .* without asking/);
+});
