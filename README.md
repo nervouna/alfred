@@ -420,9 +420,8 @@ src/agent/          Agent SDK handler (intake queue, routing, stop), structured 
 src/files.ts        file name, date and text helpers
 src/pdf.ts          Markdown/HTML to PDF rendering
 src/runs.ts         run ids and records, the heartbeat: what the workbench reads
-src/documents/      versions of the workspace in git: the git dir outside the workspace, the versioning rules, commit, show, changed files and restore; later also documents and annotations
+src/documents/      versions of the workspace in git, and the document store (the only writer of workbench/documents.json)
 src/tasks/          the owner's tasks: schedule arithmetic in the owner's time zone, the task store (the only writer of workbench/tasks.json), and the API's task commands over the store and the handler
-src/documents/      the document store: the owner's delivered files, their versions, annotations and replies (the only writer of workbench/documents.json)
 src/workbench/      the read-only workbench: server, Access check, pages, safe Markdown
 src/cli.ts          run | status | setup-pdf | pdf | memory-scan | workbench | apns-test | pair | devices | api
 plugin/             the baked skills plugin `alfred`
