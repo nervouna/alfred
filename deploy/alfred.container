@@ -6,7 +6,7 @@
 # two on every update. Host settings go in a drop-in instead, e.g.
 # ~/.config/containers/systemd/alfred.container.d/host.conf (see the README).
 [Unit]
-Description=Alfred WeChat assistant
+Description=Alfred research assistant
 
 [Container]
 Image=localhost/alfred:latest
@@ -23,7 +23,7 @@ Secret=alfred_anthropic_api_key,type=env,target=ALFRED_ANTHROPIC_API_KEY
 Secret=alfred_mmx_config,type=mount,target=/home/node/.mmx/config.json,uid=1000,gid=1000,mode=0400
 # Node runs as PID 1 and spawns Claude Code and mmx process trees; an init reaps them.
 RunInit=true
-# Shutdown waits up to 10 s for running tasks and 10 s for the iLink stop notice;
+# Shutdown waits up to 10 s for running tasks, then records what it stopped;
 # podman's default of 10 s would kill it partway.
 StopTimeout=30
 NoNewPrivileges=true
