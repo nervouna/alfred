@@ -1,7 +1,7 @@
 import XCTest
 
-/// Pairs the app with a running `scripts/app-dev.ts`, has Alfred write a file, and follows it through the 任务 and
-/// 文档 tabs and the viewer. The pairing comes from the environment variable `ALFRED_PAIRING` (pass
+/// Pairs the app with a running `scripts/app-dev.ts`, has Alfred write a file, and follows it through the 任务 tab and
+/// the viewer. The pairing comes from the environment variable `ALFRED_PAIRING` (pass
 /// `TEST_RUNNER_ALFRED_PAIRING` to xcodebuild); without it the tests skip themselves, so CI and plain test runs
 /// need no stack. Each test runs the model once, for about a tenth of a cent.
 final class RunsUITests: XCTestCase {
@@ -9,7 +9,7 @@ final class RunsUITests: XCTestCase {
     private let modelPatience: TimeInterval = 120
 
     @MainActor
-    func testARunShowsItsFileInTheRunsAndDocumentsTabs() throws {
+    func testARunShowsItsFileInTheRunsTab() throws {
         let app = try launchPaired()
 
         // The stack may hold runs from an earlier test; this one looks for the run it starts.
@@ -34,13 +34,6 @@ final class RunsUITests: XCTestCase {
         XCTAssertTrue(shows("你好", in: app), "the viewer does not show the file\n\(app.debugDescription)")
         XCTAssertTrue(element("viewer.markdown", in: app).exists, "a Markdown file opens in the Markdown viewer")
         XCTAssertTrue(app.buttons["viewer.share"].exists || app.buttons["Share"].exists, "the viewer has no share button\n\(app.debugDescription)")
-
-        // The 文档 tab lists it too.
-        openTab("文档", in: app)
-        let document = element("document.row.notes/hi.md", in: app)
-        XCTAssertTrue(document.waitForExistence(timeout: patience), "the 文档 tab does not list notes/hi.md\n\(app.debugDescription)")
-        document.tap()
-        XCTAssertTrue(shows("你好", in: app), "the file does not open from the 文档 tab\n\(app.debugDescription)")
     }
 
     @MainActor

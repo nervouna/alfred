@@ -3,27 +3,50 @@ import SwiftUI
 import WebKit
 
 /// A screen that downloads a workspace file and shows it in the viewer its extension picks. It is pushed from a
-/// run's files, the 文档 list and a file chip in the chat. A failed download shows its reason and a retry.
+/// run's files and from a file chip in the chat that names no document. A failed download shows its reason and a retry.
 struct FileViewerScreen: View {
     let path: String
-    @Environment(AppModel.self) private var model
     @State private var download = FileDownload()
 
     var body: some View {
-        content
-            .navigationTitle(DocumentEntry(path: path, date: .distantPast).name)
+        FileViewer(path: path, download: download)
+            .navigationTitle(DocumentPresentation.name(of: path))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                if case let .loaded(url) = download.state {
+                if let url = download.loadedURL {
                     ToolbarItem(placement: .topBarTrailing) {
                         ShareLink(item: url)
                             .accessibilityIdentifier("viewer.share")
                     }
                 }
             }
-            .task {
-                if case .loaded = download.state { return }
-                await download.load(path: path, using: model.client)
+    }
+}
+
+/// The viewer of one workspace file, at a version or as it is now: it downloads the file into `download`, and shows
+/// what the download holds in the viewer the extension picks. For a Markdown file, `previousVersion` names the version
+/// to compare with, and the blocks that changed since it are marked. The screen around it owns the download, so its
+/// toolbar can share the file.
+struct FileViewer: View {
+    let path: String
+    /// The version to show; `nil` is the file as it is now.
+    var version: String?
+    /// The version before `version`, for a Markdown file; `nil` marks nothing.
+    var previousVersion: String?
+    let download: FileDownload
+    @Environment(AppModel.self) private var model
+
+    init(path: String, version: String? = nil, previousVersion: String? = nil, download: FileDownload) {
+        self.path = path
+        self.version = version
+        self.previousVersion = previousVersion
+        self.download = download
+    }
+
+    var body: some View {
+        content
+            .task(id: FileDownload.Key(path: path, version: version)) {
+                await download.ensureLoaded(path: path, version: version, using: model.client)
             }
     }
 
@@ -40,25 +63,39 @@ struct FileViewerScreen: View {
                     .accessibilityIdentifier("viewer.failure")
             } actions: {
                 Button("重试") {
-                    Task { await download.load(path: path, using: model.client) }
+                    Task { await download.load(path: path, version: version, using: model.client) }
                 }
                 .accessibilityIdentifier("viewer.retry")
             }
         case let .loaded(url):
-            FileContent(url: url, kind: FileViewerKind(path: path))
+            FileContent(
+                url: url,
+                kind: FileViewerKind(path: path),
+                comparison: previousVersion.map { Comparison(path: path, version: $0, download: download) }
+            )
+            // A file of another version is another screen: nothing of the one before it stays.
+            .id(url)
         }
     }
+}
+
+/// The version a Markdown file is compared with, and the download that holds it.
+private struct Comparison {
+    let path: String
+    let version: String
+    let download: FileDownload
 }
 
 /// The viewer for a downloaded file.
 private struct FileContent: View {
     let url: URL
     let kind: FileViewerKind
+    let comparison: Comparison?
 
     var body: some View {
         switch kind {
         case .markdown:
-            TextFile(url: url) { MarkdownView(blocks: MarkdownDocument.blocks(from: $0.text)) }
+            MarkdownFile(url: url, comparison: comparison)
         case .pdf:
             PDFFile(url: url)
         case .image:
@@ -87,6 +124,70 @@ enum FileText {
         defer { try? handle.close() }
         let data = try handle.read(upToCount: limit + 1) ?? Data()
         return Content(text: String(decoding: data.prefix(limit), as: UTF8.self), isTruncated: data.count > limit)
+    }
+}
+
+/// A Markdown file as blocks. With a version to compare with, the blocks that changed since it are marked once that
+/// version has been fetched; until then, and when it cannot be fetched, the file shows without marks.
+private struct MarkdownFile: View {
+    let url: URL
+    let comparison: Comparison?
+    @Environment(AppModel.self) private var model
+    @State private var blocks: [MarkdownBlock]?
+    @State private var changed: Set<Int> = []
+    @State private var failure: String?
+    @State private var comparisonFailed = false
+
+    private struct Job: Hashable {
+        let url: URL
+        let previous: String?
+    }
+
+    var body: some View {
+        Group {
+            if let blocks {
+                VStack(spacing: 0) {
+                    MarkdownView(blocks: blocks, changed: changed)
+                    if comparisonFailed {
+                        Text("无法载入上一个版本，没有标出修改")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity)
+                            .padding(8)
+                            .background(.bar)
+                            .accessibilityIdentifier("viewer.comparisonFailure")
+                    }
+                }
+            } else if let failure {
+                ContentUnavailableView("无法读取文件", systemImage: "exclamationmark.triangle", description: Text(failure))
+            } else {
+                ProgressView()
+            }
+        }
+        .task(id: Job(url: url, previous: comparison?.version)) { await load() }
+    }
+
+    private func load() async {
+        let current: [MarkdownBlock]
+        do {
+            current = MarkdownDocument.blocks(from: try FileText.read(url).text)
+        } catch {
+            failure = error.localizedDescription
+            return
+        }
+        blocks = current
+        changed = []
+        comparisonFailed = false
+        guard let comparison else { return }
+        do {
+            let file = try await comparison.download.file(path: comparison.path, version: comparison.version, using: model.client)
+            let previous = MarkdownDocument.blocks(from: try FileText.read(file).text)
+            changed = await Task.detached { MarkdownChanges.changedBlockIds(previous: previous, current: current) }.value
+        } catch where LoadFailure.isCancellation(error) {
+            return
+        } catch {
+            comparisonFailed = true
+        }
     }
 }
 

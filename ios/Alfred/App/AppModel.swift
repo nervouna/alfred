@@ -76,6 +76,10 @@ final class AppModel {
     private(set) var taskCatalog = TaskCatalog()
     /// Why the last read of the task list failed, until a read works.
     private(set) var taskFailure: String?
+    /// The owner's documents: the list read from the server, kept current by `document.updated` events.
+    private(set) var documentCatalog = DocumentCatalog()
+    /// Why the last read of the document list failed, until a read works.
+    private(set) var documentFailure: String?
     /// Whether the event stream is connected right now.
     private(set) var isConnected = false
     /// The access error that stopped the stream, until the owner pairs again or retries.
@@ -213,6 +217,8 @@ final class AppModel {
         timeline = Timeline()
         taskCatalog = TaskCatalog()
         taskFailure = nil
+        documentCatalog = DocumentCatalog()
+        documentFailure = nil
         failedClientIds = []
         AttachmentStaging.discard(draftAttachments + outgoingAttachments.values.flatMap { $0 })
         draftAttachments = []
@@ -298,6 +304,7 @@ final class AppModel {
         case let .received(event):
             timeline.apply(event)
             taskCatalog.apply(event)
+            documentCatalog.apply(event)
             trackItem(of: event)
             if case let .event(stored) = event, case let .messageCreated(message) = stored.payload, let clientId = message.clientId {
                 failedClientIds.remove(clientId)
@@ -447,6 +454,26 @@ final class AppModel {
                 noteAccess(error)
             }
             throw error
+        }
+    }
+
+    // MARK: Documents
+
+    /// Reads the document list (`GET /api/documents`) and merges it with what events have told. The tab asks for it when
+    /// it appears and on pull to refresh. A failure is kept in `documentFailure`.
+    func refreshDocuments() async {
+        guard let client, let credentials else { return }
+        do {
+            let list = try await client.documents()
+            // The pairing may have changed while the request was out.
+            guard self.credentials == credentials else { return }
+            documentCatalog.load(list)
+            documentFailure = nil
+        } catch where LoadFailure.isCancellation(error) {
+            return
+        } catch {
+            guard self.credentials == credentials else { return }
+            documentFailure = LoadFailure.message(for: error)
         }
     }
 
