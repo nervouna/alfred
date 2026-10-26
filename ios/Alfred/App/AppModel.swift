@@ -49,6 +49,16 @@ final class AppModel {
         var id: String { runId }
     }
 
+    /// A scheduled task's run that is running, as the banner above the composer shows it: the task's title (the run's
+    /// when the app does not know the task) and the latest step.
+    struct TaskRunBanner: Identifiable, Hashable {
+        let runId: String
+        let title: String
+        let stepText: String?
+
+        var id: String { runId }
+    }
+
     /// A message or a question card the chat should scroll to. `number` is new for each request, so asking for the same
     /// row twice scrolls twice.
     struct RevealRequest: Hashable {
@@ -631,28 +641,46 @@ final class AppModel {
 
     // MARK: What the chat shows
 
-    /// The newest task that is running: the one the stop button stops.
-    var runningTask: Run? {
+    /// The newest chat run that is running: the one the stop button stops. A chat run is a run of kind `task` without a
+    /// `taskId`. A scheduled task's run is not the chat's; `taskRunBanners` shows it.
+    var runningChatRun: Run? {
         timeline.runs.values
-            .filter { $0.kind == .task && $0.status == .running }
+            .filter { $0.kind == .task && $0.taskId == nil && $0.status == .running }
             .max { $0.startedAt < $1.startedAt }
     }
 
+    /// The scheduled task runs that are running, oldest first, for the banner above the composer.
+    var taskRunBanners: [TaskRunBanner] {
+        timeline.runs.values
+            .filter { $0.kind == .task && $0.taskId != nil && $0.status == .running }
+            .sorted { ($0.startedAt, $0.id) < ($1.startedAt, $1.id) }
+            .map { run in
+                let title = run.taskId.flatMap { taskCatalog.task(id: $0)?.title } ?? run.title
+                return TaskRunBanner(runId: run.id, title: title, stepText: stepText(of: run.id))
+            }
+    }
+
     /// The replies being written and the steps being taken, oldest run first. A run shows when it has a draft, or
-    /// when it is a running task with a step.
+    /// when it is a running chat run with a step. A scheduled task's run never shows here: the banner does.
     var liveReplies: [LiveReply] {
         let runIds = Set(timeline.drafts.keys).union(
             timeline.runs.values.filter { $0.kind == .task && $0.status == .running }.map(\.id)
         )
         return runIds
+            .filter { timeline.runs[$0]?.taskId == nil }
             .compactMap { runId -> (Date, LiveReply)? in
                 let draft = timeline.drafts[runId].map(\.text).flatMap { $0.isEmpty ? nil : $0 }
-                let step = timeline.latestStep[runId].map { "\($0.tool)：\($0.detail)" }
+                let step = stepText(of: runId)
                 guard draft != nil || step != nil else { return nil }
                 let started = timeline.runs[runId]?.startedAt ?? .distantPast
                 return (started, LiveReply(runId: runId, text: draft, stepText: step))
             }
             .sorted { ($0.0, $0.1.runId) < ($1.0, $1.1.runId) }
             .map(\.1)
+    }
+
+    /// A run's latest step as the chat shows it: `WebFetch：https://…`.
+    private func stepText(of runId: String) -> String? {
+        timeline.latestStep[runId].map { "\($0.tool)：\($0.detail)" }
     }
 }

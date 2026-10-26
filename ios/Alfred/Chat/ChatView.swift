@@ -314,6 +314,50 @@ private struct LiveReplyRow: View {
     }
 }
 
+/// The scheduled task runs that are running, one thin row each above the composer, with the run's latest step under the
+/// title. A row opens the run's detail, which has its own stop.
+private struct TaskRunBanners: View {
+    let model: AppModel
+
+    var body: some View {
+        VStack(spacing: 4) {
+            ForEach(model.taskRunBanners) { banner in
+                NavigationLink {
+                    RunDetailView(runId: banner.runId)
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "checklist")
+                            .accessibilityHidden(true)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("定时任务「\(banner.title)」运行中")
+                                .lineLimit(1)
+                            if let step = banner.stepText {
+                                Text(step)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                        }
+                        Spacer(minLength: 0)
+                        Image(systemName: "chevron.right")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .accessibilityHidden(true)
+                    }
+                    .font(.footnote)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10))
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("taskRunBanner")
+            }
+        }
+        .frame(maxWidth: .infinity)
+    }
+}
+
 private struct Composer: View {
     let model: AppModel
     @State private var text = ""
@@ -336,6 +380,9 @@ private struct Composer: View {
 
     var body: some View {
         VStack(spacing: 8) {
+            if !model.taskRunBanners.isEmpty {
+                TaskRunBanners(model: model)
+            }
             if !model.draftAttachments.isEmpty || model.isStaging || loadingPhotos > 0 {
                 AttachmentStrip(model: model, loadingPhotos: loadingPhotos > 0)
             }
@@ -356,7 +403,7 @@ private struct Composer: View {
                     .padding(.vertical, 8)
                     .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 18))
                     .accessibilityIdentifier("composer")
-                if let run = model.runningTask {
+                if let run = model.runningChatRun {
                     Button {
                         Task { await model.stop(runId: run.id) }
                     } label: {
