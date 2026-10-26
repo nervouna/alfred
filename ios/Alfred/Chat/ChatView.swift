@@ -56,7 +56,13 @@ private struct ConnectingBanner: View {
 /// writing. The list keeps to the bottom as content arrives.
 private struct MessageList: View {
     let model: AppModel
+    /// The rows at least half on screen, by id.
+    @State private var visibleIds: Set<String> = []
     private let bottom = "bottom"
+
+    /// How often, and how many times, a tapped notification's row is scrolled to until it is seen.
+    private static let revealInterval = Duration.milliseconds(100)
+    private static let revealAttempts = 40
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -80,13 +86,43 @@ private struct MessageList: View {
                 }
                 .padding(.horizontal)
                 .padding(.vertical, 12)
+                .scrollTargetLayout()
             }
             .defaultScrollAnchor(.bottom)
             .scrollDismissesKeyboard(.interactively)
+            .onScrollTargetVisibilityChange(idType: String.self, threshold: 0.5) { visibleIds = Set($0) }
             .onChange(of: contentSignature) {
+                // A tapped notification's row is being shown: new content must not take the list away from it.
+                guard model.revealRequest == nil else { return }
                 proxy.scrollTo(bottom, anchor: .bottom)
             }
+            .task(id: model.revealRequest) {
+                await reveal(model.revealRequest, using: proxy)
+            }
         }
+    }
+
+    /// Shows the row a tapped notification names, and holds the request until the row has been seen. One scroll is not
+    /// enough: the list is usually new (the tap switched tabs), and a scroll made before it has laid out its rows lands
+    /// on an estimate of where the row is, or is overridden by the list's own start at the bottom, and then nothing
+    /// corrects it. So it scrolls again, every 100 ms, until the row is on screen at two checks in a row, or 40 tries
+    /// have passed.
+    private func reveal(_ request: AppModel.RevealRequest?, using proxy: ScrollViewProxy) async {
+        guard let request else { return }
+        var seen = 0
+        for _ in 0..<Self.revealAttempts {
+            if visibleIds.contains(request.itemId) {
+                seen += 1
+                if seen == 2 { break }
+            } else {
+                seen = 0
+                proxy.scrollTo(request.itemId, anchor: .center)
+            }
+            try? await Task.sleep(for: Self.revealInterval)
+            // A newer request, or the list going away, ends this one; the model keeps a request that was not seen.
+            if Task.isCancelled { return }
+        }
+        model.revealHandled(request)
     }
 
     /// Changes whenever something is added to the list or grows.

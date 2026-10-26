@@ -24,6 +24,7 @@ targets:
     platform: iOS
     sources:
       - path: Alfred
+      - path: Shared
     dependencies:
       - package: AlfredKit
       - target: AlfredShare
@@ -40,6 +41,9 @@ targets:
           NSAllowsLocalNetworking: true
         # The keychain group the app shares with the Share Extension; the app reads it from here.
         AlfredKeychainAccessGroup: $(AppIdentifierPrefix)$(ALFRED_BUNDLE_ID)
+        # The APNs gateway the app's device token belongs to. The owner installs a development-signed build, so its
+        # aps-environment entitlement (Alfred.entitlements) is development too.
+        AlfredAPNsEnvironment: development
     entitlements:
       path: Alfred/Alfred.entitlements
       properties:
@@ -83,11 +87,16 @@ targets:
     platform: iOS
     sources:
       - path: AlfredShare
+      - path: Shared
+    dependencies:
+      - package: AlfredKit
     info:
       path: AlfredShare/Info.plist
       properties:
         CFBundleDisplayName: Alfred
         CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
+        # The keychain group the extension reads the app's credentials from, the same one the app writes them to.
+        AlfredKeychainAccessGroup: $(AppIdentifierPrefix)$(ALFRED_BUNDLE_ID)
         NSExtension:
           NSExtensionAttributes:
             NSExtensionActivationRule: 'SUBQUERY(extensionItems, $item, SUBQUERY($item.attachments, $a, (ANY $a.registeredTypeIdentifiers UTI-CONFORMS-TO "public.url") OR (ANY $a.registeredTypeIdentifiers UTI-CONFORMS-TO "com.adobe.pdf") OR (ANY $a.registeredTypeIdentifiers UTI-CONFORMS-TO "public.image")).@count == 1).@count == 1 AND extensionItems.@count == 1'

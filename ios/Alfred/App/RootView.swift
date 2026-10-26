@@ -7,6 +7,10 @@ struct RootView: View {
 
     var body: some View {
         content
+            .task {
+                // Each launch while paired asks for notification permission and a token again.
+                model.startPush()
+            }
             .onChange(of: scenePhase, initial: true) { _, phase in
                 switch phase {
                 case .active: model.foreground()
@@ -24,14 +28,14 @@ struct RootView: View {
         } else if let failure = model.streamFailure {
             StreamFailureView(model: model, failure: failure)
         } else {
-            TabView {
-                Tab("对话", systemImage: "bubble.left") {
+            TabView(selection: $model.selectedTab) {
+                Tab("对话", systemImage: "bubble.left", value: AppTab.chat) {
                     ChatView(model: model)
                 }
-                Tab("运行", systemImage: "gearshape.2") {
+                Tab("运行", systemImage: "gearshape.2", value: AppTab.runs) {
                     RunsView()
                 }
-                Tab("文档", systemImage: "doc.text") {
+                Tab("文档", systemImage: "doc.text", value: AppTab.documents) {
                     DocumentsView()
                 }
             }

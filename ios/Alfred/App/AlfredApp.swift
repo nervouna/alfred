@@ -2,11 +2,11 @@ import SwiftUI
 
 @main
 struct AlfredApp: App {
-    @State private var model = AppModel.live()
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
     var body: some Scene {
         WindowGroup {
-            RootView(model: model)
+            RootView(model: delegate.model)
         }
     }
 }
