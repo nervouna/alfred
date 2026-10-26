@@ -160,8 +160,8 @@ test("buildPrompt attaches the records of runs a message names", () => {
 });
 
 test("lostNote names the runs a restart cut short", () => {
-  assert.equal(lostNote([{ id: "k7m2qa", title: "VPS 对比" }]), "Alfred 重启时中断了 1 个任务：「VPS 对比」（k7m2qa）。需要的话请重发。");
-  assert.match(lostNote([{ id: "k7m2qa", title: "a" }, { id: "p3x9za", title: "b" }]), /中断了 2 个任务：「a」（k7m2qa）、「b」（p3x9za）。/);
+  assert.equal(lostNote([{ id: "k7m2qa", title: "VPS 对比" }]), "Alfred 重启时中断了 1 个运行：「VPS 对比」（k7m2qa）。需要的话请重发。");
+  assert.match(lostNote([{ id: "k7m2qa", title: "a" }, { id: "p3x9za", title: "b" }]), /中断了 2 个运行：「a」（k7m2qa）、「b」（p3x9za）。/);
 });
 
 test("the workbench section gives the agent the workbench, card and Files links when a URL is set", () => {
