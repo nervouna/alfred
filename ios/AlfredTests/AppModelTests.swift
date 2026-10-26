@@ -364,18 +364,40 @@ final class AppModelTests: XCTestCase {
 
     // MARK: What the chat shows
 
-    func testAStopButtonTargetsTheNewestRunningTask() async throws {
+    func testAStopButtonTargetsTheNewestRunningChatRun() async throws {
         let frames = [
             runFrame(id: 1, runId: "aaaaaa", status: "done"),
             runFrame(id: 2, runId: "bbbbbb", kind: "subagent", status: "running"),
             runFrame(id: 3, runId: "cccccc", status: "running"),
         ]
         let (model, _, _) = try makeModel(credentials: true, replies: ["/api/events": [.stream(frames)]])
-        XCTAssertNil(model.runningTask)
+        XCTAssertNil(model.runningChatRun)
 
         model.foreground()
         await eventually { model.timeline.lastEventId == 3 }
-        XCTAssertEqual(model.runningTask?.id, "cccccc")
+        XCTAssertEqual(model.runningChatRun?.id, "cccccc")
+    }
+
+    func testAStopButtonTargetsTheChatRunAndNotANewerTaskRun() async throws {
+        let frames = [
+            runFrame(id: 1, runId: "cccccc", status: "running", startedAt: "2026-10-25T08:00:00.000Z"),
+            runFrame(id: 2, runId: "dddddd", status: "running", taskId: "aaaaaa", startedAt: "2026-10-25T09:00:00.000Z"),
+        ]
+        let (model, _, _) = try makeModel(credentials: true, replies: ["/api/events": [.stream(frames)]])
+        model.foreground()
+        await eventually { model.timeline.lastEventId == 2 }
+
+        XCTAssertEqual(model.runningChatRun?.id, "cccccc")
+        XCTAssertEqual(model.taskRunBanners.map(\.runId), ["dddddd"])
+    }
+
+    func testAStopButtonGoesWhenOnlyATaskRunIsRunning() async throws {
+        let frames = [runFrame(id: 1, runId: "dddddd", status: "running", taskId: "aaaaaa")]
+        let (model, _, _) = try makeModel(credentials: true, replies: ["/api/events": [.stream(frames)]])
+        model.foreground()
+        await eventually { model.timeline.lastEventId == 1 }
+
+        XCTAssertNil(model.runningChatRun)
     }
 
     func testTheStopButtonGoesWhenTheRunEnds() async throws {
@@ -386,7 +408,59 @@ final class AppModelTests: XCTestCase {
         let (model, _, _) = try makeModel(credentials: true, replies: ["/api/events": [.stream(frames)]])
         model.foreground()
         await eventually { model.timeline.lastEventId == 2 }
-        XCTAssertNil(model.runningTask)
+        XCTAssertNil(model.runningChatRun)
+    }
+
+    func testTheBannerNamesARunningTaskRunByItsTasksTitleAndShowsItsLatestStep() async throws {
+        let frames = [
+            taskFrame(id: 1, task: TestData.taskObject("aaaaaa", title: "每日简报")),
+            runFrame(id: 2, runId: "dddddd", status: "running", taskId: "aaaaaa"),
+            stepFrame(runId: "dddddd", tool: "Read", detail: "notes.md"),
+        ]
+        let (model, _, _) = try makeModel(credentials: true, replies: ["/api/events": [.stream(frames)]])
+        model.foreground()
+        await eventually { model.timeline.latestStep["dddddd"] != nil }
+
+        XCTAssertEqual(model.taskRunBanners, [AppModel.TaskRunBanner(runId: "dddddd", title: "每日简报", stepText: "Read：notes.md")])
+    }
+
+    func testTheBannerNamesTheRunWhenTheAppDoesNotKnowItsTask() async throws {
+        let frames = [runFrame(id: 1, runId: "dddddd", status: "running", taskId: "zzzzzz", title: "调研简报")]
+        let (model, _, _) = try makeModel(credentials: true, replies: ["/api/events": [.stream(frames)]])
+        model.foreground()
+        await eventually { model.timeline.lastEventId == 1 }
+
+        XCTAssertEqual(model.taskRunBanners.map(\.title), ["调研简报"])
+        XCTAssertNil(model.taskRunBanners.first?.stepText)
+    }
+
+    func testSeveralRunningTaskRunsGetOneBannerEachOldestFirst() async throws {
+        let frames = [
+            taskFrame(id: 1, task: TestData.taskObject("aaaaaa", title: "每日简报")),
+            taskFrame(id: 2, task: TestData.taskObject("bbbbbb", title: "价格监控")),
+            runFrame(id: 3, runId: "ffffff", status: "running", taskId: "aaaaaa", startedAt: "2026-10-25T10:00:00.000Z"),
+            runFrame(id: 4, runId: "eeeeee", status: "running", taskId: "bbbbbb", startedAt: "2026-10-25T09:00:00.000Z"),
+            stepFrame(runId: "ffffff", tool: "WebFetch", detail: "https://example.com"),
+        ]
+        let (model, _, _) = try makeModel(credentials: true, replies: ["/api/events": [.stream(frames)]])
+        model.foreground()
+        await eventually { model.timeline.latestStep["ffffff"] != nil }
+
+        XCTAssertEqual(model.taskRunBanners.map(\.runId), ["eeeeee", "ffffff"])
+        XCTAssertEqual(model.taskRunBanners.map(\.title), ["价格监控", "每日简报"])
+        XCTAssertEqual(model.taskRunBanners.map(\.stepText), [nil, "WebFetch：https://example.com"])
+    }
+
+    func testTheBannerGoesWhenTheTaskRunEnds() async throws {
+        let frames = [
+            runFrame(id: 1, runId: "dddddd", status: "running", taskId: "aaaaaa"),
+            runFrame(id: 2, runId: "dddddd", status: "done", taskId: "aaaaaa"),
+        ]
+        let (model, _, _) = try makeModel(credentials: true, replies: ["/api/events": [.stream(frames)]])
+        model.foreground()
+        await eventually { model.timeline.lastEventId == 2 }
+
+        XCTAssertTrue(model.taskRunBanners.isEmpty)
     }
 
     func testTheLiveReplyShowsTheDraftAndTheLatestStepOfARunningTask() async throws {
@@ -416,6 +490,23 @@ final class AppModelTests: XCTestCase {
         await eventually { model.liveReplies.count == 1 }
         XCTAssertNil(model.liveReplies.first?.text)
         XCTAssertEqual(model.liveReplies.first?.stepText, "Read：notes.md")
+    }
+
+    func testTheLiveReplyLeavesOutTheDraftAndStepOfATaskRun() async throws {
+        let frames = [
+            runFrame(id: 1, runId: "cccccc", status: "running"),
+            runFrame(id: 2, runId: "dddddd", status: "running", taskId: "aaaaaa"),
+            deltaFrame(runId: "cccccc", streamId: "cccccc.1", text: "我先查"),
+            deltaFrame(runId: "dddddd", streamId: "dddddd.1", text: "定时任务的草稿"),
+            stepFrame(runId: "dddddd", tool: "WebFetch", detail: "https://example.com/pricing"),
+        ]
+        let (model, _, _) = try makeModel(credentials: true, replies: ["/api/events": [.stream(frames)]])
+        model.foreground()
+        await eventually { model.timeline.latestStep["dddddd"] != nil }
+
+        XCTAssertEqual(model.liveReplies.map(\.runId), ["cccccc"])
+        XCTAssertEqual(model.liveReplies.first?.text, "我先查")
+        XCTAssertNil(model.liveReplies.first?.stepText)
     }
 
     func testTheStoredReplyReplacesTheDraft() async throws {

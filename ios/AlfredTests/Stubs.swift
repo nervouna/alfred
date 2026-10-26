@@ -187,18 +187,32 @@ func messageFrame(
     return frame(id: id, event: ["id": id, "at": "2026-10-25T08:30:00.000Z", "type": "message.created", "data": data])
 }
 
-/// One stored `run.updated` event as the server frames it.
-func runFrame(id: Int, runId: String, kind: String = "task", status: String) -> Data {
-    let run: [String: Any] = [
+/// One stored `run.updated` event as the server frames it. A run of a task names its `taskId`.
+func runFrame(
+    id: Int,
+    runId: String,
+    kind: String = "task",
+    status: String,
+    taskId: String? = nil,
+    title: String = "调研",
+    startedAt: String = "2026-10-25T08:30:05.000Z"
+) -> Data {
+    var run: [String: Any] = [
         "id": runId,
         "kind": kind,
-        "title": "调研",
+        "title": title,
         "status": status,
-        "startedAt": "2026-10-25T08:30:05.000Z",
+        "startedAt": startedAt,
         "costUsd": 0,
         "files": [Any](),
     ]
-    return frame(id: id, event: ["id": id, "at": "2026-10-25T08:30:05.000Z", "type": "run.updated", "data": run])
+    if let taskId { run["taskId"] = taskId }
+    return frame(id: id, event: ["id": id, "at": startedAt, "type": "run.updated", "data": run])
+}
+
+/// One stored `task.updated` event as the server frames it.
+func taskFrame(id: Int, task: [String: Any]) -> Data {
+    frame(id: id, event: ["id": id, "at": "2026-10-25T08:30:00.000Z", "type": "task.updated", "data": task])
 }
 
 /// One live `run.step` event: a frame without an id.
