@@ -54,6 +54,8 @@ export interface RunRecord {
   kind: RunKind;
   /** The task this run is a run of; chat runs have none. */
   taskId?: string;
+  /** The document a revision run revises. */
+  documentId?: string;
   title: string;
   status: RunStatus;
   model?: string;
@@ -229,6 +231,8 @@ export class RunRecorder {
     model?: string;
     /** The task this run is a run of. */
     taskId?: string;
+    /** The document this run revises. */
+    documentId?: string;
     id?: string;
     startedAt?: string;
     queued?: boolean;
@@ -244,6 +248,7 @@ export class RunRecorder {
       id: this.id,
       kind: init.kind,
       ...(init.taskId ? { taskId: init.taskId } : {}),
+      ...(init.documentId ? { documentId: init.documentId } : {}),
       title: init.title,
       status: init.queued ? "queued" : "running",
       model: init.model,

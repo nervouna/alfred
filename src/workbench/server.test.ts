@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
@@ -17,7 +18,10 @@ process.env.ALFRED_WORKSPACE = workspace;
 process.env.ALFRED_STATE_DIR = state;
 
 const { RunRecorder, TASKS_FILE, appendRunLog, newRunId, writeHeartbeat } = await import("../runs.ts");
-const { ErrorResponseSchema, RunDetailSchema, RunListSchema, TaskDetailSchema, TaskListSchema } = await import("../api/schema.ts");
+const { EventLog } = await import("../events.ts");
+const { DOCUMENTS_FILE, DocumentStore } = await import("../documents/store.ts");
+const { VERSIONS_GIT_DIR, Versions } = await import("../documents/versions.ts");
+const { DocumentDetailSchema, DocumentListSchema, ErrorResponseSchema, RunDetailSchema, RunListSchema, TaskDetailSchema, TaskListSchema } = await import("../api/schema.ts");
 const { AccessVerifier } = await import("./access.ts");
 const { DeviceStore } = await import("./devices.ts");
 const { REPORT_CSP, createHandler, inlineImages, startWorkbench } = await import("./server.ts");
@@ -40,6 +44,9 @@ function jwt(patch: Record<string, unknown> = {}): string {
 function serviceJwt(clientId = "svc.access"): string {
   return jwt({ email: undefined, common_name: clientId, type: "app" });
 }
+
+/** The workspace's history, as the store of the versions writes it; the routes read the same git dir. */
+const history = new Versions({ workspace, gitDir: VERSIONS_GIT_DIR });
 
 const servers: http.Server[] = [];
 let open = ""; // no Access check, as on the Unix socket
@@ -84,6 +91,7 @@ before(async () => {
   paired = devices.createDevice("test phone");
   open = await serve(createHandler({ workspace, devices }));
   guarded = await serve(createHandler({ workspace, access, devices }));
+  await history.init();
 });
 
 after(async () => {
@@ -626,6 +634,246 @@ test("a tasks file that does not fit answers 500 on both routes, and the log nam
   }
   const logged = lines.mock.calls.map((call) => String(call.arguments[0]));
   assert.ok(logged.some((line) => line.includes(TASKS_FILE)), "the log names the file");
+});
+
+// --- /api/documents and /api/files at a version -----------------------------
+
+/** Writes `text` to the workspace file at `rel` and commits that file alone; resolves to the commit's id. */
+async function commitFile(rel: string, text: string): Promise<string> {
+  fs.mkdirSync(path.dirname(path.join(workspace, rel)), { recursive: true });
+  fs.writeFileSync(path.join(workspace, rel), text);
+  const commit = await history.commit(`Write ${rel}`, { paths: [rel] });
+  assert.ok(commit, `${rel} has a change to commit`);
+  return commit.version;
+}
+
+/** An empty documents file, and a store on it; the events go to a log of their own. */
+function newDocumentStore(): InstanceType<typeof DocumentStore> {
+  fs.mkdirSync(path.dirname(DOCUMENTS_FILE), { recursive: true });
+  fs.rmSync(DOCUMENTS_FILE, { force: true });
+  return new DocumentStore({ file: DOCUMENTS_FILE, events: new EventLog(path.join(tmp, "document-events.jsonl")) });
+}
+
+/** A finished revision run of a document that started at `startedAt` (ms), as runs.jsonl holds it. */
+function revisionRun(documentId: string, title: string, startedAt: number): RunRecord {
+  const at = new Date(startedAt).toISOString();
+  return { id: newRunId(), kind: "revision", documentId, title, status: "done", startedAt: at, endedAt: at, costUsd: 0.1, toolCalls: 0, files: [] };
+}
+
+/** GET /api/files/<path><query> with the paired device's token. */
+const getFile = (p: string, query = "") => fetch(`${open}/api/files/${p}${query}`, { headers: bearer(paired.token) });
+
+test("GET /api/documents answers an empty list when there is no documents file", async () => {
+  fs.rmSync(DOCUMENTS_FILE, { force: true });
+  const res = await fetch(`${open}/api/documents`, { headers: bearer(paired.token) });
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("content-type"), "application/json; charset=utf-8");
+  assert.equal(res.headers.get("cache-control"), "no-store");
+  assert.deepEqual(DocumentListSchema.parse(await res.json()), { documents: [] });
+});
+
+test("GET /api/documents lists the documents, most recently updated first", async () => {
+  const store = newDocumentStore();
+  const aFirst = await commitFile("docs/a.md", "# A\n\nfirst\n");
+  const a = store.deliver({ path: "docs/a.md", version: aFirst, at: new Date("2031-03-01T00:00:00Z"), title: "A", kind: "markdown" });
+  const bVersion = await commitFile("docs/b.md", "# B\n");
+  const b = store.deliver({ path: "docs/b.md", version: bVersion, at: new Date("2031-03-02T00:00:00Z"), title: "B", kind: "markdown" });
+  // A changes after B was delivered: it is the document updated last, though B was made last.
+  const aSecond = await commitFile("docs/a.md", "# A\n\nsecond\n");
+  store.recordVersion({ paths: ["docs/a.md"], version: aSecond, at: new Date("2031-03-03T00:00:00Z"), reason: "changed" });
+
+  const res = await fetch(`${open}/api/documents`, { headers: bearer(paired.token) });
+  assert.equal(res.status, 200);
+  const list = DocumentListSchema.parse(await res.json());
+  assert.deepEqual(list.documents.map((d) => d.id), [a.id, b.id]);
+  assert.equal(list.documents[0]?.version, aSecond);
+});
+
+test("GET /api/documents/<id> answers 404 with its message for an unknown id and a malformed one", async () => {
+  fs.rmSync(DOCUMENTS_FILE, { force: true });
+  for (const id of ["zzzzzz", "ABCDEF", "abc", "k7m2qa0", "k7m2q", ""]) {
+    const res = await fetch(`${open}/api/documents/${id}`, { headers: bearer(paired.token) });
+    assert.equal(res.status, 404, id);
+    assert.deepEqual(await res.json(), { error: "There is no such document." }, id);
+  }
+});
+
+test("GET /api/documents/<id> gives the document, its versions, its annotations and its revision runs, and no other document's run", async () => {
+  const store = newDocumentStore();
+  const v1 = await commitFile("docs/plan.md", "# Plan\n\nfirst\n");
+  const plan = store.deliver({ path: "docs/plan.md", version: v1, at: new Date("2031-04-01T00:00:00Z"), title: "Plan", kind: "markdown" });
+  const otherVersion = await commitFile("docs/other.md", "# Other\n");
+  const other = store.deliver({ path: "docs/other.md", version: otherVersion, at: new Date("2031-04-01T00:00:00Z"), title: "Other", kind: "markdown" });
+
+  // The owner annotates the first version; a revision run answers it and makes the second version.
+  const revision = new RunRecorder({ kind: "revision", title: "补充结论", documentId: plan.id, startedAt: "2031-04-02T00:00:00.000Z" });
+  const [note] = store.submit({
+    documentId: plan.id,
+    version: v1,
+    annotations: [{ target: { kind: "document" }, comment: "开头加一段结论" }],
+    runId: revision.id,
+    at: new Date("2031-04-02T00:00:00Z"),
+  });
+  assert.ok(note);
+  store.reply(note.id, revision.id, "已在开头加上结论。", new Date("2031-04-02T00:10:00Z"));
+  const v2 = await commitFile("docs/plan.md", "# Plan\n\nsecond\n");
+  store.recordVersion({ paths: ["docs/plan.md"], version: v2, at: new Date("2031-04-02T00:10:00Z"), reason: "revised", runId: revision.id });
+  revision.finish("done");
+
+  const earlier = revisionRun(plan.id, "较早的修改", Date.parse("2031-04-01T12:00:00Z"));
+  appendRunLog(earlier);
+  const elsewhere = new RunRecorder({ kind: "revision", title: "另一份文档的修改", documentId: other.id, startedAt: "2031-04-03T00:00:00.000Z" });
+  elsewhere.finish("done");
+
+  const res = await fetch(`${open}/api/documents/${plan.id}`, { headers: bearer(paired.token) });
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("content-type"), "application/json; charset=utf-8");
+  const detail = DocumentDetailSchema.parse(await res.json());
+  assert.equal(detail.document.id, plan.id);
+  assert.equal(detail.document.version, v2);
+  assert.deepEqual(detail.versions.map((v) => [v.version, v.reason]), [[v2, "revised"], [v1, "delivered"]]);
+  assert.equal(detail.versions[0]?.runId, revision.id);
+  assert.deepEqual(detail.annotations.map((a) => [a.id, a.state, a.reply]), [[note.id, "resolved", "已在开头加上结论。"]]);
+  assert.deepEqual(detail.runs.map((r) => r.id), [revision.id, earlier.id], "newest first, and the other document's run is left out");
+  assert.equal(detail.runs[0]?.documentId, plan.id);
+});
+
+test("GET /api/documents/<id> lists at most 50 of its revision runs, newest first, and leaves out one that does not fit", async () => {
+  const store = newDocumentStore();
+  const version = await commitFile("docs/long.md", "# Long\n");
+  const long = store.deliver({ path: "docs/long.md", version, at: new Date("2031-05-01T00:00:00Z"), title: "Long", kind: "markdown" });
+  for (let i = 0; i < 52; i++) appendRunLog(revisionRun(long.id, `run ${i}`, Date.UTC(2031, 4, 2, 0, i)));
+  // The newest of them, with a status the schema does not have: it is left out and logged.
+  appendRunLog({ ...revisionRun(long.id, "不合格的记录", Date.UTC(2031, 4, 3)), status: "bogus" } as unknown as RunRecord);
+
+  const lines = mock.method(console, "error", () => {});
+  const res = await fetch(`${open}/api/documents/${long.id}`, { headers: bearer(paired.token) }).finally(() => lines.mock.restore());
+  const detail = DocumentDetailSchema.parse(await res.json());
+  assert.equal(detail.runs.length, 50);
+  assert.deepEqual(detail.runs.map((r) => r.title), Array.from({ length: 50 }, (_, i) => `run ${51 - i}`));
+  const logged = lines.mock.calls.map((call) => String(call.arguments[0]));
+  assert.ok(logged.some((line) => line.includes(`left out 1 run record(s) of document ${long.id}`)), "the log says what was left out");
+});
+
+test("a documents file that does not fit answers 500 on both document routes, and the log names the file", async () => {
+  fs.mkdirSync(path.dirname(DOCUMENTS_FILE), { recursive: true });
+  const lines = mock.method(console, "error", () => {});
+  try {
+    for (const body of ["{ not json", JSON.stringify({ documents: [{ document: {}, versions: [] }], annotations: [] })]) {
+      fs.writeFileSync(DOCUMENTS_FILE, body);
+      await assertApiError(await fetch(`${open}/api/documents`, { headers: bearer(paired.token) }), 500, `list: ${body}`);
+      await assertApiError(await fetch(`${open}/api/documents/k7m2qa`, { headers: bearer(paired.token) }), 500, `detail: ${body}`);
+    }
+  } finally {
+    lines.mock.restore();
+    fs.rmSync(DOCUMENTS_FILE, { force: true });
+  }
+  const logged = lines.mock.calls.map((call) => String(call.arguments[0]));
+  assert.ok(logged.some((line) => line.includes(DOCUMENTS_FILE)), "the log names the file");
+});
+
+test("GET /api/files/<path>?version= gives a file as it was at that commit, while the live file stays as it is", async () => {
+  const old = await commitFile("docs/essay.md", "# Essay\n\nold text\n");
+  const current = await commitFile("docs/essay.md", "# Essay\n\nnew text\n");
+  fs.writeFileSync(path.join(workspace, "docs", "essay.md"), "# Essay\n\ndraft\n"); // not committed
+  const res = await getFile("docs/essay.md", `?version=${old}`);
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("content-type"), "text/plain; charset=utf-8");
+  assert.equal(res.headers.get("content-security-policy"), "sandbox");
+  assert.equal(res.headers.get("content-length"), String(Buffer.byteLength("# Essay\n\nold text\n")));
+  assert.equal(await res.text(), "# Essay\n\nold text\n");
+  assert.equal(await (await getFile("docs/essay.md", `?version=${current}`)).text(), "# Essay\n\nnew text\n");
+  assert.equal(await (await getFile("docs/essay.md")).text(), "# Essay\n\ndraft\n", "without a version, the live file");
+});
+
+test("a file deleted since is still read at a version that had it", async () => {
+  const had = await commitFile("docs/gone.md", "# Gone\n");
+  fs.rmSync(path.join(workspace, "docs", "gone.md"));
+  assert.ok(await history.commit("Delete docs/gone.md", { paths: ["docs/gone.md"] }));
+  assert.equal(await (await getFile("docs/gone.md", `?version=${had}`)).text(), "# Gone\n");
+  await assertApiError(await getFile("docs/gone.md"), 404, "the live file is gone");
+});
+
+test("an HTML file at a version has the workspace images inlined, from the live workspace", async () => {
+  const old = await commitFile("docs/chart.html", '<p>old</p><img src="../images/p.png">');
+  await commitFile("docs/chart.html", "<p>new</p>");
+  const png = fs.readFileSync(path.join(workspace, "images", "p.png")).toString("base64");
+  const res = await getFile("docs/chart.html", `?version=${old}`);
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("content-type"), "text/plain; charset=utf-8", "HTML is never served as HTML");
+  assert.equal(res.headers.get("content-security-policy"), "sandbox");
+  const body = await res.text();
+  assert.equal(body, `<p>old</p><img src="data:image/png;base64,${png}">`);
+  assert.equal(res.headers.get("content-length"), String(Buffer.byteLength(body)));
+});
+
+test("an HTML file at a version over the preview cap is sent as it is", async () => {
+  const big = '<img src="../images/p.png">' + "x".repeat(4 * MiB + 1);
+  const version = await commitFile("docs/huge.html", big);
+  fs.writeFileSync(path.join(workspace, "docs", "huge.html"), "<p>small</p>"); // the live file is small and not committed
+  const res = await getFile("docs/huge.html", `?version=${version}`);
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("content-length"), String(Buffer.byteLength(big)));
+  assert.equal(await res.text(), big);
+});
+
+test("GET /api/files/<path>?version= answers 404 for a version that is not a commit of the history", async () => {
+  const later = await commitFile("docs/later.md", "# Later\n");
+  const gitOf = (spec: string) => execFileSync("git", ["--git-dir", VERSIONS_GIT_DIR, "rev-parse", spec], { encoding: "utf8" }).trim();
+  const cases: [string, string][] = [
+    ["a short id", later.slice(0, 39)],
+    ["an upper-case id", later.toUpperCase()],
+    ["a longer id", `${later}0`],
+    ["an empty version", ""],
+    ["an id of no commit", "0".repeat(40)],
+    ["the id of a blob", gitOf(`${later}:docs/later.md`)],
+    ["the id of a tree", gitOf(`${later}^{tree}`)],
+  ];
+  for (const [label, version] of cases) {
+    await assertApiError(await getFile("docs/later.md", `?version=${version}`), 404, label);
+  }
+});
+
+test("GET /api/files/<path>?version= answers 404 for a path that is not a file in that version", async () => {
+  const earlier = await commitFile("docs/earlier.md", "# Earlier\n");
+  const later = await commitFile("docs/made-after.md", "# Made after\n");
+  await assertApiError(await getFile("docs/made-after.md", `?version=${earlier}`), 404, "a file made after the version");
+  await assertApiError(await getFile("docs", `?version=${later}`), 404, "a directory");
+  await assertApiError(await getFile("docs/made-after.md", `?version=${later}&version=${earlier}`), 404, "two versions");
+});
+
+test("with a version the path rules hold: a .. path, a link out, a .git path, NUL and a bad escape are 404, as without one", async () => {
+  const version = await commitFile("docs/rules.md", "# Rules\n");
+  const paths = [
+    "docs%2F..%2F..%2Foutside%2Fsecret.txt",
+    "docs%2F%2e%2e%2F..%2Foutside%2Fsecret.txt",
+    "..%2Fstate%2Faccount.json",
+    "escape%2Fsecret.txt",
+    "%2Fetc%2Fpasswd",
+    ".git%2Fconfig",
+    "docs%2Frules.md%00",
+    "%E0%A4%A",
+  ];
+  for (const p of paths) {
+    for (const query of ["", `?version=${version}`]) {
+      const res = await getFile(p, query);
+      const body = await res.text();
+      assert.equal(res.status, 404, `${p}${query}`);
+      assert.ok(ErrorResponseSchema.safeParse(JSON.parse(body)).success, `${p}${query}`);
+      assert.ok(!body.includes(SECRET), `${p}${query}`);
+    }
+  }
+});
+
+test("the document routes and a file at a version need a device token, and refuse other methods with 405", async () => {
+  const routes = ["/api/documents", "/api/documents/k7m2qa", `/api/files/docs/plan.md?version=${"a".repeat(40)}`];
+  for (const p of routes) {
+    await assertApiError(await fetch(`${open}${p}`), 401, `${p} without a token`);
+    await assertApiError(await fetch(`${guarded}${p}`), 403, `${p} on the tunnel without Access`);
+    const wrong = await fetch(`${open}${p}`, { method: "POST", headers: bearer(paired.token), body: "{}" });
+    assert.equal(wrong.status, 405, `POST ${p}`);
+    assert.equal(wrong.headers.get("allow"), "GET", `POST ${p}`);
+  }
 });
 
 // --- POST /api/push ---------------------------------------------------------
