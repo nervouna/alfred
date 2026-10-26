@@ -99,10 +99,17 @@ final class RunsUITests: XCTestCase {
         if repair.exists {
             repair.tap()
         } else if tab.exists {
-            app.buttons["更多"].tap()
-            app.buttons["取消配对"].tap()
-            // The confirmation repeats the menu item's name.
-            app.buttons["取消配对"].firstMatch.tap()
+            let more = app.buttons["更多"]
+            XCTAssertTrue(more.waitForExistence(timeout: patience), "no menu button\n\(app.debugDescription)")
+            more.tap()
+            let item = app.buttons["取消配对"]
+            XCTAssertTrue(item.waitForExistence(timeout: patience), "no 取消配对 in the menu\n\(app.debugDescription)")
+            item.tap()
+            // The confirmation is a sheet with a button of the same name. Wait for that one: a tap on the first
+            // button of that name can land on the menu item while it is still fading out.
+            let confirm = app.sheets.buttons["取消配对"]
+            XCTAssertTrue(confirm.waitForExistence(timeout: patience), "no confirmation sheet\n\(app.debugDescription)")
+            confirm.tap()
         }
         XCTAssertTrue(paste.waitForExistence(timeout: patience), "the app did not return to pairing\n\(app.debugDescription)")
     }
