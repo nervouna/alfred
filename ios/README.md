@@ -16,6 +16,7 @@ The 对话 tab is the chat with Alfred, 运行 lists its runs, and 文档 lists 
 - `Runs/` is the 运行 tab. The list is fetched (`GET /api/runs`) when the tab appears and on pull to refresh, newest first; a run the stream knows takes its latest version from the `Timeline`, so a running run updates live, and a run only the stream has told of is listed too. A row shows the title, the status (排队中, 进行中, 完成, 已停止, 失败, 中断), `子任务` for a subagent, the short model name, the cost and the start time. A run's detail (`GET /api/runs/<id>`) shows its steps, the files it wrote, its error, a link to the parent run for a subagent, and a `停止` button while it is running, which sends `run.stop`.
 - `Documents/` is the 文档 tab and the viewer. The list holds the files of Alfred's outbound messages and of the runs the tab has loaded or the stream has told of, once per path, newest first; a run's files are dated by when the run ended (or started, while it runs).
 - `Push/` is the notifications: the app delegate, what the app asks the system for, the token and the payload. See Push below.
+- `AppIcon.icon` is the app icon, an Icon Composer document with two image layers and the system glass off: the dinner suit and bow tie, cut out, over an oxblood plate. The dark appearance swaps in a darker plate; the clear and tinted appearances hide the plate and let the system tint the suit.
 
 ### The viewer
 
