@@ -24,8 +24,10 @@ enum RunPresentation {
         return model.hasPrefix("claude-") ? String(model.dropFirst("claude-".count)) : model
     }
 
+    /// A cost in dollars: three decimals under a dollar, so a run that cost a fraction of a cent does not show as free,
+    /// and two from a dollar up.
     static func cost(_ usd: Double) -> String {
-        String(format: "$%.2f", usd)
+        String(format: usd < 1 ? "$%.3f" : "$%.2f", usd)
     }
 
     /// A time as time since: `5分钟前`.

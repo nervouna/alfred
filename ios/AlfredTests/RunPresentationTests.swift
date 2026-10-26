@@ -21,11 +21,13 @@ final class RunPresentationTests: XCTestCase {
         XCTAssertNil(RunPresentation.modelName(""))
     }
 
-    func testCostShowsDollarsAndCents() {
-        XCTAssertEqual(RunPresentation.cost(0), "$0.00")
-        XCTAssertEqual(RunPresentation.cost(0.0123), "$0.01")
-        XCTAssertEqual(RunPresentation.cost(0.2513), "$0.25")
-        XCTAssertEqual(RunPresentation.cost(12), "$12.00")
+    func testCostShowsThreeDecimalsUnderADollarAndTwoFromADollarUp() {
+        XCTAssertEqual(RunPresentation.cost(0), "$0.000")
+        XCTAssertEqual(RunPresentation.cost(0.0004), "$0.000")
+        XCTAssertEqual(RunPresentation.cost(0.0029), "$0.003")
+        XCTAssertEqual(RunPresentation.cost(0.5), "$0.500")
+        XCTAssertEqual(RunPresentation.cost(1), "$1.00")
+        XCTAssertEqual(RunPresentation.cost(12.345), "$12.35")
     }
 
     func testStartTimeIsRelative() {

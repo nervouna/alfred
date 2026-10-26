@@ -35,9 +35,19 @@ enum TaskPresentation {
         "\(RunPresentation.dateTime(date, in: zone))（\(RunPresentation.relative(date))）"
     }
 
-    /// Only a task that has not ended is paused or resumed.
-    static func canToggle(_ task: AlfredTask) -> Bool {
-        task.status == .active || task.status == .paused
+    /// The button that changes a task's status: 暂停 for an active task, and 恢复 for a paused or an ended one, which goes
+    /// back to active. Nil for a status this app does not know.
+    static func toggle(_ task: AlfredTask) -> (label: String, status: TaskStatus)? {
+        switch task.status {
+        case .active: ("暂停", .paused)
+        case .paused, .done: ("恢复", .active)
+        default: nil
+        }
+    }
+
+    /// A task's cap per run, as the owner set it: two decimals. A cap is a limit the owner sets, not a cost.
+    static func cap(_ usd: Double) -> String {
+        String(format: "$%.2f", usd)
     }
 
     static func canEnd(_ task: AlfredTask) -> Bool {
