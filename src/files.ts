@@ -15,6 +15,18 @@ export function localTime(d = new Date()): string {
   return `${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
 }
 
+/** A moment in the process's time zone, which is the owner's (see src/tasks/schedule.ts), as "2026-10-27 09:01". */
+export function localStamp(d: Date): string {
+  return `${localDate(d)} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/** The first non-empty line of `text`, cut to `max` characters with an ellipsis. */
+export function firstLine(text: string, max: number): string {
+  const line = text.split("\n").find((l) => l.trim())?.trim() ?? "";
+  const chars = Array.from(line);
+  return chars.length > max ? `${chars.slice(0, max - 1).join("")}…` : line;
+}
+
 /**
  * Strip path components and characters that are unsafe in file names. Hidden
  * files and received ALFRED.md files get a "_" prefix, so a forwarded file

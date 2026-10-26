@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
+import type { SdkMcpToolDefinition } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 
 import type { Outbound } from "../channels.ts";
@@ -14,17 +15,18 @@ import type { RunRecorder } from "../runs.ts";
 import { WORKSPACE_DIR } from "../store.ts";
 import { resolveInside } from "./guard.ts";
 import { ASPECT_RATIOS, MAX_IMAGES_PER_CALL, MAX_IMAGES_PER_TASK, createImageGenerator } from "./image.ts";
+import { QUESTION_HOOK_TIMEOUT_SECONDS } from "./questions.ts";
 
 export const ALFRED_TOOL_NAMES = ["mcp__alfred__send_file", "mcp__alfred__move_file", "mcp__alfred__render_pdf", "mcp__alfred__generate_image"];
 
 /** send_file refuses a file over this size. */
 const SEND_MAX_BYTES = 100 * 1024 * 1024;
 
-function ok(text: string) {
+export function ok(text: string) {
   return { content: [{ type: "text" as const, text }] };
 }
 
-function fail(text: string) {
+export function fail(text: string) {
   return { content: [{ type: "text" as const, text }], isError: true };
 }
 
@@ -34,13 +36,13 @@ function relPath(real: string): string {
 }
 
 /** The signal the SDK gives a tool call, in the `extra` argument of its handler: aborted when the turn is interrupted. */
-function callSignal(extra: unknown): AbortSignal | undefined {
+export function callSignal(extra: unknown): AbortSignal | undefined {
   const own = (extra as { signal?: unknown } | undefined)?.signal;
   return own instanceof AbortSignal ? own : undefined;
 }
 
 /** The run's signal and a call's own, together: a tool stops when either aborts. */
-function anySignal(run: AbortSignal | undefined, call: AbortSignal | undefined): AbortSignal | undefined {
+export function anySignal(run: AbortSignal | undefined, call: AbortSignal | undefined): AbortSignal | undefined {
   if (!run) return call;
   return call ? AbortSignal.any([run, call]) : run;
 }
@@ -169,12 +171,17 @@ export function alfredToolDefinitions(out: Outbound, signal?: AbortSignal, run?:
   return [sendFile, moveFile, renderPdfTool, generateImage];
 }
 
-/** Alfred's tools as the in-process MCP server the agent's query gets (see alfredToolDefinitions). */
-export function createAlfredTools(out: Outbound, signal?: AbortSignal, run?: RunRecorder) {
+/**
+ * Alfred's tools as the in-process MCP server the agent's query gets (see alfredToolDefinitions). `asking` are tools
+ * that wait for the owner's answer to a question (the task tools): the server waits for them as long as a question
+ * does, not for the SDK's default of about a day.
+ */
+export function createAlfredTools(out: Outbound, signal?: AbortSignal, run?: RunRecorder, asking: SdkMcpToolDefinition<any>[] = []) {
   return createSdkMcpServer({
     name: "alfred",
     version: "0.1.0",
-    tools: alfredToolDefinitions(out, signal, run),
+    tools: [...alfredToolDefinitions(out, signal, run), ...asking],
     alwaysLoad: true,
+    ...(asking.length ? { timeout: QUESTION_HOOK_TIMEOUT_SECONDS * 1000 } : {}),
   });
 }

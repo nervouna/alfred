@@ -33,6 +33,7 @@ const { EventLog } = await import("../events.ts");
 const { TaskStore } = await import("../tasks/store.ts");
 const { readRunFile } = await import("../runs.ts");
 const { localDate } = await import("../files.ts");
+const { TASK_TOOL_NAMES } = await import("./task-tools.ts");
 
 const cleanups: (() => Promise<void>)[] = [];
 after(async () => {
@@ -247,14 +248,21 @@ function start(s: ReturnType<typeof stack>, options: { turn?: TurnFn; taskPollMs
   return { handler, app, agent, messages, runs, lastRuns, taskRuns, chatRuns, chatDone, finished, state, send };
 }
 
-/** Calls one of Alfred's tools, as the agent of the query with these options would. */
-async function callTool(options: Options, name: string, args: Record<string, unknown>): Promise<void> {
+/** Alfred's tools in these options, by name. */
+function registeredTools(options: Options): string[] {
+  const server = options.mcpServers?.alfred as unknown as { instance: { _registeredTools: Record<string, unknown> } };
+  return Object.keys(server.instance._registeredTools);
+}
+
+/** Calls one of Alfred's tools, as the agent of the query with these options would, and returns the text it answers with. */
+async function callTool(options: Options, name: string, args: Record<string, unknown>): Promise<string> {
   const server = options.mcpServers?.alfred as unknown as {
     instance: { _registeredTools: Record<string, { handler: (args: unknown, extra: unknown) => Promise<unknown> }> };
   };
   const tool = server.instance._registeredTools[name];
   assert.ok(tool, name);
-  await tool.handler(args, {});
+  const result = (await tool.handler(args, {})) as { content: { text: string }[] };
+  return result.content.map((c) => c.text).join("\n");
 }
 
 /** The reason the query's PreToolUse hooks give for denying a tool call, or undefined when they let it through. */
@@ -827,4 +835,182 @@ test("/status lists the active tasks with their next run, and the task run in pr
   assert.match(status, new RegExp(`定时任务运行 ${runId}「检查」，进行中`));
   assert.match(status, /任务：空闲/, "the chat is idle");
   await t.handler.shutdown();
+});
+
+const askedQuestions = (s: ReturnType<typeof stack>) => s.events.readSince(0).flatMap((e) => (e.type === "question.asked" ? [e.data] : []));
+const answeredQuestions = (s: ReturnType<typeof stack>) => s.events.readSince(0).flatMap((e) => (e.type === "question.answered" ? [e.data] : []));
+
+const briefing = { title: "每日 AI 简报", brief: "Summarize the day's AI news.", schedule: { kind: "daily", time: "08:00" }, model: "haiku", budgetUsd: 0.5 };
+
+test("a chat run is offered the task tools when the handler has a task store; a task run and a handler without one are not", async () => {
+  const s = stack();
+  const task = oneTime(s, "晨报");
+  clock = minutesAfterStart(2);
+  const t = start(s);
+  await until("the task run to end", () => t.finished(task.id));
+  await t.send("你好");
+  await until("the chat query", () => t.agent.chatQueries.length === 1);
+  const chat = t.agent.chatQueries[0]?.options;
+  const scheduled = t.agent.taskQueries[0]?.options;
+  assert.ok(chat && scheduled);
+
+  const names = ["task_list", "task_create", "task_update"];
+  for (const name of names) {
+    assert.ok(registeredTools(chat).includes(name), `chat has ${name}`);
+    assert.ok(chat.allowedTools?.includes(`mcp__alfred__${name}`), `chat may call ${name}`);
+    assert.ok(!registeredTools(scheduled).includes(name), `the task run has no ${name}`);
+    assert.ok(!scheduled.allowedTools?.includes(`mcp__alfred__${name}`));
+  }
+  assert.match(String(chat.systemPrompt), /^# Tasks$/m);
+  assert.doesNotMatch(String(scheduled.systemPrompt), /^# Tasks$/m);
+
+  // A subagent of the chat run is denied them, and the main thread is not.
+  for (const tool of TASK_TOOL_NAMES) {
+    assert.match((await denial(chat, tool, {}, { id: "agent-1", type: "general-purpose" })) ?? "", /only Alfred does/, tool);
+    assert.equal(await denial(chat, tool, {}), undefined, `the main thread calls ${tool}`);
+  }
+
+  const bare = stack();
+  const b = start(bare, { tasks: false });
+  await b.send("你好");
+  await until("the chat query", () => b.agent.chatQueries.length === 1);
+  const options = b.agent.chatQueries[0]?.options;
+  assert.ok(options);
+  assert.deepEqual(registeredTools(options).filter((name) => name.startsWith("task_")), []);
+  assert.ok(!options.allowedTools?.some((name) => name.includes("task_")));
+  assert.doesNotMatch(String(options.systemPrompt), /^# Tasks$/m);
+});
+
+test("a task made from chat waits for the owner's tap on a question: nothing exists until 确认, and then the task is the chat's", async () => {
+  const s = stack();
+  const results: string[] = [];
+  const t = start(s, {
+    turn: async (_prompt, _signal, options) => {
+      results.push(await callTool(options, "task_create", briefing));
+      return "已提交。";
+    },
+  });
+  await t.send("每天早上 8 点给我一份 AI 新闻简报");
+  await until("the question", () => askedQuestions(s).length === 1);
+
+  const [asked] = askedQuestions(s);
+  const question = asked?.questions[0];
+  assert.ok(asked && question);
+  assert.equal(asked.runId, t.chatRuns()[0]?.id, "it belongs to the chat run");
+  assert.equal(question.header, "新任务");
+  assert.equal(s.store.list().length, 0, "nothing exists while the question is open");
+
+  assert.equal(await t.handler.answerQuestion(asked.id, { [question.question]: "确认" }), true);
+  await until("the chat run to end", () => t.chatDone(1));
+  const [task] = s.store.list();
+  assert.deepEqual([s.store.list().length, task?.origin, task?.status, task?.title], [1, "chat", "active", "每日 AI 简报"]);
+  assert.deepEqual(answeredQuestions(s).map((a) => [a.id, a.answers, a.cancelled]), [[asked.id, { [question.question]: "确认" }, undefined]]);
+  assert.match(results[0] ?? "", /Created task/);
+  assert.equal(t.app.texts.at(-1), "已提交。");
+});
+
+test("a plain message answers the confirmation as free text, which confirms nothing", async () => {
+  const s = stack();
+  const results: string[] = [];
+  const t = start(s, {
+    turn: async (_prompt, _signal, options) => {
+      results.push(await callTool(options, "task_create", briefing));
+      return "好的。";
+    },
+  });
+  await t.send("每天早上 8 点给我一份 AI 新闻简报");
+  await until("the question", () => askedQuestions(s).length === 1);
+
+  await t.send("先别建，周末再说");
+  await until("the chat run to end", () => t.chatDone(1));
+  assert.equal(s.store.list().length, 0);
+  assert.ok((results[0] ?? "").includes("先别建，周末再说"), "the agent gets the owner's words");
+  assert.deepEqual(Object.values(answeredQuestions(s)[0]?.answers ?? {}), ["先别建，周末再说"]);
+});
+
+test("a stop cancels the confirmation: the question is recorded as cancelled and no task is made", async () => {
+  const s = stack();
+  const results: string[] = [];
+  const t = start(s, {
+    turn: async (_prompt, _signal, options) => {
+      results.push(await callTool(options, "task_create", briefing));
+      return "好的。";
+    },
+  });
+  await t.send("每天早上 8 点给我一份 AI 新闻简报");
+  await until("the question", () => askedQuestions(s).length === 1);
+
+  assert.equal(await t.handler.stopRun(askedQuestions(s)[0]?.runId ?? ""), true);
+  await until("the chat run to end", () => t.chatRuns().some((r) => r.status !== "running"));
+  assert.equal(s.store.list().length, 0);
+  assert.deepEqual(answeredQuestions(s).map((a) => [a.cancelled, a.answers]), [[true, {}]]);
+  assert.match(results[0] ?? "", /cancelled/);
+});
+
+test("pausing a task from chat asks nothing; resuming it asks first", async () => {
+  const s = stack();
+  const task = evening(s, "晚报");
+  const t = start(s, {
+    turn: async (prompt, _signal, options) => {
+      await callTool(options, "task_update", { taskId: task.id, status: prompt.includes("停") ? "paused" : "active" });
+      return "好的。";
+    },
+  });
+  await t.send("先停掉晚报");
+  await until("the first chat run to end", () => t.chatDone(1));
+  assert.equal(s.store.get(task.id)?.status, "paused");
+  assert.equal(askedQuestions(s).length, 0, "no question");
+
+  await t.send("恢复晚报");
+  await until("the question", () => askedQuestions(s).length === 1);
+  assert.equal(askedQuestions(s)[0]?.questions[0]?.header, "改任务");
+  assert.equal(s.store.get(task.id)?.status, "paused", "still paused until the tap");
+  const asked = askedQuestions(s)[0];
+  await t.handler.answerQuestion(asked?.id ?? "", { [asked?.questions[0]?.question ?? ""]: "确认" });
+  await until("the second chat run to end", () => t.chatDone(2));
+  assert.equal(s.store.get(task.id)?.status, "active");
+});
+
+test("a queued scheduled occurrence is dropped when its task was paused or ended meanwhile; a one-time task, which the store marks done, still runs; a run now on a paused task runs", async () => {
+  const s = stack();
+  const hold = held();
+  // 23:30 in Taipei: the two recurring tasks fell due at 23:00, the one-time ones just before.
+  const blocker = oneTime(s, "挡路的", {}, 830);
+  const once = oneTime(s, "一次性的", {}, 835);
+  const paused = evening(s, "会被暂停的");
+  const ended = evening(s, "会被结束的");
+  clock = new Date("2026-10-27T15:30:00Z");
+  const t = start(s, { turn: hold.turn });
+  await until("the first task run to start", () => hold.waiting === 1 && t.agent.taskQueries.length === 1);
+  assert.match(t.agent.taskQueries[0]?.prompts[0] ?? "", /Brief of 挡路的/);
+  assert.equal(s.store.get(once.id)?.status, "done", "taken, so the store has marked it done");
+
+  s.store.update(paused.id, { status: "paused" });
+  s.store.update(ended.id, { status: "done" });
+  hold.release("好");
+  await until("the one-time task's run to start", () => t.agent.taskQueries.length === 2 && hold.waiting === 1);
+  assert.match(t.agent.taskQueries[1]?.prompts[0] ?? "", /Brief of 一次性的/);
+  hold.release("好");
+  await until("the one-time task's run to end", () => t.finished(once.id));
+  assert.ok(t.finished(blocker.id));
+  await sleep(150);
+
+  assert.equal(t.agent.taskQueries.length, 2, "the two dropped occurrences never started a query");
+  for (const task of [paused, ended]) {
+    assert.deepEqual(t.taskRuns(task.id), [], "no run");
+    assert.deepEqual(s.store.get(task.id)?.skips, [], "and no skip is recorded");
+    assert.deepEqual(t.messages().filter((m) => m.taskId === task.id), [], "and nothing is posted");
+  }
+
+  assert.equal(t.handler.runTask(paused.id), true);
+  await until("the run now to start", () => t.agent.taskQueries.length === 3 && hold.waiting === 1);
+  assert.match(t.agent.taskQueries[2]?.prompts[0] ?? "", /Brief of 会被暂停的/);
+  hold.release("好");
+  await until("the run now to end", () => t.finished(paused.id));
+  assert.equal(s.store.get(paused.id)?.status, "paused", "a run now leaves the status alone");
+
+  assert.equal(t.handler.runTask(ended.id), true, "so does a task that was ended");
+  await until("the second run now to start", () => t.agent.taskQueries.length === 4 && hold.waiting === 1);
+  hold.release("好");
+  await until("the second run now to end", () => t.finished(ended.id));
 });

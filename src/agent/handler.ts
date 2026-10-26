@@ -19,6 +19,10 @@
 // is not a slash command answers it as free text. /stop, an interrupt and
 // shutdown cancel it.
 //
+// The main agent also manages the owner's tasks (task_list, task_create, task_update, see task-tools.ts).
+// A new task and a change that decides what runs or what it costs wait for the owner's tap on a question, held
+// the same way, so what the agent reads cannot plant a recurring task.
+//
 // The owner's tasks (see tasks/store.ts) run beside the chat. The handler asks the
 // store which are due at startup and every half minute, and queues their runs, as it
 // does a run now: one task run at a time, whatever the chat is doing. A task run is
@@ -27,6 +31,7 @@
 // subagents, and memory, skills and rules read-only. Its reply and files are
 // delivered as messages with its run and task ids, and the chat hears of each on
 // the owner's next message. Its spend counts toward the day's cap, not the session.
+// A scheduled occurrence that waited in the queue is dropped if its task has been paused or ended since.
 //
 // While a run works it also publishes live events (see events.ts): the main
 // agent's reply text as it is written, and every step the run records.
@@ -42,7 +47,7 @@ import type { Question, Task } from "../api/schema.ts";
 import { InvalidAnswer, SerialQueue, recordInbound, recorded, workspaceRelative } from "../channels.ts";
 import type { Inbound, Intake, Outbound } from "../channels.ts";
 import { type EventLog, sharedEventLog } from "../events.ts";
-import { humanAge, localDate } from "../files.ts";
+import { firstLine, humanAge, localDate, localStamp } from "../files.ts";
 import { describeError, log } from "../log.ts";
 import { RunRecorder, findRun, markLostRuns, pruneRunFiles, runIdCandidates, stepDetail } from "../runs.ts";
 import type { RunRecord, RunStatus } from "../runs.ts";
@@ -91,6 +96,7 @@ import { AgentStateStore, OWNER } from "./state.ts";
 import type { AgentUserState, RunRef, TaskDelivery } from "./state.ts";
 import { PROTECTED_PATHS, SubagentTracker, agentFailureHook, subagentGuard, subagentRulesHook, unattendedAdmission } from "./subagents.ts";
 import type { AgentAdmission, LiveSubagent } from "./subagents.ts";
+import { TASK_TOOL_NAMES, taskToolDefinitions } from "./task-tools.ts";
 import { ALFRED_TOOL_NAMES, createAlfredTools } from "./tools.ts";
 
 const PRUNE_INTERVAL_MS = 24 * 3_600_000;
@@ -365,19 +371,6 @@ export function buildPrompt(text: string, opts: { attachments: string[]; runs?: 
   return sections.join("\n\n");
 }
 
-/** A moment in the owner's time zone, which is the process's (see src/tasks/schedule.ts), as "2026-10-27 09:01". */
-function localStamp(date: Date): string {
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${localDate(date)} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
-}
-
-/** The first non-empty line of `text`, cut to `max` characters with an ellipsis. */
-function firstLine(text: string, max: number): string {
-  const line = text.split("\n").find((l) => l.trim())?.trim() ?? "";
-  const chars = Array.from(line);
-  return chars.length > max ? `${chars.slice(0, max - 1).join("")}…` : line;
-}
-
 /** The newest file in the task's report directory, as a workspace path; undefined when the task has written none. */
 export function previousReport(taskId: string): string | undefined {
   const dir = path.posix.join("reports", "tasks", taskId);
@@ -451,6 +444,11 @@ export function agentOptions(params: {
   /** Holds the main agent's AskUserQuestion calls for the owner; without it the tool is not offered. */
   ask?: AskOwner;
   /**
+   * The owner's tasks: with `ask`, to confirm, the run is offered the task tools (task-tools.ts). A run of a task is
+   * never offered them, and neither is a run that could not ask the owner to confirm.
+   */
+  tasks?: TaskStore;
+  /**
    * Set for a run nobody watches, such as a scheduled task's, with its own budget in place of MAX_BUDGET_USD. Its session
    * is not kept, so it can be neither resumed nor memory-scanned; memory/, skills/ and the ALFRED.md files are read-only
    * to it and to its subagents; and its background Agent calls are denied, whatever `admission` says.
@@ -470,6 +468,8 @@ export function agentOptions(params: {
   const postToolUse = params.run ? [disclosure, runFilesHook(params.run, params.subagentRun)] : [disclosure];
   if (params.subagentRunId) postToolUse.push(runIdHook(params.subagentRunId));
   const admission = params.task ? unattendedAdmission : params.admission;
+  // The task tools confirm with the owner through `ask`, and only the chat has an owner to ask: a run of a task never gets them.
+  const taskTools = params.tasks && params.ask && !params.task ? taskToolDefinitions(params.tasks, params.ask, params.abortController?.signal) : undefined;
   const postToolUseFailure = admission ? [disclosure, agentFailureHook(admission)] : [disclosure];
   return {
     model: MODELS[params.model],
@@ -477,16 +477,16 @@ export function agentOptions(params: {
     env: agentEnv(),
     settingSources: [],
     settings: AGENT_SETTINGS,
-    systemPrompt: systemPrompt(new Date(), { rootRules: rules.loadRoot(), memory, subagents, questions: Boolean(params.ask) }),
+    systemPrompt: systemPrompt(new Date(), { rootRules: rules.loadRoot(), memory, subagents, questions: Boolean(params.ask), tasks: Boolean(taskTools) }),
     tools,
-    allowedTools: [...builtin, ...ALFRED_TOOL_NAMES],
+    allowedTools: [...builtin, ...ALFRED_TOOL_NAMES, ...(taskTools ? TASK_TOOL_NAMES : [])],
     plugins: skillPlugins(),
     skills: "all",
     agents: subagents ? subagentDefinitions() : undefined,
     permissionMode: "dontAsk",
     // Not a way to grant anything: the CLI enables AskUserQuestion only when a canUseTool is set (see questions.ts).
     canUseTool: params.ask ? denyPermissionPrompts : undefined,
-    mcpServers: { alfred: createAlfredTools(params.out, params.abortController?.signal, params.run) },
+    mcpServers: { alfred: createAlfredTools(params.out, params.abortController?.signal, params.run, taskTools) },
     hooks: {
       PreToolUse: [
         workspaceGuard(WORKSPACE_DIR, params.task ? { readOnly: PROTECTED_PATHS } : {}),
@@ -675,6 +675,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
         subagentRun: (agentId) => run.background.recorderOf(agentId),
         subagentRunId: (toolUseId) => run.background.runIdFor(toolUseId),
         ask: scheduled ? undefined : (questions, signal) => askOwner(userId, run, questions, signal),
+        tasks,
         task: scheduled && { budgetUsd: scheduled.budgetUsd },
       }),
     });
@@ -1025,6 +1026,12 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
   async function runTaskRun(item: QueuedTaskRun): Promise<void> {
     const task = tasks?.get(item.taskId);
     if (!tasks || !task) return;
+    // An occurrence that waited in the queue may find its task paused, or ended, since. A one-time task is done
+    // by now whatever happened: the store marks it done when its run falls due. A run now is the owner's call.
+    if (item.scheduled && (task.status === "paused" || (task.status === "done" && task.schedule.kind !== "once"))) {
+      log.info(`task ${task.id} is ${task.status}: dropping its queued run due ${item.scheduledAt.toISOString()}`);
+      return;
+    }
     if (overBudget(owner)) {
       const spent = spentToday(store.get(owner));
       log.warn(`daily spend cap reached (${usd(spent)} of ${usd(DAILY_BUDGET_USD)}); not running task ${task.id}`);
