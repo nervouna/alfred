@@ -209,3 +209,54 @@ test("skips are capped at ten, newest first", () => {
   assert.equal(skips[0]?.at, "2026-11-09T00:00:00.000Z");
   assert.equal(skips[9]?.at, "2026-10-31T00:00:00.000Z");
 });
+
+test("onStatusChange hears a status change made through update, and nothing else", () => {
+  const { store } = open();
+  const heard: [string, string, string][] = [];
+  store.onStatusChange((task, previous) => heard.push([task.id, previous, task.status]));
+  const task = store.create({ title: "晨报", brief: "x", schedule: morning }, "manual");
+  const once = store.create({ title: "一次", brief: "x", schedule: { kind: "once", at: "2026-10-26T02:00:00.000Z" } }, "manual");
+  assert.deepEqual(heard, [], "a new task is no change");
+
+  store.update(task.id, { title: "早报", schedule: { kind: "daily", time: "09:00" }, status: "active" });
+  store.update(task.id, { status: "paused" });
+  store.update(task.id, { status: "paused", title: "还是暂停" });
+  store.update(task.id, { status: "active" });
+  store.update(task.id, { status: "done" });
+  store.update("zzzzzz", { status: "done" });
+  store.recordRun(task.id, "k7m2qa", clock);
+  store.recordSkip(task.id, clock, "missed");
+  assert.deepEqual(heard, [
+    [task.id, "active", "paused"],
+    [task.id, "paused", "active"],
+    [task.id, "active", "done"],
+  ]);
+
+  clock = at("2026-10-26T03:00:00Z");
+  assert.equal(store.takeDue().length, 1);
+  assert.equal(store.get(once.id)?.status, "done", "the store ended the one-time task as its run was taken");
+  assert.equal(heard.length, 3, "and that is not a change of the owner's");
+});
+
+test("a listener is told after the change is saved and logged, may stop listening, and cannot fail the update", () => {
+  const { file, events, store } = open();
+  const task = store.create({ title: "晨报", brief: "x", schedule: morning }, "manual");
+  const seen: string[] = [];
+  const stop = store.onStatusChange((changed) => {
+    const saved = (JSON.parse(fs.readFileSync(file, "utf8")) as { tasks: { status: string }[] }).tasks[0]?.status;
+    seen.push(`${store.get(changed.id)?.status} ${saved} ${updates(events).length}`);
+    throw new Error("listener broke");
+  });
+  const second = store.onStatusChange((changed) => seen.push(`second ${changed.status}`));
+
+  const paused = store.update(task.id, { status: "paused" });
+  assert.equal(paused?.status, "paused", "the update went through");
+  assert.deepEqual(seen, ["paused paused 2", "second paused"], "the first listener's error did not keep the second from hearing");
+
+  stop();
+  store.update(task.id, { status: "done" });
+  assert.deepEqual(seen, ["paused paused 2", "second paused", "second done"]);
+  second();
+  store.update(task.id, { status: "paused" });
+  assert.equal(seen.length, 3);
+});
