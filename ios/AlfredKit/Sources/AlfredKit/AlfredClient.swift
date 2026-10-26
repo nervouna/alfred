@@ -27,10 +27,20 @@ public struct AlfredClient: Sendable {
     }
 
     /// POST /api/uploads?name=…, streamed from the file on disk. Alfred saves it under `inbox/`.
-    public func upload(fileAt fileURL: URL, name: String, contentType: String) async throws -> FileRef {
+    /// `progress` is called with the fraction of the body sent, from 0 to 1, as it goes out.
+    public func upload(
+        fileAt fileURL: URL,
+        name: String,
+        contentType: String,
+        progress: (@Sendable (Double) -> Void)? = nil
+    ) async throws -> FileRef {
         var request = authorized("POST", try endpoint("/api/uploads", query: "name=" + Self.encode(name)))
         request.setValue(contentType, forHTTPHeaderField: "Content-Type")
-        let (data, response) = try await session.upload(for: request, fromFile: fileURL)
+        let (data, response) = try await session.upload(
+            for: request,
+            fromFile: fileURL,
+            delegate: progress.map(UploadProgress.init)
+        )
         let result = try JSONDecoder().decode(UploadResult.self, from: Self.check(data, response, success: Self.isSuccess))
         return result.file
     }
@@ -139,5 +149,25 @@ public struct AlfredClient: Sendable {
     /// cannot change the URL's structure. ASCII only: letters from other scripts are encoded too.
     private static func encode(_ text: String) -> String {
         text.addingPercentEncoding(withAllowedCharacters: unreserved) ?? text
+    }
+}
+
+/// Reports how much of an upload's body has gone out.
+private final class UploadProgress: NSObject, URLSessionTaskDelegate {
+    private let report: @Sendable (Double) -> Void
+
+    init(report: @escaping @Sendable (Double) -> Void) {
+        self.report = report
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didSendBodyData bytesSent: Int64,
+        totalBytesSent: Int64,
+        totalBytesExpectedToSend: Int64
+    ) {
+        guard totalBytesExpectedToSend > 0 else { return }
+        report(min(1, Double(totalBytesSent) / Double(totalBytesExpectedToSend)))
     }
 }

@@ -48,3 +48,25 @@ public struct QuestionAnswered: Decodable, Hashable, Sendable {
         cancelled = try container.decodeIfPresent(Bool.self, forKey: .cancelled) ?? false
     }
 }
+
+/// A question in the timeline: what was asked, where in the stream it was asked, and how it stands.
+public struct QuestionRecord: Hashable, Sendable, Identifiable {
+    /// How the question stands.
+    public enum State: Hashable, Sendable {
+        /// Waiting for the owner.
+        case open
+        /// The owner answered; the answers are keyed by question text.
+        case answered([String: String])
+        /// A stop cancelled it.
+        case cancelled
+        /// The run ended or was lost with no answer.
+        case ended
+    }
+
+    public let asked: QuestionAsked
+    /// How many stored messages came before the question in event order: it sits after that many messages.
+    public let afterMessages: Int
+    public internal(set) var state: State
+
+    public var id: String { asked.id }
+}

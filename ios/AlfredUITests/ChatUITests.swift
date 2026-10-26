@@ -4,7 +4,10 @@ import XCTest
 /// variable `ALFRED_PAIRING` (pass `TEST_RUNNER_ALFRED_PAIRING` to xcodebuild); without it the test skips itself,
 /// so CI and plain test runs need no stack. `/status` costs nothing, the second message runs the model.
 final class ChatUITests: XCTestCase {
-    private let patience: TimeInterval = 10
+    /// How long to wait for the app or the server, which answers a command without a model. A server under load can
+    /// take several seconds.
+    private let patience: TimeInterval = 30
+    /// How long to wait for a reply that needs a model call.
     private let modelPatience: TimeInterval = 120
 
     @MainActor
@@ -58,6 +61,30 @@ final class ChatUITests: XCTestCase {
         XCTAssertTrue(echoed.waitForExistence(timeout: patience), "the stream did not resume with what happened in the background\n\(app.debugDescription)")
         let missed = newReply(beforeBackground, containing: "模型", in: app)
         XCTAssertTrue(missed.waitForExistence(timeout: patience), "the reply to the message sent in the background is missing")
+    }
+
+    /// The attach button offers photos and files, and is the way to the pickers.
+    @MainActor
+    func testTheAttachMenuOffersPhotosAndFiles() throws {
+        guard let pairing = ProcessInfo.processInfo.environment["ALFRED_PAIRING"], !pairing.isEmpty else {
+            throw XCTSkip("ALFRED_PAIRING is not set: start scripts/app-dev.ts and pass its pairing to run this test")
+        }
+        continueAfterFailure = false
+
+        let app = XCUIApplication()
+        app.launch()
+        unpairIfPaired(app)
+        UIPasteboard.general.string = pairing
+        app.buttons["粘贴配对信息"].tap()
+        XCTAssertTrue(composer(in: app).waitForExistence(timeout: patience), "the chat did not appear\n\(app.debugDescription)")
+
+        let attach = app.buttons["添加附件"]
+        XCTAssertTrue(attach.waitForExistence(timeout: patience))
+        attach.tap()
+        XCTAssertTrue(app.buttons["照片"].waitForExistence(timeout: patience), "no 照片 in the attach menu\n\(app.debugDescription)")
+        XCTAssertTrue(app.buttons["文件"].exists, "no 文件 in the attach menu\n\(app.debugDescription)")
+        // Nothing is chosen, so nothing is attached and the send button stays off.
+        XCTAssertEqual(app.otherElements.matching(identifier: "attachment.chip").count, 0)
     }
 
     /// Sends a message to Alfred as the paired device, without the app: the device token in `pairing` is the
