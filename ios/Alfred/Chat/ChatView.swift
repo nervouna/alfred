@@ -176,7 +176,7 @@ private struct MessageRow: View {
                 Bubble(text: message.text, isOwner: isOwner, identifier: (isOwner ? "message.in." : "message.out.") + message.id)
             }
             ForEach(message.files, id: \.path) { file in
-                FileChip(file: file)
+                FileChip(file: file, message: message)
             }
             if message.channel == .wechat || failedOnWeChat {
                 HStack(spacing: 6) {
@@ -231,13 +231,15 @@ private struct Tag: View {
     }
 }
 
-/// A file attached to a message: its name, which opens it in the viewer.
+/// A file attached to a message: its name, which opens it. A file of Alfred's message that names a document opens the
+/// document at the version the message delivered; any other file opens in the viewer.
 private struct FileChip: View {
     let file: FileRef
+    let message: Message
 
     var body: some View {
         NavigationLink {
-            FileViewerScreen(path: file.path)
+            target
         } label: {
             Label(URL(filePath: file.path).lastPathComponent, systemImage: symbol)
                 .font(.footnote)
@@ -248,6 +250,16 @@ private struct FileChip: View {
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("file.chip.\(file.path)")
+    }
+
+    @ViewBuilder
+    private var target: some View {
+        switch DocumentPresentation.FileTarget(file: file, in: message) {
+        case let .file(path):
+            FileViewerScreen(path: path)
+        case let .document(id, version):
+            DocumentScreen(documentId: id, version: version)
+        }
     }
 
     private var symbol: String {
