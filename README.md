@@ -142,7 +142,7 @@ A read-only web page for following Alfred's work: one card per run with live pro
   - `POST /api/uploads?name=<name>` streams the body to Alfred's `/uploads` and relays the answer. A declared length over 52,428,800 bytes is 413 before anything is sent; an undeclared one is cut with 413 once it passes that limit.
   - `GET /api/runs` answers `RunList`: the 100 newest runs, newest first, with only the fields the client shows.
   - `GET /api/runs/<id>` answers `RunDetail`: the run and its steps. An unknown or malformed id is 404.
-  - `GET /api/files/<path>` streams a workspace file's bytes, typed by extension as the pages type them, under `Content-Security-Policy: sandbox`. A missing path, a directory, a path outside the workspace and a `..` segment are all 404.
+  - `GET /api/files/<path>` streams a workspace file's bytes, typed by extension as the pages type them, under `Content-Security-Policy: sandbox`. An HTML report (`.html`, `.htm`) comes with its workspace images inlined as `data:` URIs, under the report page's caps; a report over 4 MiB comes as it is. A missing path, a directory, a path outside the workspace and a `..` segment are all 404.
   - `POST /api/push` takes the app's APNs registration, `{"token": "<hex>", "environment": "development" | "production"}`, and stores it on the device's record in `devices.json`, replacing an earlier one; it answers 204. A body that does not fit is 400 `{"error": "…"}`, and one over 4,096 bytes is 413.
   - While Alfred's socket cannot be reached (Alfred restarting, or the API off), the three forwarding routes answer 503 `{"error": "…"}`, and the app retries.
 
