@@ -292,7 +292,7 @@ function setup(options: { turn?: TurnFn; interruptMs?: number; stateFile?: strin
 }
 
 const STEERED = "收到，会在当前步骤结束后转给 Alfred。";
-const QUEUED = "收到，排在当前任务之后处理。发 /stop 可以停止当前任务。";
+const QUEUED = "收到，排在当前运行之后处理。发 /stop 可以停止当前运行。";
 
 test("a run replies on the app channel, and the reply is a message event of the run", async () => {
   const t = setup();
@@ -315,7 +315,7 @@ test("a command is answered at once, during a run too", async () => {
   await t.send("查一下");
   await until("the run to start", () => hold.waiting === 1);
   await t.send("/status");
-  assert.match(t.app.texts.at(-1) ?? "", /任务：运行 \w{6}/, "the status shows the run");
+  assert.match(t.app.texts.at(-1) ?? "", /运行：\w{6}，进行中/, "the status shows the run");
 
   hold.release("好了");
   await until("the run to finish", () => t.finished());
@@ -463,7 +463,7 @@ test("stopRun stops the live run and says so; an unknown id stops nothing", asyn
   assert.equal(await t.handler.stopRun("k7m2qa"), false);
   assert.deepEqual(t.app.texts, [], "an unknown id sends nothing");
   assert.equal(await t.handler.stopRun(runId), true);
-  assert.deepEqual(t.app.texts, ["已停止当前任务。"]);
+  assert.deepEqual(t.app.texts, ["已停止当前运行。"]);
 
   await until("the run to stop", () => t.runs().some((r) => r.id === runId && r.status === "stopped"));
   assert.equal(await t.handler.stopRun(runId), false, "the run is over");
@@ -479,7 +479,7 @@ test("/stop <run id> goes through stopRun", async () => {
   await t.send("/stop zzzzzz");
   assert.deepEqual(t.app.texts, ["没有进行中或排队的运行 zzzzzz。发 /status 查看。"]);
   await t.send(`/stop ${runId}`);
-  assert.deepEqual(t.app.texts.at(-1), "已停止当前任务。");
+  assert.deepEqual(t.app.texts.at(-1), "已停止当前运行。");
   await until("the run to stop", () => t.runs().some((r) => r.id === runId && r.status === "stopped"));
 });
 
@@ -533,12 +533,12 @@ test("the note about a run a restart cut short comes with the next message, is r
 
   const second = setup({ stateFile });
   await second.send("/status");
-  assert.match(second.app.texts[0] ?? "", /^Alfred 重启时中断了 1 个任务：「长任务」/);
+  assert.match(second.app.texts[0] ?? "", /^Alfred 重启时中断了 1 个运行：「长任务」/);
   assert.match(second.app.texts[1] ?? "", /^模型：/);
   const [inbound, note, reply] = second.messages().slice(-3);
   assert.deepEqual([inbound?.direction, inbound?.text], ["in", "/status"], "the message is recorded before the note it triggered");
   assert.deepEqual([note?.direction, note?.channel], ["out", "app"]);
-  assert.match(note?.text ?? "", /^Alfred 重启时中断了 1 个任务/);
+  assert.match(note?.text ?? "", /^Alfred 重启时中断了 1 个运行/);
   assert.match(reply?.text ?? "", /^模型：/);
   await second.send("/help");
   assert.match(second.app.texts[2] ?? "", /^Alfred 调研助手/, "the note was said once");
@@ -660,11 +660,11 @@ test("stopping interrupts the current turn instead of aborting the run, and the 
   assert.equal(await t.handler.stopRun(runId), true);
   assert.equal(t.agent.calls.interrupt, 1);
   assert.equal(t.agent.signals[0]?.aborted, false, "the run is not aborted");
-  assert.deepEqual(t.app.texts, ["已停止当前任务。"]);
+  assert.deepEqual(t.app.texts, ["已停止当前运行。"]);
   await until("the run to stop", () => t.statusOf(runId) === "stopped");
 
   assert.equal(t.agent.signals[0]?.aborted, false, "not aborted afterwards either");
-  assert.deepEqual(t.app.texts, ["已停止当前任务。"], "neither the interrupted turn's text nor an error line");
+  assert.deepEqual(t.app.texts, ["已停止当前运行。"], "neither the interrupted turn's text nor an error line");
   assert.ok(!t.messages().some((m) => m.text.includes("执行出错") || m.text.includes("出错了")));
   assert.equal(t.runs().findLast((r) => r.id === runId)?.costUsd, 0.02, "the turn's spend is accounted");
   assert.equal(await t.handler.stopRun(runId), false, "the run is over");
@@ -687,7 +687,7 @@ test("an interrupt that lands before the model did anything is a stop, not a fai
   assert.equal(await u.handler.stopRun(u.taskId()), true);
   await until("the second run to stop", () => u.statusOf(u.taskId()) === "stopped");
 
-  assert.deepEqual(u.app.texts, ["已停止当前任务。"], "no new session, no error");
+  assert.deepEqual(u.app.texts, ["已停止当前运行。"], "no new session, no error");
   assert.deepEqual(u.agent.prompts, ["第二个"], "the message was not sent again");
 });
 
@@ -706,7 +706,7 @@ test("a stop keeps the messages already handed to the run: the next turn answers
   await until("the run to finish", () => t.finished());
 
   assert.deepEqual(t.agent.prompts, ["第一条", "补充一条"]);
-  assert.deepEqual(t.app.texts, [STEERED, "已停止当前任务。", "补充的答复"]);
+  assert.deepEqual(t.app.texts, [STEERED, "已停止当前运行。", "补充的答复"]);
   assert.equal(t.statusOf(runId), "done", "the interrupted turn was not its last");
   assert.equal(t.agent.signals[0]?.aborted, false);
 });
@@ -721,10 +721,10 @@ test("a stop keeps the messages queued behind the run: they start the next task"
   assert.deepEqual(t.app.texts, [QUEUED]);
 
   assert.equal(await t.handler.stopRun(t.taskId()), true);
-  assert.deepEqual(t.app.texts, [QUEUED, "已停止当前任务。"], "nothing is said about dropped messages");
+  assert.deepEqual(t.app.texts, [QUEUED, "已停止当前运行。"], "nothing is said about dropped messages");
   release();
   await until("the next task to finish", () => t.finished(2));
-  assert.deepEqual(t.app.texts, [QUEUED, "已停止当前任务。", "echo: 第一个任务", "echo: 排队的消息"]);
+  assert.deepEqual(t.app.texts, [QUEUED, "已停止当前运行。", "echo: 第一个任务", "echo: 排队的消息"]);
 });
 
 test("a stop leaves background subagents running and names them in the reply; the run goes on until they report", async () => {
@@ -743,7 +743,7 @@ test("a stop leaves background subagents running and names them in the reply; th
 
   assert.equal(await t.handler.stopRun(runId), true);
   const reply = t.app.texts[0] ?? "";
-  const named = /^已停止当前任务。后台运行 (\w{6})、(\w{6}) 仍在继续，发 \/stop <id> 停止。$/.exec(reply);
+  const named = /^已停止当前运行。后台运行 (\w{6})、(\w{6}) 仍在继续，发 \/stop <id> 停止。$/.exec(reply);
   assert.ok(named, reply);
   assert.deepEqual([named[1], named[2]].sort(), [...ids].sort());
   assert.equal(t.agent.calls.interrupt, 1);
@@ -778,7 +778,7 @@ test("with one background subagent left, the stop reply names that one", async (
   const [id] = t.subagentIds();
 
   assert.equal(await t.handler.stopRun(t.taskId()), true);
-  assert.deepEqual(t.app.texts, [`已停止当前任务。后台运行 ${id} 仍在继续，发 /stop <id> 停止。`]);
+  assert.deepEqual(t.app.texts, [`已停止当前运行。后台运行 ${id} 仍在继续，发 /stop <id> 停止。`]);
   t.agent.emit(taskNotification("agent-1"));
   for (const message of reportTurn("报告")) t.agent.emit(message);
   await until("the run to finish", () => t.finished());
@@ -801,7 +801,7 @@ test("if the interrupted turn does not end within the grace period, the run is a
   await until("the run to stop", () => h.statusOf(runId) === "stopped");
 
   assert.match(logged.join("\n"), new RegExp(`run ${runId}: the interrupted turn did not end within 0\\.04s; aborting the run`));
-  assert.deepEqual(h.app.texts, ["已停止当前任务。"], "no error line either");
+  assert.deepEqual(h.app.texts, ["已停止当前运行。"], "no error line either");
 });
 
 test("the abort fallback waits 10 s by default", async () => {
@@ -1074,7 +1074,7 @@ test("/stop cancels an open question: it is recorded as cancelled, the call is d
   assert.deepEqual(t.answered(), [{ id: asked?.id, runId: asked?.runId, answers: {}, cancelled: true }]);
   await until("the run to finish", () => t.finished());
   assert.equal(t.statusOf(t.taskId()), "stopped");
-  assert.ok(t.app.texts.includes("已停止当前任务。"));
+  assert.ok(t.app.texts.includes("已停止当前运行。"));
   assert.equal(t.agent.calls.interrupt, 1);
   assert.equal(await t.handler.answerQuestion(asked?.id ?? "", { [FORMAT_Q]: "x" }), false, "a cancelled question cannot be answered");
   assert.equal(t.answered().length, 1);

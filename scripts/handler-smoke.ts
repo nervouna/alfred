@@ -361,7 +361,7 @@ async function stream(): Promise<number> {
     const step = taskRun ? await waitFor(() => live.find((e) => e.type === "run.step" && e.data.runId === taskRun), 120_000) : undefined;
     const stopAt = followed.length;
     const stop = taskRun && step ? await post({ type: "run.stop", runId: taskRun }) : undefined;
-    const stopReply = await waitFor(() => messageOf((m) => m.direction === "out" && m.channel === "app" && m.text === "已停止当前任务。"), 30_000);
+    const stopReply = await waitFor(() => messageOf((m) => m.direction === "out" && m.channel === "app" && m.text === "已停止当前运行。"), 30_000);
     const stopped = taskRun ? await waitFor(() => runEvent(taskRun, "stopped"), 60_000) : undefined;
     await sleep(5000);
     const after = followed.slice(stopAt).flatMap((e) => (e.type === "message.created" && e.data.direction === "out" ? [e.data] : []));
