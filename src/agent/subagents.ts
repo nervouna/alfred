@@ -16,7 +16,7 @@ import { SKILLS_DIR } from "./skills.ts";
 import { TASK_TOOL_NAMES } from "./task-tools.ts";
 
 const AGENT_TOOL = "Agent";
-const SEND_FILE_TOOL = "mcp__alfred__send_file";
+const DELIVER_TOOL = "mcp__alfred__deliver";
 /** The agent type the SDK uses for an Agent call that names none. */
 export const DEFAULT_AGENT_TYPE = "general-purpose";
 
@@ -74,19 +74,19 @@ function deny(reason: string) {
 }
 
 /**
- * Returns a denial reason when a subagent calls send_file or a task tool: only Alfred talks to the user, and
+ * Returns a denial reason when a subagent calls deliver or a task tool: only Alfred talks to the user, and
  * only Alfred manages the owner's tasks, with the owner's tap. A role's tool list already leaves them out, but
  * built-in agent types and forked skills get every tool the main thread has.
  */
 export function checkSubagentTool(toolName: string): string | undefined {
-  if (toolName === SEND_FILE_TOOL) return "Subagents may not send files: only Alfred talks to the user. Name the file in your final message instead.";
+  if (toolName === DELIVER_TOOL) return "Subagents may not send files: only Alfred talks to the user. Name the file in your final message instead.";
   if (TASK_TOOL_NAMES.includes(toolName)) {
     return "Subagents may not manage the owner's tasks: only Alfred does, and only when the owner asks. Do not try again; leave it out of your work.";
   }
   return undefined;
 }
 
-/** PreToolUse hook: admits or queues Agent calls from any thread, and denies subagents send_file, the task tools and writes to memory, skills and rules. */
+/** PreToolUse hook: admits or queues Agent calls from any thread, and denies subagents deliver, the task tools and writes to memory, skills and rules. */
 export function subagentGuard(root: string, admission?: AgentAdmission): HookCallbackMatcher {
   return {
     hooks: [

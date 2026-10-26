@@ -122,6 +122,30 @@ test("a file is recorded with its workspace path and kind, after its caption as 
   assert.deepEqual([caption?.channel, file?.channel, file?.direction, file?.runId], ["app", "app", "out", "k7m2qa"]);
 });
 
+test("a file delivered as a document is recorded with the document and the version, and the channel is told", async () => {
+  const events = newLog();
+  const told: unknown[] = [];
+  const out: Outbound = {
+    channel: "app",
+    async text() {},
+    async file(_absPath, _caption, document) {
+      told.push(document);
+      return "file";
+    },
+  };
+  const version = "a".repeat(40);
+  const document = { documentId: "p3x9za", version };
+  await recorded(out, events, { workspace, runId: "k7m2qa" }).file(path.join(workspace, "reports", "vps.md"), "见附件", document);
+  await recorded(out, events, { workspace, runId: "k7m2qa" }).file(path.join(workspace, "reports", "vps.md"));
+
+  assert.deepEqual(told, [document, undefined]);
+  const [caption, withDocument, without, ...rest] = messages(events);
+  assert.equal(rest.length, 0);
+  assert.deepEqual(caption?.files, []);
+  assert.deepEqual(withDocument?.files, [{ path: "reports/vps.md", kind: "file", documentId: "p3x9za", version }]);
+  assert.deepEqual(without?.files, [{ path: "reports/vps.md", kind: "file" }]);
+});
+
 test("a file the channel refuses is recorded with the error and still rejects", async () => {
   const events = newLog();
   const { out } = fakeOut(true);

@@ -1,6 +1,7 @@
 // The handler on a fake channel and a fake agent: no model is called, nothing is sent anywhere.
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -11,6 +12,7 @@ import type { SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 
 import type { LiveEvent, Message, Run } from "../api/schema.ts";
 import type { Inbound, Outbound } from "../channels.ts";
+import type { Documents } from "../documents/register.ts";
 
 // store.ts and config.ts read these at import time, so set them before loading the modules under test.
 const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "alfred-handler-")));
@@ -27,6 +29,8 @@ const { createAgentHandler } = await import("./handler.ts");
 const { EventLog, isLiveEvent } = await import("../events.ts");
 const { readRunFile } = await import("../runs.ts");
 const { InvalidAnswer, appOutbound } = await import("../channels.ts");
+const { DocumentStore } = await import("../documents/store.ts");
+const { Versions } = await import("../documents/versions.ts");
 
 const cleanups: (() => Promise<void>)[] = [];
 after(async () => {
@@ -262,7 +266,7 @@ let states = 0;
 let logs = 0;
 
 /** A handler on a fake channel, a log of its own and a state file of its own (or the given one). */
-function setup(options: { turn?: TurnFn; interruptMs?: number; stateFile?: string } = {}) {
+function setup(options: { turn?: TurnFn; interruptMs?: number; stateFile?: string; documents?: Documents } = {}) {
   const app = fakeApp();
   const events = new EventLog(path.join(tmp, `events-${logs++}`, "events.jsonl"));
   const agent = fakeAgent(options.turn);
@@ -272,6 +276,7 @@ function setup(options: { turn?: TurnFn; interruptMs?: number; stateFile?: strin
     stateFile: options.stateFile ?? path.join(tmp, `state-${states++}`, "agent-state.json"),
     runQuery: agent.runQuery,
     interruptMs: options.interruptMs,
+    documents: options.documents,
   });
   cleanups.push(() => handler.shutdown());
   const live: LiveEvent[] = [];
@@ -1250,4 +1255,264 @@ test("a question is open as soon as it is recorded, so the owner's quick reply f
     order.filter((o) => o.startsWith("question") || o.startsWith("message")),
     ["message:in", "question.asked", "message:in", "question.answered", "message:out"],
   );
+});
+
+// The workspace is committed on every delivery and at the end of every run.
+
+const WORKSPACE = path.join(tmp, "workspace");
+/** Git is slower than the fakes: the waits for a commit are longer. */
+const GIT_MS = 20_000;
+let documentStacks = 0;
+
+/**
+ * A real git dir and a document store of their own on the tests' workspace. `documents` is what the handler gets:
+ * with `versions`, a repository other than the real one (one that fails or waits).
+ */
+async function documentStack(versions?: InstanceType<typeof Versions>) {
+  const dir = path.join(tmp, `documents-${documentStacks++}`);
+  const gitDir = path.join(dir, "versions.git");
+  const real = new Versions({ workspace: WORKSPACE, gitDir });
+  await real.init();
+  const store = new DocumentStore({ file: path.join(dir, "documents.json"), events: new EventLog(path.join(dir, "events.jsonl")) });
+  const git = (...args: string[]) => execFileSync("git", [`--git-dir=${gitDir}`, `--work-tree=${WORKSPACE}`, ...args], { encoding: "utf8" }).trim();
+  const documents: Documents = { versions: versions ?? real, store };
+  return { versions: real, store, documents, git, commitCount: () => Number(git("rev-list", "--count", "HEAD")) };
+}
+
+function put(rel: string, text: string): void {
+  fs.mkdirSync(path.dirname(path.join(WORKSPACE, rel)), { recursive: true });
+  fs.writeFileSync(path.join(WORKSPACE, rel), text);
+}
+
+/** A document delivered before the run: its file committed and registered. */
+async function seedDocument(d: Awaited<ReturnType<typeof documentStack>>, rel: string, text: string) {
+  put(rel, text);
+  const commit = await d.versions.commit(`Seed ${rel}`, { paths: [rel], force: [rel] });
+  assert.ok(commit);
+  return d.store.deliver({ path: rel, version: commit.version, title: "旧稿", kind: "markdown", runId: "k7m2qa" });
+}
+
+/** The agent writes a file, as its Write tool does: the file is on disk and the PostToolUse hooks hear of it. `agentId` is a subagent's. */
+async function wrote(turn: Turn, rel: string, text: string, agentId?: string): Promise<void> {
+  put(rel, text);
+  const input = {
+    hook_event_name: "PostToolUse",
+    tool_name: "Write",
+    tool_input: { file_path: rel },
+    tool_response: {},
+    tool_use_id: "toolu_write",
+    ...(agentId ? { agent_id: agentId, agent_type: "collector" } : {}),
+  };
+  for (const matcher of turn.options.hooks?.PostToolUse ?? []) {
+    for (const hook of matcher.hooks) await hook(input as never, "toolu_write", { signal: new AbortController().signal });
+  }
+}
+
+/** Calls one of Alfred's tools in these options, as the agent would. */
+async function callTool(options: Options, name: string, args: Record<string, unknown>): Promise<string> {
+  const server = options.mcpServers?.alfred as unknown as {
+    instance: { _registeredTools: Record<string, { handler: (args: unknown, extra: unknown) => Promise<unknown> }> };
+  };
+  const tool = server.instance._registeredTools[name];
+  assert.ok(tool, name);
+  const result = (await tool.handler(args, {})) as { content: { text: string }[] };
+  return result.content.map((c) => c.text).join("\n");
+}
+
+/** Waits for the commits the handler still has under way: a shutdown waits for what is in flight. */
+const settled = (t: ReturnType<typeof setup>) => t.handler.shutdown();
+
+test("a chat run commits the files it wrote, and only those, with the run in the message; a document among them gets a changed version", async () => {
+  const d = await documentStack();
+  const doc = await seedDocument(d, "notes/run-doc.md", "# 旧稿\n");
+  put("notes/run-unrelated.md", "# 别人写的\n");
+  const t = setup({
+    documents: d.documents,
+    turn: async (_prompt, _signal, turn) => {
+      await wrote(turn, "notes/run-doc.md", "# 新稿\n");
+      await wrote(turn, "notes/run-new.md", "# 新文件\n");
+      return "写好了";
+    },
+  });
+  await t.send("改一下文稿");
+  await until("the run to finish", () => t.finished());
+  // The document's version is the last thing the end of the run records, after the commit.
+  await until("the commit and the version", () => (d.store.versions(doc.id)?.length ?? 0) === 2, GIT_MS);
+
+  const runId = t.taskId();
+  assert.equal(d.git("log", "-1", "--format=%s"), `Run ${runId}: 改一下文稿`);
+  assert.deepEqual(d.git("show", "--name-only", "--format=", "HEAD").split("\n").sort(), ["notes/run-doc.md", "notes/run-new.md"]);
+  assert.ok(!d.git("ls-tree", "-r", "--name-only", "HEAD").includes("notes/run-unrelated.md"), "a file the run did not write stays out");
+  assert.deepEqual(
+    d.store.versions(doc.id)?.map((v) => [v.version, v.reason, v.runId]),
+    [[d.git("rev-parse", "HEAD"), "changed", runId], [doc.version, "delivered", "k7m2qa"]],
+  );
+  assert.equal(d.store.get(doc.id)?.version, d.git("rev-parse", "HEAD"));
+  assert.equal(d.store.list().length, 1, "the new file is not a document: nothing delivered it");
+});
+
+test("a run that wrote nothing makes no commit", async () => {
+  const d = await documentStack();
+  const before = d.commitCount();
+  const t = setup({ documents: d.documents });
+  await t.send("你好");
+  await until("the run to finish", () => t.finished());
+  await settled(t);
+  assert.equal(d.commitCount(), before);
+});
+
+test("a run that moves a file to .trash/ commits the removal", async () => {
+  const d = await documentStack();
+  put("notes/run-trash.md", "# 过期\n");
+  assert.ok(await d.versions.commit("Seed", { paths: ["notes/run-trash.md"] }));
+  const t = setup({
+    documents: d.documents,
+    turn: async (_prompt, _signal, turn) => {
+      const moved = await callTool(turn.options, "move_file", { from: "notes/run-trash.md", to: ".trash/run-trash.md" });
+      assert.match(moved, /Moved/);
+      return "删了";
+    },
+  });
+  await t.send("把过期的删掉");
+  await until("the run to finish", () => t.finished());
+  await until("the commit", () => d.git("log", "-1", "--format=%s").startsWith("Run "), GIT_MS);
+
+  assert.equal(d.git("log", "-1", "--format=%s"), `Run ${t.taskId()}: 把过期的删掉`);
+  assert.equal(d.git("show", "--name-only", "--format=", "HEAD"), "notes/run-trash.md");
+  assert.ok(!fs.existsSync(path.join(WORKSPACE, "notes/run-trash.md")));
+  assert.ok(!d.git("ls-tree", "-r", "--name-only", "HEAD").includes("notes/run-trash.md"));
+});
+
+test("a delivery in the run is not recorded again at its end, and a change after it is", async () => {
+  const d = await documentStack();
+  const t = setup({
+    documents: d.documents,
+    turn: async (_prompt, _signal, turn) => {
+      await wrote(turn, "notes/run-kept.md", "# 交付后不改\n");
+      assert.match(await callTool(turn.options, "deliver", { path: "notes/run-kept.md" }), /Delivered/);
+      await wrote(turn, "notes/run-edited.md", "# 交付后又改\n");
+      assert.match(await callTool(turn.options, "deliver", { path: "notes/run-edited.md" }), /Delivered/);
+      await wrote(turn, "notes/run-edited.md", "# 交付后又改了\n");
+      return "发了两份";
+    },
+  });
+  await t.send("写两份发给我");
+  await until("the run to finish", () => t.finished(), GIT_MS);
+  const versionsOf = (rel: string) => d.store.versions(d.store.byPath(rel)?.id ?? "")?.length ?? 0;
+  await until("the end of the run to be recorded", () => versionsOf("notes/run-edited.md") === 2, GIT_MS);
+
+  const runId = t.taskId();
+  const kept = d.store.byPath("notes/run-kept.md");
+  const edited = d.store.byPath("notes/run-edited.md");
+  assert.ok(kept && edited);
+  assert.deepEqual(d.store.versions(kept.id)?.map((v) => [v.reason, v.runId]), [["delivered", runId]], "no second version for a file that did not change");
+  assert.deepEqual(d.store.versions(edited.id)?.map((v) => [v.reason, v.runId]), [["changed", runId], ["delivered", runId]]);
+  assert.equal(d.git("log", "-1", "--format=%s"), `Run ${runId}: 写两份发给我`);
+  assert.equal(d.git("show", "--name-only", "--format=", "HEAD"), "notes/run-edited.md");
+
+  const delivered = t.messages().flatMap((m) => m.files);
+  assert.deepEqual(
+    delivered.map((f) => [f.path, f.documentId, f.version]),
+    [
+      ["notes/run-kept.md", kept.id, kept.version],
+      ["notes/run-edited.md", edited.id, d.store.versions(edited.id)?.[1]?.version],
+    ],
+    "the messages name the version each delivery made",
+  );
+});
+
+test("a background subagent commits its own files when it ends, and the run that started it commits none of them", async () => {
+  const d = await documentStack();
+  const t = setup({
+    documents: d.documents,
+    turn: async (_prompt, _signal, turn) => {
+      const background = await startBackground(turn, 1);
+      // The step comes after task_started in the stream, so the subagent is live once it has been handled.
+      turn.emit(toolCalls([{ name: "WebFetch", input: { url: "https://example.com/a" } }], background.toolUseId));
+      await until("the subagent to start", () => t.live.some((e) => e.type === "run.step"));
+      await wrote(turn, "notes/run-background.md", "# 后台写的\n", background.agentId);
+      turn.emit(taskNotification(background.agentId));
+      return "派出去了";
+    },
+  });
+  const before = d.commitCount();
+  await t.send("派一个后台任务");
+  await until("the run to finish", () => t.finished());
+  await until("the subagent's run to finish", () => t.subagentIds().length === 1 && t.subagentIds().every((id) => t.statusOf(id) === "done"));
+  await until("the commit", () => d.commitCount() > before, GIT_MS);
+  await settled(t);
+
+  const [subId] = t.subagentIds();
+  assert.equal(d.commitCount(), before + 1, "one commit: the parent run wrote nothing itself");
+  assert.equal(d.git("log", "-1", "--format=%s"), `Run ${subId}: 读第 1 页`);
+  assert.equal(d.git("show", "--name-only", "--format=", "HEAD"), "notes/run-background.md");
+});
+
+test("a stopped run commits what it wrote", async () => {
+  const d = await documentStack();
+  const hold = held();
+  const t = setup({
+    documents: d.documents,
+    turn: async (prompt, signal, turn) => {
+      await wrote(turn, "notes/run-stopped.md", "# 写了一半\n");
+      return hold.turn(prompt, signal, turn);
+    },
+  });
+  await t.send("写一份很长的东西");
+  await until("the run to start", () => hold.waiting === 1);
+  assert.equal(await t.handler.stopRun(t.taskId()), true);
+  await until("the interrupted turn to end", () => hold.waiting === 0);
+  await until("the run to finish", () => t.finished());
+  await until("the commit", () => d.git("log", "-1", "--format=%s").startsWith("Run "), GIT_MS);
+
+  assert.equal(t.statusOf(t.taskId()), "stopped");
+  assert.equal(d.git("log", "-1", "--format=%s"), `Run ${t.taskId()}: 写一份很长的东西`);
+  assert.equal(d.git("show", "--name-only", "--format=", "HEAD"), "notes/run-stopped.md");
+});
+
+test("a commit that fails is logged, and the run still ends done with its reply sent first and never waiting for the commit", async () => {
+  const d = await documentStack();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  let commits = 0;
+  const failing = {
+    commit: async () => {
+      commits++;
+      await gate;
+      throw new Error("index.lock exists");
+    },
+  } as unknown as InstanceType<typeof Versions>;
+  const t = setup({
+    documents: { versions: failing, store: d.store },
+    turn: async (_prompt, _signal, turn) => {
+      await wrote(turn, "notes/run-failing.md", "# 提交不了\n");
+      return "写好了";
+    },
+  });
+  await t.send("写一份");
+  await until("the commit to start", () => commits === 1);
+
+  assert.ok((t.app.texts[0] ?? "").startsWith("写好了"), "the reply went out while the commit is still waiting");
+  assert.equal(t.statusOf(t.taskId()), "done", "so did the run's end");
+  release();
+  await settled(t);
+  assert.equal(t.statusOf(t.taskId()), "done");
+  assert.equal(readRunFile(t.taskId())?.error, undefined);
+  assert.deepEqual(t.messages().filter((m) => m.direction === "out" && /出错/.test(m.text)), [], "nothing about the failure reaches the owner");
+});
+
+test("without documents a run commits nothing, and still runs", async () => {
+  const d = await documentStack();
+  const before = d.commitCount();
+  const t = setup({
+    turn: async (_prompt, _signal, turn) => {
+      await wrote(turn, "notes/run-undocumented.md", "# 没有版本库\n");
+      return "好";
+    },
+  });
+  await t.send("写一份");
+  await until("the run to finish", () => t.finished());
+  await settled(t);
+  assert.equal(t.statusOf(t.taskId()), "done");
+  assert.equal(d.commitCount(), before);
 });

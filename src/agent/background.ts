@@ -62,6 +62,7 @@ export class BackgroundRuns implements AgentAdmission {
   private readonly overBudget: () => boolean;
   private readonly release: (brief: QueuedBrief) => void;
   private readonly transcriptOf: (agentId: string) => string | undefined;
+  private readonly onEnd?: (recorder: RunRecorder) => void;
   private readonly events?: EventLog;
   /** Admitted Agent calls whose subagent has not started yet, by tool_use id. */
   private readonly launching = new Map<string, BackgroundRun>();
@@ -84,6 +85,8 @@ export class BackgroundRuns implements AgentAdmission {
     release: (brief: QueuedBrief) => void;
     /** A subagent's transcript, once its session is known. */
     transcriptOf: (agentId: string) => string | undefined;
+    /** Called with the record of each subagent that ran, once its run has ended (its status is final). A subagent that never started is not reported. */
+    onEnd?: (recorder: RunRecorder) => void;
     /** Where the subagents' runs publish their events; the shared event log by default. */
     events?: EventLog;
   }) {
@@ -92,6 +95,7 @@ export class BackgroundRuns implements AgentAdmission {
     this.overBudget = opts.overBudget;
     this.release = opts.release;
     this.transcriptOf = opts.transcriptOf;
+    this.onEnd = opts.onEnd;
     this.events = opts.events;
   }
 
@@ -204,6 +208,7 @@ export class BackgroundRuns implements AgentAdmission {
     for (const { run, status } of this.ended.splice(0)) {
       this.price(run);
       run.recorder.finish(status);
+      this.onEnd?.(run.recorder);
     }
   }
 
@@ -259,6 +264,8 @@ export class BackgroundRuns implements AgentAdmission {
       ...this.queued.map((b) => b.recorder),
     ];
     for (const r of [...this.ended.map((e) => e.run), ...this.live.values()]) this.price(r);
+    // The ones that ran, as opposed to those that were launching or queued, for onEnd.
+    const ran = [...this.ended.map((e) => e.run.recorder), ...[...this.live.values()].map((r) => r.recorder)];
     // Ended ones keep the status their notification gave.
     for (const { run, status: own } of this.ended.splice(0)) run.recorder.finish(own);
     this.launching.clear();
@@ -266,6 +273,7 @@ export class BackgroundRuns implements AgentAdmission {
     this.queue.length = 0;
     this.released = undefined;
     for (const r of all) r.finish(status, error);
+    for (const r of ran) this.onEnd?.(r);
     return all.filter((r) => r.record.status === status);
   }
 

@@ -8,7 +8,7 @@
 // skills the session lists, from getContextUsage(). Lines from inside a subagent are
 // marked with its Agent call's id. The first request's input tokens are printed, to
 // compare the prompt prefix across changes.
-// The alfred tools are wired to a stub, so send_file fails instead of messaging anyone.
+// The alfred tools are wired to a stub, so deliver fails instead of messaging anyone.
 // Like Alfred, it seeds the workspace, records the run for the workbench under
 // $ALFRED_STATE_DIR/workbench, and prints the ALFRED.md change notice after the run.
 

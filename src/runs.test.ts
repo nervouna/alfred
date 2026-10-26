@@ -128,8 +128,24 @@ test("pruneRunFiles removes run files that ended more than 30 days ago", () => {
   assert.ok(fs.existsSync(RUNS_LOG));
 });
 
+test("a run keeps the paths it moved files away from beside its files, and not in its record", () => {
+  const events = new EventLog(path.join(tmp, "moved-from.jsonl"));
+  const run = new RunRecorder({ kind: "task", title: "整理", events });
+  assert.deepEqual(run.movedFrom, []);
+  run.wrote("notes/tmp.md", "Write");
+  run.moved("notes/tmp.md", "notes/final.md");
+  run.moved("notes/old.md", ".trash/old.md");
+  run.moved("notes/final.md", "notes/final2.md");
+  run.moved("notes/old.md", ".trash/old-2.md"); // a path moved from twice is kept once
+  assert.deepEqual([...run.movedFrom].sort(), ["notes/final.md", "notes/old.md", "notes/tmp.md"]);
+  assert.deepEqual(run.record.files.map((f) => f.path).sort(), [".trash/old-2.md", ".trash/old.md", "notes/final2.md"]);
+  run.finish("done");
+  assert.ok(!("movedFrom" in (readRunFile(run.id) ?? {})), "the run file does not hold it");
+});
+
 test("stepDetail summarizes tool inputs with workspace-relative paths", () => {
   const ws = "/workspace";
+  assert.equal(stepDetail("mcp__alfred__deliver", { path: "/workspace/reports/a.md" }, ws), "reports/a.md");
   assert.equal(stepDetail("Read", { file_path: "/workspace/notes/a.md" }, ws), "notes/a.md");
   assert.equal(stepDetail("WebFetch", { url: "https://example.com/x", prompt: "..." }, ws), "https://example.com/x");
   assert.equal(stepDetail("Agent", { subagent_type: "researcher", description: "线程一" }, ws), "researcher「线程一」");

@@ -26,13 +26,22 @@ export function outboundKind(fileName: string): FileKind {
   return "file";
 }
 
+/** The document a delivered file is, and the version of it that the delivery sends. */
+export interface DeliveredDocument {
+  documentId: string;
+  version: string;
+}
+
 /** Where Alfred's output to the owner goes. */
 export interface Outbound {
   readonly channel: Channel;
   /** Rejects when the channel refuses the message. */
   text(text: string): Promise<void>;
-  /** Sends the file at an absolute path, after `caption` as a message of its own. Returns how the channel sent it. */
-  file(absPath: string, caption?: string): Promise<FileKind>;
+  /**
+   * Sends the file at an absolute path, after `caption` as a message of its own. Returns how the channel sent it.
+   * A file delivered as a document carries it: the message that records the send names the document and the version.
+   */
+  file(absPath: string, caption?: string, document?: DeliveredDocument): Promise<FileKind>;
 }
 
 /** A message from the owner. */
@@ -152,12 +161,12 @@ export function recorded(out: Outbound, events: EventLog, opts: { workspace: str
   return {
     channel: out.channel,
     text,
-    async file(absPath, caption) {
+    async file(absPath, caption, document) {
       if (caption) await text(caption);
-      const ref = (kind: FileKind): FileRef => ({ path: workspaceRelative(opts.workspace, absPath), kind });
+      const ref = (kind: FileKind): FileRef => ({ path: workspaceRelative(opts.workspace, absPath), kind, ...(document ? { documentId: document.documentId, version: document.version } : {}) });
       let kind: FileKind;
       try {
-        kind = await out.file(absPath);
+        kind = await out.file(absPath, undefined, document);
       } catch (err) {
         record("", [ref(outboundKind(absPath))], describeError(err));
         throw err;

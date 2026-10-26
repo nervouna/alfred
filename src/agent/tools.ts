@@ -7,7 +7,8 @@ import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import type { SdkMcpToolDefinition } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 
-import type { Outbound } from "../channels.ts";
+import type { DeliveredDocument, Outbound } from "../channels.ts";
+import { type Documents, deliverDocument } from "../documents/register.ts";
 import { humanSize } from "../files.ts";
 import { describeError, log } from "../log.ts";
 import { PDF_SOURCE_EXTS, isRendererMissing, renderPdf } from "../pdf.ts";
@@ -17,10 +18,10 @@ import { resolveInside } from "./guard.ts";
 import { ASPECT_RATIOS, MAX_IMAGES_PER_CALL, MAX_IMAGES_PER_TASK, createImageGenerator } from "./image.ts";
 import { QUESTION_HOOK_TIMEOUT_SECONDS } from "./questions.ts";
 
-export const ALFRED_TOOL_NAMES = ["mcp__alfred__send_file", "mcp__alfred__move_file", "mcp__alfred__render_pdf", "mcp__alfred__generate_image"];
+export const ALFRED_TOOL_NAMES = ["mcp__alfred__deliver", "mcp__alfred__move_file", "mcp__alfred__render_pdf", "mcp__alfred__generate_image"];
 
-/** send_file refuses a file over this size. */
-const SEND_MAX_BYTES = 100 * 1024 * 1024;
+/** deliver refuses a file over this size. */
+const DELIVER_MAX_BYTES = 100 * 1024 * 1024;
 
 export function ok(text: string) {
   return { content: [{ type: "text" as const, text }] };
@@ -50,18 +51,19 @@ export function anySignal(run: AbortSignal | undefined, call: AbortSignal | unde
 /**
  * Alfred's tools, bound to the channel a run delivers on, for the duration of the run. Each one stops when
  * `signal` aborts (the run is stopped) or when its own call's signal does (the turn is interrupted). `run`
- * records the files they write.
+ * records the files they write, and gives a delivery its run and task. `documents` is the history of the workspace and
+ * the document store: with it, a file delivered becomes a document, and a file moved takes its document along.
  */
-export function alfredToolDefinitions(out: Outbound, signal?: AbortSignal, run?: RunRecorder) {
-  const sendFile = tool(
-    "send_file",
-    "Send a file from the workspace to the owner in the app. The app opens Markdown, PDF, images, video, text files and HTML reports; an HTML report opens in a sandbox where inline scripts and SVG charts work, with no network access.",
+export function alfredToolDefinitions(out: Outbound, signal?: AbortSignal, run?: RunRecorder, documents?: Documents) {
+  const deliver = tool(
+    "deliver",
+    "Deliver a file from the workspace to the owner in the app. A delivered file becomes a document the owner can annotate in the app. Revise a delivered document in place, under the same path, since every version is kept: change the file and deliver it again, and do not write a copy under a new name. The app opens Markdown, PDF, images, video, text files and HTML reports; an HTML report opens in a sandbox where inline scripts and SVG charts work, with no network access.",
     {
       path: z.string().describe("File path, relative to the workspace or absolute inside it"),
       caption: z.string().optional().describe("Short message sent just before the file"),
     },
     async ({ path: p, caption }, extra) => {
-      // Checked before anything is sent: a send that has started goes on to the end.
+      // Checked before anything is delivered: a delivery that has started goes on to the end.
       if (anySignal(signal, callSignal(extra))?.aborted) return fail("The task was stopped; the file was not sent.");
       const real = resolveInside(WORKSPACE_DIR, p);
       if (!real) return fail(`${p} is outside the workspace.`);
@@ -72,11 +74,20 @@ export function alfredToolDefinitions(out: Outbound, signal?: AbortSignal, run?:
         return fail(`${p} does not exist.`);
       }
       if (!stat.isFile()) return fail(`${p} is not a file.`);
-      if (stat.size > SEND_MAX_BYTES) return fail(`${p} is ${humanSize(stat.size)}, over the ${humanSize(SEND_MAX_BYTES)} limit.`);
+      if (stat.size > DELIVER_MAX_BYTES) return fail(`${p} is ${humanSize(stat.size)}, over the ${humanSize(DELIVER_MAX_BYTES)} limit.`);
+      // The file becomes a document, or a new version of one. If that fails the file is still sent, without a document.
+      let document: DeliveredDocument | undefined;
+      if (documents) {
+        try {
+          document = await deliverDocument(documents, { path: relPath(real), abs: real, size: stat.size, runId: run?.id, taskId: run?.record.taskId });
+        } catch (err) {
+          log.warn(`registering ${relPath(real)} as a document failed, delivering it without one: ${describeError(err)}`);
+        }
+      }
       try {
-        const kind = await out.file(real, caption);
-        log.info(`agent sent ${path.relative(WORKSPACE_DIR, real)} as ${kind}`);
-        return ok(`Sent ${path.basename(real)} (${humanSize(stat.size)}) to the user as ${kind}.`);
+        const kind = await out.file(real, caption, document);
+        log.info(`agent delivered ${relPath(real)} as ${kind}${document ? ` (document ${document.documentId}, version ${document.version.slice(0, 8)})` : ""}`);
+        return ok(`Delivered ${path.basename(real)} (${humanSize(stat.size)}) to the user as ${kind}.`);
       } catch (err) {
         const error = describeError(err);
         log.warn(`sending ${relPath(real)} failed: ${error}`);
@@ -103,14 +114,21 @@ export function alfredToolDefinitions(out: Outbound, signal?: AbortSignal, run?:
       if (dst.startsWith(src + path.sep)) return fail("Cannot move a directory into itself.");
       fs.mkdirSync(path.dirname(dst), { recursive: true });
       fs.renameSync(src, dst);
-      run?.moved(relPath(src), relPath(dst));
+      const [fromRel, toRel] = [relPath(src), relPath(dst)];
+      run?.moved(fromRel, toRel);
+      // The move is done whatever happens to the documents: the store is told, and a failure there is only logged.
+      try {
+        documents?.store.move(fromRel, toRel);
+      } catch (err) {
+        log.warn(`moving the documents under ${fromRel} to ${toRel} failed: ${describeError(err)}`);
+      }
       return ok(`Moved ${from} to ${to}.`);
     },
   );
 
   const renderPdfTool = tool(
     "render_pdf",
-    "Convert a Markdown or HTML file in the workspace to an A4 PDF with page numbers. Only images, stylesheets and fonts inside the workspace load (reference them by relative path, e.g. ../images/<date>/cover.jpg from reports/); network URLs, files outside the workspace, iframes, embeds and scripts are blocked, so draw charts as inline SVG. Deliver the result with send_file.",
+    "Convert a Markdown or HTML file in the workspace to an A4 PDF with page numbers. Only images, stylesheets and fonts inside the workspace load (reference them by relative path, e.g. ../images/<date>/cover.jpg from reports/); network URLs, files outside the workspace, iframes, embeds and scripts are blocked, so draw charts as inline SVG. Deliver the result with deliver.",
     {
       source: z.string().describe("Markdown (.md) or HTML (.html) file, relative to the workspace"),
       output: z.string().optional().describe("PDF path relative to the workspace; defaults to the source path with .pdf"),
@@ -145,7 +163,7 @@ export function alfredToolDefinitions(out: Outbound, signal?: AbortSignal, run?:
   const generateImages = createImageGenerator({ root: WORKSPACE_DIR, signal });
   const generateImage = tool(
     "generate_image",
-    `Generate images from a text prompt with MiniMax image-01 and save them as JPEG in the workspace. Use it when the user asks for an image, or for illustrative visuals such as a report cover; never for charts or data, which you draw as inline SVG. Every call is billed, even when it fails or times out, so never retry a failed call on your own. At most ${MAX_IMAGES_PER_CALL} images per call and ${MAX_IMAGES_PER_TASK} per task. Read each image to check it before using it; send_file delivers .jpg files as images.`,
+    `Generate images from a text prompt with MiniMax image-01 and save them as JPEG in the workspace. Use it when the user asks for an image, or for illustrative visuals such as a report cover; never for charts or data, which you draw as inline SVG. Every call is billed, even when it fails or times out, so never retry a failed call on your own. At most ${MAX_IMAGES_PER_CALL} images per call and ${MAX_IMAGES_PER_TASK} per task. Read each image to check it before using it; deliver sends .jpg files as images.`,
     {
       prompt: z.string().min(1).describe("What the image shows: subject, style, composition, lighting. English or Chinese"),
       aspect_ratio: z.enum(ASPECT_RATIOS).describe("16:9 for covers and wide illustrations, 1:1 or 3:4 for phone viewing"),
@@ -168,7 +186,7 @@ export function alfredToolDefinitions(out: Outbound, signal?: AbortSignal, run?:
     },
   );
 
-  return [sendFile, moveFile, renderPdfTool, generateImage];
+  return [deliver, moveFile, renderPdfTool, generateImage];
 }
 
 /**
@@ -176,11 +194,17 @@ export function alfredToolDefinitions(out: Outbound, signal?: AbortSignal, run?:
  * that wait for the owner's answer to a question (the task tools): the server waits for them as long as a question
  * does, not for the SDK's default of about a day.
  */
-export function createAlfredTools(out: Outbound, signal?: AbortSignal, run?: RunRecorder, asking: SdkMcpToolDefinition<any>[] = []) {
+export function createAlfredTools(
+  out: Outbound,
+  signal?: AbortSignal,
+  run?: RunRecorder,
+  asking: SdkMcpToolDefinition<any>[] = [],
+  documents?: Documents,
+) {
   return createSdkMcpServer({
     name: "alfred",
     version: "0.1.0",
-    tools: [...alfredToolDefinitions(out, signal, run), ...asking],
+    tools: [...alfredToolDefinitions(out, signal, run, documents), ...asking],
     alwaysLoad: true,
     ...(asking.length ? { timeout: QUESTION_HOOK_TIMEOUT_SECONDS * 1000 } : {}),
   });
