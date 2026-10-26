@@ -170,17 +170,23 @@ private struct Tag: View {
     }
 }
 
-/// A file attached to a message: its name, with no viewer yet.
+/// A file attached to a message: its name, which opens it in the viewer.
 private struct FileChip: View {
     let file: FileRef
 
     var body: some View {
-        Label(URL(filePath: file.path).lastPathComponent, systemImage: symbol)
-            .font(.footnote)
-            .lineLimit(1)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(Color(.tertiarySystemBackground), in: Capsule())
+        NavigationLink {
+            FileViewerScreen(path: file.path)
+        } label: {
+            Label(URL(filePath: file.path).lastPathComponent, systemImage: symbol)
+                .font(.footnote)
+                .lineLimit(1)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color(.tertiarySystemBackground), in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("file.chip.\(file.path)")
     }
 
     private var symbol: String {

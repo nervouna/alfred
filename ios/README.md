@@ -8,11 +8,36 @@ Build tools: Xcode 27 and XcodeGen (`brew install xcodegen`).
 
 ## The app
 
-The 对话 tab is the chat with Alfred; 运行 and 文档 are placeholders.
+The 对话 tab is the chat with Alfred, 运行 lists its runs, and 文档 lists the files it delivered or wrote. Any file opens in the viewer.
 
-- `App/` holds `AppModel`, which owns the credentials, the event stream and the `Timeline` it builds, and the owner's sends. The views only read it.
+- `App/` holds `AppModel`, which owns the credentials, the event stream and the `Timeline` it builds, and the owner's sends. The views only read it, and reach it through the SwiftUI environment (`RootView` puts it there).
 - `Pairing/` is the first screen, shown while the app has no credentials.
-- `Chat/` is the conversation: messages in timeline order (WeChat ones tagged `微信`, failed WeChat sends `微信未送达`) with Alfred's questions as cards where they were asked, the owner's pending messages dimmed until their echo arrives (a failed send says `发送失败，点按重试` and a tap sends it again with the same `clientId`), each run's draft reply with its latest step under it, the composer with its attach button, a stop button while a task runs, and a menu with `取消配对`.
+- `Chat/` is the conversation: messages in timeline order (WeChat ones tagged `微信`, failed WeChat sends `微信未送达`) with Alfred's questions as cards where they were asked, the owner's pending messages dimmed until their echo arrives (a failed send says `发送失败，点按重试` and a tap sends it again with the same `clientId`), each run's draft reply with its latest step under it, the composer with its attach button, a stop button while a task runs, and a menu with `取消配对`. A file chip under a message opens its file in the viewer.
+- `Runs/` is the 运行 tab. The list is fetched (`GET /api/runs`) when the tab appears and on pull to refresh, newest first; a run the stream knows takes its latest version from the `Timeline`, so a running run updates live, and a run only the stream has told of is listed too. A row shows the title, the status (排队中, 进行中, 完成, 已停止, 失败, 中断), `子任务` for a subagent, the short model name, the cost and the start time. A run's detail (`GET /api/runs/<id>`) shows its steps, the files it wrote, its error, a link to the parent run for a subagent, and a `停止` button while it is running, which sends `run.stop`.
+- `Documents/` is the 文档 tab and the viewer. The list holds the files of Alfred's outbound messages and of the runs the tab has loaded or the stream has told of, once per path, newest first; a run's files are dated by when the run ended (or started, while it runs).
+
+### The viewer
+
+A file is downloaded (`GET /api/files/<path>`, to a temporary file that goes with the screen) and shown by the extension of its name:
+
+| Extension | Viewer |
+|---|---|
+| `md`, `markdown` | Markdown, block by block |
+| `pdf` | PDFKit |
+| `png`, `jpg`, `jpeg`, `gif`, `webp`, `heic` | the image, zoomable |
+| `txt`, `json`, `jsonl`, `csv`, `tsv`, `log`, `yaml`, `yml`, `xml`, `js`, `ts`, `py`, `sh`, `css` | monospaced text (the first 256 KB) |
+| `html`, `htm`, `svg` | the isolated web view |
+| anything else | QuickLook |
+
+Every viewer has a share button for the downloaded file. A failed download shows its reason and a retry.
+
+Markdown is read with `AttributedString(markdown:)` and its full syntax. Each run of text says which blocks it is in (its presentation intent), and consecutive runs of the same innermost block become one block: headings, paragraphs, list items (with their bullet or number and nesting), block quotes, code blocks, thematic breaks and tables. Images show as their alt text, nothing loads, and only a web link opens, in the system browser.
+
+An HTML report runs in a web view that is kept away from the app, as the workbench's `REPORT_CSP` does for the web: its own script and style run so charts draw, and nothing loads from anywhere.
+
+- The web view uses a non-persistent website data store and has no script message handler, so the page cannot call into the app, and the app's tokens (the keychain and `AlfredClient`) are out of its reach.
+- A content rule list blocks every load but the document itself and `data:` URLs. The web view does not load until the list is compiled, and a report whose list cannot be compiled is not shown.
+- The report loads from a string with a `nil` base URL. The navigation delegate allows that one load and cancels every navigation after it, so a tapped link, a form or a script that sets the location opens nothing, and link previews are off.
 
 ### Pairing
 
@@ -75,14 +100,14 @@ Run the AlfredKit tests on macOS with Swift 6.0 or later: `swift test --package-
 
 The app has two test targets in the `Alfred` scheme. Use a simulator of your own; `xcrun simctl create "alfred-test" com.apple.CoreSimulator.SimDeviceType.iPhone-18-Pro com.apple.CoreSimulator.SimRuntime.iOS-27-0` prints its id, and `xcrun simctl delete <id>` removes it. Build with the default signing (see Pairing), and add `-collect-test-diagnostics never` so a failed run does not wait on simulator diagnostics.
 
-- `AlfredTests` are unit tests of `AppModel` on a stubbed `URLSession`: pairing, unpairing, sending and retrying, the stream's restart and its errors, attachments (the limits, the upload order, a failed upload and its retry, photos becoming JPEGs) and answering questions.
+- `AlfredTests` are unit tests of `AppModel` on a stubbed `URLSession`: pairing, unpairing, sending and retrying, the stream's restart and its errors, attachments (the limits, the upload order, a failed upload and its retry, photos becoming JPEGs) and answering questions. They also cover the runs and documents lists, the viewer chosen by extension, the Markdown blocks, and the isolation of the report web view (the navigation policy, the rules, and a real `WKWebView` loading a page).
 
   ```bash
   xcodegen generate --spec ios/project.yml
   xcodebuild test -project ios/Alfred.xcodeproj -scheme Alfred -destination 'id=<udid>' -derivedDataPath ios/build -only-testing:AlfredTests -collect-test-diagnostics never
   ```
 
-- `AlfredUITests` drive the app against a running `app-dev`. Start `app-dev` as above, copy the JSON of its `[pairing]` line, and pass it as `TEST_RUNNER_ALFRED_PAIRING` (xcodebuild hands it to the test as `ALFRED_PAIRING`). `ChatUITests` puts the pairing on the pasteboard and taps the paste button, sends `/status` and a message the model answers, then goes to the home screen, sends a message from outside the app, and checks that it shows once the app is back; it also checks that the attach button offers 照片 and 文件. It costs about a tenth of a cent. Stop `app-dev` afterwards (SIGTERM, or Ctrl-C).
+- `AlfredUITests` drive the app against a running `app-dev`. Start `app-dev` as above, copy the JSON of its `[pairing]` line, and pass it as `TEST_RUNNER_ALFRED_PAIRING` (xcodebuild hands it to the test as `ALFRED_PAIRING`). `ChatUITests` puts the pairing on the pasteboard and taps the paste button, sends `/status` and a message the model answers, then goes to the home screen, sends a message from outside the app, and checks that it shows once the app is back; it also checks that the attach button offers 照片 and 文件. `RunsUITests` has Alfred write `notes/hi.md`, follows the run through the 运行 tab (完成), its detail, the viewer and the 文档 tab, and opens a file chip in the chat. Each test that runs the model costs about a tenth of a cent. Stop `app-dev` afterwards (SIGTERM, or Ctrl-C).
 
   ```bash
   TEST_RUNNER_ALFRED_PAIRING='{"version":1,…}' xcodebuild test -project ios/Alfred.xcodeproj -scheme Alfred -destination 'id=<udid>' -derivedDataPath ios/build -only-testing:AlfredUITests -collect-test-diagnostics never
