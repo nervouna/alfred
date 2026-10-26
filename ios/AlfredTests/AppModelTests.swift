@@ -1,4 +1,5 @@
 import AlfredKit
+import Synchronization
 import XCTest
 
 @testable import Alfred
@@ -310,6 +311,50 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(server.requests(to: "/api/events").count, 2)
     }
 
+    func testRetryWhileTheStoppedStreamIsStillHeldStartsAFreshStreamFromTheLastEvent() async throws {
+        // The streams are scripted, so the first one stays open after it reports the stop: its task is still held when
+        // the owner taps retry, however the tasks are scheduled.
+        let streams = ScriptedStreams()
+        let server = StubServer { _ in StubReply(status: 204) }
+        let model = AppModel(
+            store: InMemoryCredentialStore(try server.credentials()),
+            session: server.session,
+            openStream: streams.open
+        )
+        addTeardownBlock { @MainActor in
+            model.background()
+            withExtendedLifetime(server) {}
+        }
+
+        model.foreground()
+        await eventually { streams.opened.count == 1 }
+        guard let first = streams.opened.first else { return }
+        first.continuation.yield(.received(try storedMessage(id: 5, text: "第一条")))
+        first.continuation.yield(.stopped(.forbidden))
+        await eventually { model.streamFailure == .forbidden }
+
+        model.retryStream()
+
+        XCTAssertNil(model.streamFailure)
+        await eventually { streams.opened.count == 2 }
+        guard streams.opened.count == 2 else { return }
+        let second = streams.opened[1]
+        XCTAssertEqual(second.after, 5)
+        // The held stream is stopped, not left to end on its own.
+        await eventually { first.isTerminated }
+
+        second.continuation.yield(.connected)
+        await eventually { model.isConnected }
+        second.continuation.yield(.received(try storedMessage(id: 6, text: "第二条")))
+        await eventually { model.timeline.lastEventId == 6 }
+
+        // The stopped stream ends late: that must not clear the fresh one.
+        first.continuation.finish()
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertTrue(model.isConnected)
+        XCTAssertEqual(streams.opened.count, 2)
+    }
+
     func testARefusedSendShowsTheAccessError() async throws {
         let (model, _, _) = try makeModel(credentials: true, replies: ["/api/commands": [StubReply(status: 401)]])
         await model.send("你好")
@@ -410,4 +455,39 @@ final class AppModelTests: XCTestCase {
         let value = Bundle.main.object(forInfoDictionaryKey: "AlfredKeychainAccessGroup")
         XCTAssertTrue(value is String, "Info.plist has no AlfredKeychainAccessGroup string")
     }
+}
+
+/// Streams that a test opens by hand. Each one stays open until the test finishes it, so the task reading it is held
+/// until then.
+private final class ScriptedStreams: Sendable {
+    struct Opened: Sendable {
+        let after: Int64
+        let continuation: AsyncStream<EventStreamUpdate>.Continuation
+
+        /// Whether the consumer has let go of the stream, as a cancelled stream task does. It is asked with a yield,
+        /// which a stream the consumer has let go refuses.
+        var isTerminated: Bool {
+            if case .terminated = continuation.yield(.connected) { return true }
+            return false
+        }
+    }
+
+    private let items = Mutex<[Opened]>([])
+
+    var opened: [Opened] {
+        items.withLock { $0 }
+    }
+
+    func open(_: AlfredClient, after lastEventId: Int64) -> AsyncStream<EventStreamUpdate> {
+        AsyncStream { continuation in
+            items.withLock { $0.append(Opened(after: lastEventId, continuation: continuation)) }
+        }
+    }
+}
+
+/// A stored message as the event stream decodes it: the frame `messageFrame` builds, without the SSE lines.
+private func storedMessage(id: Int, text: String) throws -> StreamEvent {
+    let frame = String(decoding: messageFrame(id: id, text: text), as: UTF8.self)
+    let json = frame.drop(while: { $0 != "{" }).dropLast(2)
+    return try JSONDecoder().decode(StreamEvent.self, from: Data(json.utf8))
 }

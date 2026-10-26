@@ -56,6 +56,9 @@ final class AppModel {
         let number: Int
     }
 
+    /// Opens the event stream of a client from an event id. The app opens an `EventStream`; tests open streams they script.
+    typealias StreamOpener = @Sendable (AlfredClient, Int64) async -> AsyncStream<EventStreamUpdate>
+
     /// The device's credentials; `nil` until it is paired.
     private(set) var credentials: Credentials?
     private(set) var timeline = Timeline()
@@ -88,6 +91,7 @@ final class AppModel {
     @ObservationIgnored private let store: any CredentialStore
     @ObservationIgnored private let session: URLSession
     @ObservationIgnored private let makeClientId: () -> String
+    @ObservationIgnored private let openStream: StreamOpener
     @ObservationIgnored private let push: any PushSystem
     /// The APNs environment this build registers with; `nil` registers nothing.
     @ObservationIgnored private let pushEnvironment: PushEnvironment?
@@ -110,13 +114,15 @@ final class AppModel {
         session: URLSession = .shared,
         push: any PushSystem = NoPushSystem(),
         pushEnvironment: PushEnvironment? = nil,
-        makeClientId: @escaping () -> String = { "c-" + UUID().uuidString.lowercased() }
+        makeClientId: @escaping () -> String = { "c-" + UUID().uuidString.lowercased() },
+        openStream: @escaping StreamOpener = AppModel.openEventStream
     ) {
         self.store = store
         self.session = session
         self.push = push
         self.pushEnvironment = pushEnvironment
         self.makeClientId = makeClientId
+        self.openStream = openStream
         credentials = try? store.load()
     }
 
@@ -124,6 +130,10 @@ final class AppModel {
     /// the system, registered for the APNs environment the build was signed for.
     static func live() -> AppModel {
         AppModel(store: AppKeychain.store(), push: LivePushSystem(), pushEnvironment: PushToken.environment())
+    }
+
+    nonisolated static func openEventStream(_ client: AlfredClient, after lastEventId: Int64) async -> AsyncStream<EventStreamUpdate> {
+        await EventStream(client: client, after: lastEventId).updates()
     }
 
     var isPaired: Bool {
@@ -228,19 +238,22 @@ final class AppModel {
         stopStream()
     }
 
-    /// Tries again after Cloudflare Access refused the stream.
+    /// Tries again after Cloudflare Access refused the stream. A stream task still held is stopped first, so the retry
+    /// always starts a fresh stream, from the last event the timeline has.
     func retryStream() {
+        stopStream()
         streamFailure = nil
         startStreamIfNeeded()
     }
 
     private func startStreamIfNeeded() {
         guard isForeground, streamTask == nil, streamFailure == nil, let client else { return }
-        let stream = EventStream(client: client, after: timeline.lastEventId)
+        let after = timeline.lastEventId
+        let open = openStream
         streamGeneration += 1
         let generation = streamGeneration
         streamTask = Task { [weak self] in
-            for await update in await stream.updates() {
+            for await update in await open(client, after) {
                 guard let self, !Task.isCancelled else { return }
                 self.handle(update)
             }
