@@ -604,6 +604,21 @@ test("a document reply that is not ok answers its status and its error", async (
   const undone = await post(socket, fixture("commands", "document-undo.json"));
   assert.equal(undone.status, 404);
   assert.deepEqual(undone.json(), { error: "no document r4f7ma" });
+
+  documents.refuse = { ok: false, status: 400, error: "only Markdown and text documents take passage annotations" };
+  const passage = await post(socket, fixture("commands", "document-revise.json"));
+  assert.equal(passage.status, 400);
+  assert.deepEqual(passage.json(), { error: "only Markdown and text documents take passage annotations" });
+});
+
+test("a documents service without undo takes document.revise and answers document.undo 503", async (t) => {
+  const documents = stubDocuments();
+  const { socket } = await start(t, { documents: { revise: (command) => documents.revise(command) } });
+  assert.equal((await post(socket, fixture("commands", "document-revise.json"))).status, 202);
+  const undone = await post(socket, fixture("commands", "document-undo.json"));
+  assert.equal(undone.status, 503);
+  assert.deepEqual(undone.json(), { error: "undo is not available" });
+  assert.deepEqual(documents.undone, []);
 });
 
 test("a document command that does not fit the schema gets 400 and never reaches the documents service", async (t) => {

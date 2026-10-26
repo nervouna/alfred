@@ -49,6 +49,13 @@
 //                delivered again; ends with one pass or fail line per check: one document with two delivered
 //                versions, both commits name their runs, the second message's file carries the second version;
 //                then the spend
+//   revision     the real handler on haiku with the workspace's history and the document store, behind the
+//                command API on a temp socket: a short Markdown note is delivered, then a batch of two passage
+//                annotations and one comment on the whole document is submitted with document.revise and the
+//                revision run is awaited; ends with one pass or fail line per check: the command is accepted with
+//                the run and the three annotations, the run ends done on haiku, the document has a revised version
+//                of that run, all three annotations are resolved with replies, and the timeline has the run's
+//                message naming the document at that version; then the spend
 //   prompt <text>  one message on the default model, then the spend per model
 
 import { execFileSync } from "node:child_process";
@@ -59,12 +66,14 @@ import path from "node:path";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { SDKAssistantMessage, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 
-import { LiveEventSchema } from "../src/api/schema.ts";
+import { LiveEventSchema, RevisionAcceptedSchema } from "../src/api/schema.ts";
 import type { Event, LiveEvent, Message } from "../src/api/schema.ts";
 import { AGENT_CONFIG_DIR } from "../src/agent/config.ts";
 import { createAgentHandler } from "../src/agent/handler.ts";
 import { request, streamEvents } from "../src/api/client.ts";
 import { startApi } from "../src/api/server.ts";
+import type { DocumentCommands } from "../src/api/server.ts";
+import { documentCommands } from "../src/documents/commands.ts";
 import { startDocuments } from "../src/documents/startup.ts";
 import { VERSIONS_GIT_DIR } from "../src/documents/versions.ts";
 import { sharedEventLog } from "../src/events.ts";
@@ -122,14 +131,15 @@ function summary(): void {
   }
 }
 
-/** A handler behind the command API on a socket in a temp dir, as `run` serves it; `send` posts a message the way the app does. */
-async function startStack(handler: Handler = newHandler()) {
+/** A handler behind the command API on a socket in a temp dir, as `run` serves it; `send` posts a message the way the app does, and `post` any command. */
+async function startStack(handler: Handler = newHandler(), options: { documents?: DocumentCommands } = {}) {
   // A short path: Unix socket paths are limited to about 100 bytes.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "alf-"));
   const socket = path.join(dir, "api.sock");
-  const closeApi = await startApi({ socket, handler, events: sharedEventLog() });
+  const closeApi = await startApi({ socket, handler, events: sharedEventLog(), ...options });
   let sent = 0;
   return {
+    post: (command: unknown) => request(socket, "POST", "/commands", command),
     async send(text: string): Promise<void> {
       console.log(`[app] ${at()} ${text}`);
       const answer = await request(socket, "POST", "/commands", { type: "message.send", clientId: `smoke-${++sent}`, text });
@@ -1032,6 +1042,112 @@ async function documents(): Promise<number> {
   return failed;
 }
 
+/** The revision scenario: a delivered note is annotated and revised by a revision run, through the command API. Returns the number of checks that failed. */
+async function revision(): Promise<number> {
+  let failed = 0;
+  const check = (name: string, problems: string[]) => {
+    if (problems.length) failed++;
+    console.log(`[${problems.length ? "fail" : "pass"}] ${name}${problems.length ? `: ${problems.join("; ")}` : ""}`);
+  };
+  // Opened as `run` opens them: the history of the workspace, and the document store.
+  const opened = await startDocuments();
+  if (!opened) {
+    check("the history and the document store open", ["startDocuments failed (see the log above)"]);
+    return failed;
+  }
+  const NOTE = "notes/smoke-revision.md";
+  const ORIGINAL = "# 海边小记\n\n清晨的海面很平静，几只海鸥在沙滩上走来走去。\n\n中午的阳光有点刺眼，游客渐渐多了起来。\n\n傍晚的海风带着咸味。\n";
+  fs.mkdirSync(path.dirname(path.join(WORKSPACE_DIR, NOTE)), { recursive: true });
+  fs.writeFileSync(path.join(WORKSPACE_DIR, NOTE), ORIGINAL);
+  const handler = createLocalHandler({ documents: opened });
+  const stack = await startStack(handler, { documents: documentCommands(handler) });
+  const events = () => sharedEventLog().readSince(0, 100_000);
+  let answer: { status: number; body: string } | undefined;
+  let runId: string | undefined;
+  try {
+    // A haiku chat run delivers the note, so the document's first delivered version is a haiku run's, and so is the revision.
+    await stack.send("/model haiku");
+    await sleep(1500);
+    await stack.send(`用 deliver 工具把 ${NOTE} 发给我，不要改动它，发完只回复“发了”。`);
+    await idle();
+    const document = opened.store.byPath(NOTE);
+    console.log(`[doc] ${at()} delivered: ${document ? `${document.id} "${document.title}" at ${document.version.slice(0, 8)}` : "no document"}`);
+    if (!document) {
+      check("the note is delivered as a document", [`no document at ${NOTE}`]);
+      return failed;
+    }
+
+    const passage = (quote: string, prefix: string, suffix: string, comment: string) => ({ target: { kind: "passage", quote, prefix, suffix }, comment });
+    const command = {
+      type: "document.revise",
+      documentId: document.id,
+      version: document.version,
+      annotations: [
+        passage("几只海鸥在沙滩上走来走去", "清晨的海面很平静，", "。", "改成“一群海鸥在浅滩上觅食”。"),
+        passage("游客渐渐多了起来", "中午的阳光有点刺眼，", "。", "再补一句沙滩上的冰淇淋摊前排起了队。"),
+        { target: { kind: "document" }, comment: "在文末另起一行，写上“——写于夏天”。" },
+      ],
+    };
+    console.log(`[app] ${at()} document.revise on ${document.id}`);
+    answer = await stack.post(command);
+    const accepted = answer.status === 202 ? RevisionAcceptedSchema.safeParse(JSON.parse(answer.body)) : undefined;
+    runId = accepted?.success ? accepted.data.runId : undefined;
+    check(
+      "document.revise is accepted with the run and the three annotations",
+      accepted?.success && accepted.data.annotations.length === 3 ? [] : [`answered ${answer.status} ${answer.body.slice(0, 200)}`],
+    );
+    if (!runId) return failed;
+    const ended = await waitFor(() => events().findLast((e) => e.type === "run.updated" && e.data.id === runId && e.data.status !== "queued" && e.data.status !== "running"), 240_000);
+    await sleep(1500);
+
+    const run = ended?.type === "run.updated" ? ended.data : undefined;
+    check("the revision run ends done", run?.status === "done" ? [] : [`run ${runId} ended ${run?.status ?? "never"} ${run?.error ?? ""}`]);
+    check(
+      "the run is a revision of the document, on haiku",
+      run?.kind === "revision" && run.documentId === document.id && run.model === "claude-haiku-5-5" ? [] : [`kind=${run?.kind} document=${run?.documentId} model=${run?.model}`],
+    );
+
+    const now = opened.store.get(document.id);
+    const versions = opened.store.versions(document.id) ?? [];
+    console.log(`[doc] ${at()} versions: ${versions.map((v) => `${v.reason}@${v.version.slice(0, 8)}${v.runId ? `(${v.runId})` : ""}`).join(", ")}`);
+    check(
+      "the document has a revised version of the run",
+      versions[0]?.reason === "revised" && versions[0].runId === runId && now?.version === versions[0].version && now.version !== document.version
+        ? []
+        : [`newest version: ${versions[0]?.reason ?? "-"} of run ${versions[0]?.runId ?? "-"}`],
+    );
+    console.log(`[doc] revised file:\n${fs.readFileSync(path.join(WORKSPACE_DIR, NOTE), "utf8")}`);
+
+    const annotations = opened.store.annotations(document.id).filter((a) => a.runId === runId);
+    for (const a of annotations) console.log(`[annotation] ${a.id} ${a.state}${a.returnReason ? `/${a.returnReason}` : ""} "${a.comment.slice(0, 30)}" → ${flat(a.reply ?? "-").slice(0, 120)}`);
+    check(
+      "all three annotations are resolved, each with a reply",
+      annotations.length === 3 && annotations.every((a) => a.state === "resolved" && (a.reply ?? "").trim() !== "")
+        ? []
+        : annotations.map((a) => `${a.id}: ${a.state}${a.returnReason ? `/${a.returnReason}` : ""}`),
+    );
+
+    const message = events().flatMap((e) => (e.type === "message.created" && e.data.direction === "out" && e.data.runId === runId ? [e.data] : []));
+    console.log(`[message] ${flat(message[0]?.text ?? "").slice(0, 200)}`);
+    const file = message[0]?.files[0];
+    check(
+      "the timeline has the run's message, naming the document at the new version",
+      message.length === 1 && /^修订了「海边小记」：3 条已回复/.test(message[0]?.text ?? "") && file?.documentId === document.id && file.version === now?.version && !message[0]?.error
+        ? []
+        : [`${message.length} message(s) of the run; text="${flat(message[0]?.text ?? "").slice(0, 60)}" file=${file?.documentId ?? "-"}@${file?.version?.slice(0, 8) ?? "-"}`],
+    );
+    check("no batch is left open on the document", opened.store.revisionOf(document.id) === undefined ? [] : [`still open: ${opened.store.revisionOf(document.id)}`]);
+  } finally {
+    await stack.stop();
+  }
+  summary();
+  const runs = listRunFiles().filter((f) => f.kind === "task" || f.kind === "revision");
+  const cost = runs.reduce((sum, f) => sum + f.costUsd, 0);
+  console.log(`[spend] $${cost.toFixed(4)} across ${runs.length} run(s); the revision run $${(runs.find((f) => f.id === runId)?.costUsd ?? 0).toFixed(4)}`);
+  check("the whole scenario costs well under $0.50", cost < 0.5 ? [] : [`$${cost.toFixed(4)}`]);
+  return failed;
+}
+
 let failedRules = 0;
 if (scenario === "background") {
   const stack = await startStack();
@@ -1109,8 +1225,10 @@ if (scenario === "background") {
   failedRules = await compact();
 } else if (scenario === "documents") {
   failedRules = await documents();
+} else if (scenario === "revision") {
+  failedRules = await revision();
 } else {
-  console.error("usage: node scripts/handler-smoke.ts background|restart|stop|nested|api|stream|attach|ask|scheduled|tasks|compact|documents|prompt <text>");
+  console.error("usage: node scripts/handler-smoke.ts background|restart|stop|nested|api|stream|attach|ask|scheduled|tasks|compact|documents|revision|prompt <text>");
   process.exit(2);
 }
 process.exit(failedRules ? 1 : 0);
