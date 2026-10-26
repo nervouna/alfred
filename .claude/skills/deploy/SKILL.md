@@ -1,6 +1,6 @@
 ---
 name: deploy
-description: Operate the deployed Alfred on its podman host over SSH. Covers updating it after a merge, restarting, rolling back, reading logs, checking whether a task is running, replacing the Anthropic key or the mmx config, and redoing the WeChat QR login. Use when the user says 部署、上线、更新线上、重启 Alfred、回滚、看日志、换 key、重新扫码登录, or after merging a PR that should go live.
+description: Operate the deployed Alfred on its podman host over SSH. Covers updating it after a merge, restarting, rolling back, reading logs, checking whether a task is running, replacing the Anthropic key or the mmx config, and pairing or revoking the app. Use when the user says 部署、上线、更新线上、重启 Alfred、回滚、看日志、换 key、配对 app、撤销设备, or after merging a PR that should go live.
 ---
 
 # Operating the deployed Alfred
@@ -63,17 +63,19 @@ The read-only workbench and its `cloudflared` run in the `workbench` pod, set up
 - On the first deploy, check:
   - the public URL redirects to the Access login, and inside the pod a request without a valid token gets 403: `podman exec workbench node -e 'fetch("http://127.0.0.1:8787/").then((r) => console.log(r.status))'`;
   - writing inside the container fails: `podman exec workbench sh -c 'touch /x /tmp/x /data/state/workbench/x /workspace/x'`;
-  - WeChat opens a card link and gets through the Access sign-in. Only then add `Environment=ALFRED_WORKBENCH_URL=https://<hostname>` to the drop-in `~/.config/containers/systemd/alfred.container.d/workbench.conf`, run `systemctl --user daemon-reload`, and `update.sh --restart`.
+  - a request with the app's service token and a paired device's bearer gets 204 from `/api/ping` through the public URL. Pair a throwaway device for it and revoke it afterwards.
 
-## WeChat login
+## Pairing the app
 
-A new login is needed when iLink rejects the bot token or the owner changes. The scanner becomes the owner of a newly bound bot. The login shows a QR code and may ask for a number shown on the phone, so run it in a terminal tab the user can see:
+The owner pairs a phone by scanning a QR code that holds the server's address, the Access service token and a new device token, so run it in a terminal tab the user can see, and never paste its output into the chat:
 
-1. `ssh $HOST alfred/deploy/update.sh --stop`
-2. `ssh -t $HOST 'podman run --rm -it --userns=keep-id:uid=1000,gid=1000 -v "$HOME/data/state:/data/state" localhost/alfred:latest node src/cli.ts login'`
-3. `ssh $HOST systemctl --user start alfred`
+```bash
+ssh -t $HOST 'podman exec -it workbench node src/cli.ts pair --name <device name>'
+```
+
+List devices with `podman exec workbench node src/cli.ts devices` and lock one out with `devices revoke <id>`; a revoke applies to the next request. `podman exec workbench node src/cli.ts apns-test "<text>"` sends one push to every registered device and prints APNs's answer.
 
 ## Don't
 
-- Run a second Alfred (`npm start`, an echo container) against the same state dir while the Quadlet runs. Two processes take messages from each other.
-- Copy a state dir from another machine onto a running deployment. It rewinds the poll cursor.
+- Run a second Alfred (`npm start`, another container) against the same state dir while the Quadlet runs. Two processes would write the same state and event log.
+- Copy a state dir from another machine onto a running deployment. It rewinds the event log the app resumes from.
