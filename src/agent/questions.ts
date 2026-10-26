@@ -5,7 +5,7 @@
 // So the main agent's call is held in a PreToolUse hook, which allows it with the owner's
 // answers added to its input (the way the tool's own UI hands them over) or denies it when the question is
 // cancelled. A subagent's call is denied at once: only Alfred talks to the owner. The handler owns the
-// open questions (handler.ts); this module has the hook, the WeChat text and how a reply is read.
+// open questions (handler.ts); this module has the hook and how a plain message answers.
 
 import type { CanUseTool, HookCallbackMatcher } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
@@ -53,48 +53,8 @@ export function parseQuestionInput(input: unknown): ParsedQuestions {
   return { ok: true, questions };
 }
 
-const ONE_HINT = "回复编号或直接打字回答。";
-const MANY_NUMBERS_HINT = "可以回复多个编号，用空格分开。";
-const ALL_QUESTIONS_HINT = "直接打字回答，这一条消息会作为所有问题的答案。";
-
-function block(q: Question): string[] {
-  const options = q.options.map((o, i) => `${i + 1}. ${o.label}${o.description ? `：${o.description}` : ""}`);
-  return [`【${q.header}】${q.question}`, ...options];
-}
-
-/**
- * The question as WeChat text: the header and the question, a numbered line per option and how to answer.
- * Several questions are numbered blocks. Numbers are read only when there is one question (answersFromReply),
- * so a block of several ends with one line that says a reply answers them all.
- */
-export function questionText(questions: Question[]): string {
-  const [only] = questions;
-  if (questions.length === 1 && only) return [...block(only), only.multiSelect ? MANY_NUMBERS_HINT : ONE_HINT].join("\n");
-  const blocks = questions.map((q, i) => [`问题 ${i + 1}/${questions.length}`, ...block(q)].join("\n"));
-  return `${blocks.join("\n\n")}\n\n${ALL_QUESTIONS_HINT}`;
-}
-
-/** The option numbers a reply consists of and nothing else, from 1; undefined when it has anything else. */
-function optionNumbers(reply: string): number[] | undefined {
-  const text = reply.normalize("NFKC").trim();
-  if (!/^\d+(?:[\s,、]+\d+)*$/.test(text)) return undefined;
-  return [...new Set(text.split(/[\s,、]+/).map(Number))];
-}
-
-/**
- * The answers a reply gives. For one question, a reply of only option numbers is those options' labels (joined
- * with ", "): several only for a multi-select question, and every number must be an option. Any other reply is
- * free text, trimmed, and is the answer to each question.
- */
+/** The answers a plain message gives: its text, trimmed, is the free-text answer to each question. */
 export function answersFromReply(reply: string, questions: Question[]): Record<string, string> {
-  const [only] = questions;
-  if (questions.length === 1 && only) {
-    const numbers = optionNumbers(reply);
-    const labels = numbers?.map((n) => only.options[n - 1]?.label);
-    if (numbers && labels && labels.every((l) => l !== undefined) && (numbers.length === 1 || only.multiSelect)) {
-      return { [only.question]: labels.join(", ") };
-    }
-  }
   const text = reply.trim();
   return Object.fromEntries(questions.map((q) => [q.question, text]));
 }

@@ -7,8 +7,8 @@ import path from "node:path";
 import { after, test } from "node:test";
 import type { TestContext } from "node:test";
 
-import type { Channel, Run } from "./schema.ts";
-import type { InboundSource } from "../channels.ts";
+import type { Run } from "./schema.ts";
+import type { Inbound } from "../channels.ts";
 import type { EventLog as EventLogType } from "../events.ts";
 
 // store.ts reads the state dir at import time, so set it before loading the modules under test.
@@ -61,8 +61,8 @@ class WatchedLog extends EventLog {
 /** Stands in for the agent handler: records what the API passes on. */
 function stubHandler() {
   const handler = {
-    submitted: [] as InboundSource[],
-    stopped: [] as [string, Channel][],
+    submitted: [] as Inbound[],
+    stopped: [] as string[],
     live: new Set(["k7m2qa"]),
     answered: [] as [string, Record<string, string>][],
     /** The open questions: an id and the texts of its questions. */
@@ -70,13 +70,13 @@ function stubHandler() {
     /** While set, submit() waits for it. */
     hold: undefined as Promise<void> | undefined,
     fail: false,
-    async submit(source: InboundSource) {
-      handler.submitted.push(source);
+    async submit(inbound: Inbound) {
+      handler.submitted.push(inbound);
       await handler.hold;
       if (handler.fail) throw new Error("intake broke");
     },
-    async stopRun(runId: string, channel: Channel) {
-      handler.stopped.push([runId, channel]);
+    async stopRun(runId: string) {
+      handler.stopped.push(runId);
       return handler.live.has(runId);
     },
     async answerQuestion(id: string, answers: Record<string, string>) {
@@ -335,7 +335,7 @@ test("message.send hands the message to the handler once and answers 202", async
   const reply = await post(socket, message);
   assert.equal(reply.status, 202);
   assert.deepEqual(reply.json(), { accepted: true });
-  assert.deepEqual(handler.submitted, [{ channel: "app", text: "你好", clientId: "c-1", files: [] }]);
+  assert.deepEqual(handler.submitted, [{ text: "你好", clientId: "c-1", files: [] }]);
 
   // A charset on the content type is fine.
   assert.equal((await post(socket, { ...message, clientId: "c-2" }, { "Content-Type": "application/json; charset=utf-8" })).status, 202);
@@ -388,12 +388,12 @@ test("run.stop stops a live run with 202 and answers 404 for any other", async (
   const stopped = await post(socket, { type: "run.stop", runId: "k7m2qa" });
   assert.equal(stopped.status, 202);
   assert.deepEqual(stopped.json(), { stopped: true });
-  assert.deepEqual(handler.stopped, [["k7m2qa", "app"]]);
+  assert.deepEqual(handler.stopped, ["k7m2qa"]);
 
   const unknown = await post(socket, { type: "run.stop", runId: "zzzzzz" });
   assert.equal(unknown.status, 404);
   assert.deepEqual(unknown.json(), { error: "no live or queued run zzzzzz" });
-  assert.deepEqual(handler.stopped, [["k7m2qa", "app"], ["zzzzzz", "app"]]);
+  assert.deepEqual(handler.stopped, ["k7m2qa", "zzzzzz"]);
 });
 
 test("question.answer answers an open question with 202, and the handler gets the id and the answers", async (t) => {
@@ -691,7 +691,7 @@ test("a name that is already in the inbox gets a unique path, and the first file
   assert.equal(fs.readFileSync(path.join(inbox(), "same-name-1.txt"), "utf8"), "second");
 });
 
-test("the name is trimmed and sanitized the way WeChat media names are", async (t) => {
+test("the name is trimmed and sanitized", async (t) => {
   const { socket } = await start(t);
   const trimmed = await call(socket, "POST", `/uploads?name=${encodeURIComponent("  spaced.txt  ")}`, { body: "x" });
   assert.deepEqual(trimmed.json(), { file: { path: `inbox/${localDate()}/spaced.txt`, kind: "file" } });
@@ -814,12 +814,12 @@ test("message.send with files hands them to the handler with the message, and an
   const saved = (await upload(socket, "for-message.txt", "hi")).json() as { file: { path: string } };
   const reply = await post(socket, { type: "message.send", clientId: "c-files", text: "看看这个", files: [{ path: saved.file.path }] });
   assert.equal(reply.status, 202);
-  assert.deepEqual(handler.submitted, [{ channel: "app", text: "看看这个", clientId: "c-files", files: [{ path: saved.file.path }] }]);
+  assert.deepEqual(handler.submitted, [{ text: "看看这个", clientId: "c-files", files: [{ path: saved.file.path }] }]);
 
   // Files with no text, and a kind that goes along with a path.
   const kinded = await post(socket, { type: "message.send", clientId: "c-files-2", text: "", files: [{ path: saved.file.path, kind: "file" }] });
   assert.equal(kinded.status, 202);
-  assert.deepEqual(handler.submitted.at(-1), { channel: "app", text: "", clientId: "c-files-2", files: [{ path: saved.file.path, kind: "file" }] });
+  assert.deepEqual(handler.submitted.at(-1), { text: "", clientId: "c-files-2", files: [{ path: saved.file.path, kind: "file" }] });
 });
 
 test("a file of a message that is not a regular file in the inbox gets 400, and nothing is submitted", async (t) => {

@@ -3,7 +3,7 @@
 
 import type { Memory } from "../agent/memory.ts";
 import type { RunFile, RunRecord, RunStatus } from "../runs.ts";
-import { PUSH_WINDOW_MS, countsForSpend } from "./data.ts";
+import { countsForSpend } from "./data.ts";
 import type { AlfredStatus, DaySpend, SessionInfo, TranscriptEntry } from "./data.ts";
 import { Html, html, page, query } from "./html.ts";
 
@@ -72,16 +72,12 @@ export function runCard(r: RunRecord, opts: { live: boolean; now: number; latest
     `${r.costEstimated ? "≈" : ""}${fmtUsd(r.costUsd)}`,
     `工具 ${r.toolCalls} 次`,
   ].filter(Boolean);
-  const undelivered = r.undelivered?.length
-    ? html`<div class="warn">微信未送达：${r.undelivered.map((u, i) => html`${i ? "、" : ""}${u.path ? fileLink(u.path) : "回复"}`)}</div>`
-    : "";
   return html`<div class="card">
 <div class="top"><span class="id">${r.id}</span><button class="copy" type="button" data-copy="${r.id}">复制</button>${statusBadge(r.status, opts.live)}</div>
 <div class="title">${opts.link === false ? r.title : html`<a href="/runs/${r.id}">${r.title}</a>`}</div>
 <div class="meta">${meta.join(" · ")}${r.parentRunId ? html` · 来自 <a href="/runs/${r.parentRunId}">${r.parentRunId}</a>` : ""}</div>
 ${r.status === "running" && opts.latest ? html`<div class="meta">最新：${opts.latest}</div>` : ""}
 ${r.error ? html`<div class="warn">${r.error}</div>` : ""}
-${undelivered}
 ${r.files.length ? html`<ul class="files">${r.files.map((f) => html`<li>${fileLink(f.path)} <span class="meta">${f.tool}</span></li>`)}</ul>` : ""}
 </div>`;
 }
@@ -102,11 +98,6 @@ export function overviewPage(params: { status: AlfredStatus; runs: RunRecord[]; 
   const spendToday = spent.filter((r) => new Date(r.startedAt).toLocaleDateString("en-CA") === today).reduce((a, r) => a + (r.costUsd || 0), 0);
   const spendWeek = spent.filter((r) => Date.parse(r.startedAt) >= weekAgo).reduce((a, r) => a + (r.costUsd || 0), 0);
 
-  let window = "—";
-  if (beat?.ownerLastInboundAt) {
-    const left = beat.ownerLastInboundAt + PUSH_WINDOW_MS - now;
-    window = left > 0 ? `约剩 ${fmtAge(left)}` : `已关闭（${fmtAge(now - beat.ownerLastInboundAt)}前收到最后一条消息）`;
-  }
   const mem = beat?.memory;
   const memory = mem?.cgroupBytes
     ? `${fmtBytes(mem.cgroupBytes)}${mem.cgroupMaxBytes ? ` / ${fmtBytes(mem.cgroupMaxBytes)}（${Math.round((mem.cgroupBytes / mem.cgroupMaxBytes) * 100)}%）` : ""}`
@@ -120,9 +111,7 @@ export function overviewPage(params: { status: AlfredStatus; runs: RunRecord[]; 
 <dl class="kv">
 <dt>心跳</dt><dd>${beat ? `${fmtAge(now - Date.parse(beat.updatedAt))}前${beat.stoppedAt ? `（${fmtTime(beat.stoppedAt)} 正常退出）` : ""}` : "没有心跳记录"}</dd>
 <dt>启动</dt><dd>${beat ? fmtTime(beat.startedAt) : "—"}</dd>
-<dt>上次拉取</dt><dd>${beat?.lastPollAt ? `${fmtAge(now - Date.parse(beat.lastPollAt))}前，${beat.lastPollOk ? "成功" : "失败"}` : "—"}</dd>
 <dt>内存</dt><dd>${memory}</dd>
-<dt>推送窗口</dt><dd>${window}</dd>
 <dt>花费</dt><dd>今天 ${fmtUsd(spendToday)} · 7 天 ${fmtUsd(spendWeek)}</dd>
 </dl>
 </div>

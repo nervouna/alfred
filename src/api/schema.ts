@@ -24,6 +24,7 @@ const RunIdSchema = z.string().regex(/^[2-9a-hjkmnp-z]{6}$/, "must be a six-char
 const ClientIdSchema = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "must be 1-64 letters, digits, _ or -");
 const QuestionIdSchema = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "must be 1-64 letters, digits, _ or -");
 
+// "app" is the only channel Alfred uses now. The other is a retired one: its messages stay in the event log, so clients still read it.
 export const ChannelSchema = z.enum(["app", "wechat"]);
 
 export const FileKindSchema = z.enum(["image", "voice", "video", "file"]);

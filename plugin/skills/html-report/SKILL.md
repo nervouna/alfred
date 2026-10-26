@@ -1,11 +1,11 @@
 ---
 name: html-report
-description: Build a self-contained HTML report with inline-SVG charts and tables that reads on the workbench and renders to PDF with render_pdf. Use for any report with charts, wide tables or a formal layout.
+description: Build a self-contained HTML report with inline-SVG charts and tables that reads in the app and on the workbench and renders to PDF with render_pdf. Use for any report with charts, wide tables or a formal layout.
 ---
 
 # HTML report
 
-Write one self-contained `.html` file where the workspace rules put deliverables. It has to work in two places that both block the network: the workbench's sandboxed viewer, and `render_pdf`, which also runs no JavaScript and adds A4 margins and page numbers itself.
+Write one self-contained `.html` file where the workspace rules put deliverables. The report is read in the app and on the workbench, each in a sandboxed viewer with no network, and it has to render with `render_pdf` too, which also runs no JavaScript and adds A4 margins and page numbers itself.
 
 ## Rules
 

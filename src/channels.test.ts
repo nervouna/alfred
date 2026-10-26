@@ -4,7 +4,6 @@ import os from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
 
-import type { Channel } from "./api/schema.ts";
 import type { Outbound } from "./channels.ts";
 
 // events.ts reads the state dir at import time, so set it before loading the modules under test.
@@ -13,7 +12,7 @@ process.env.ALFRED_STATE_DIR = path.join(tmp, "state");
 after(() => fs.rmSync(tmp, { recursive: true, force: true }));
 
 const { EventLog } = await import("./events.ts");
-const { SerialQueue, appOutbound, recordInbound, recorded } = await import("./channels.ts");
+const { SerialQueue, appOutbound, outboundKind, recordInbound, recorded } = await import("./channels.ts");
 
 const workspace = path.join(tmp, "workspace");
 fs.mkdirSync(path.join(workspace, "reports"), { recursive: true });
@@ -23,12 +22,12 @@ let logs = 0;
 const newLog = () => new EventLog(path.join(tmp, `events-${logs++}`, "events.jsonl"));
 
 /** An Outbound that records what it was asked to send and refuses everything when `fail` is set. */
-function fakeOut(channel: Channel, fail = false) {
+function fakeOut(fail = false) {
   const sent: string[] = [];
   const out: Outbound = {
-    channel,
+    channel: "app",
     async text(text) {
-      if (fail) throw new Error("sendMessage failed: ret=-2");
+      if (fail) throw new Error("the channel refused the message");
       sent.push(text);
     },
     async file(absPath, caption) {
@@ -36,9 +35,6 @@ function fakeOut(channel: Channel, fail = false) {
       if (caption) sent.push(caption);
       sent.push(`file ${absPath}`);
       return "file";
-    },
-    async typing() {
-      return async () => {};
     },
   };
   return { out, sent };
@@ -48,25 +44,32 @@ function messages(events: InstanceType<typeof EventLog>) {
   return events.readSince(0).flatMap((e) => (e.type === "message.created" ? [e.data] : []));
 }
 
-test("the app channel sends nothing: text, files and typing all resolve", async () => {
+test("the app channel sends nothing: text and files resolve, and a file is an image, a video or a file by its extension", async () => {
   const out = appOutbound();
   assert.equal(out.channel, "app");
   await out.text("hello");
   assert.equal(await out.file(path.join(workspace, "reports", "vps.md"), "caption"), "file");
   assert.equal(await out.file("/x/cover.jpg"), "image");
-  const stop = await out.typing();
-  await stop();
+});
+
+test("outboundKind routes by extension", () => {
+  assert.equal(outboundKind("a.JPG"), "image");
+  assert.equal(outboundKind("images/2026-10-10/cover_001.jpg"), "image");
+  assert.equal(outboundKind("chart.png"), "image");
+  assert.equal(outboundKind("clip.mp4"), "video");
+  assert.equal(outboundKind("report.pdf"), "file");
+  assert.equal(outboundKind("report.html"), "file");
 });
 
 test("recorded text appends an outbound message event after the send, with the run id", async () => {
   const events = newLog();
-  const { out, sent } = fakeOut("wechat");
+  const { out, sent } = fakeOut();
   await recorded(out, events, { workspace, runId: "k7m2qa" }).text("报告写好了。");
 
   assert.deepEqual(sent, ["报告写好了。"]);
   const [message, ...rest] = messages(events);
   assert.equal(rest.length, 0);
-  assert.equal(message?.channel, "wechat");
+  assert.equal(message?.channel, "app");
   assert.equal(message?.direction, "out");
   assert.equal(message?.text, "报告写好了。");
   assert.deepEqual(message?.files, []);
@@ -77,18 +80,18 @@ test("recorded text appends an outbound message event after the send, with the r
 
 test("a send the channel refuses is recorded with the error and still rejects", async () => {
   const events = newLog();
-  const { out } = fakeOut("wechat", true);
-  await assert.rejects(recorded(out, events, { workspace, runId: "k7m2qa" }).text("报告写好了。"), /ret=-2/);
+  const { out } = fakeOut(true);
+  await assert.rejects(recorded(out, events, { workspace, runId: "k7m2qa" }).text("报告写好了。"), /channel refused/);
 
   const [message] = messages(events);
   assert.equal(message?.text, "报告写好了。");
-  assert.equal(message?.error, "sendMessage failed: ret=-2");
+  assert.equal(message?.error, "the channel refused the message");
   assert.equal(message?.runId, "k7m2qa");
 });
 
 test("a file is recorded with its workspace path and kind, after its caption as a message of its own", async () => {
   const events = newLog();
-  const { out, sent } = fakeOut("app");
+  const { out, sent } = fakeOut();
   const kind = await recorded(out, events, { workspace, runId: "k7m2qa" }).file(path.join(workspace, "reports", "vps.md"), "见附件");
 
   assert.equal(kind, "file");
@@ -102,7 +105,7 @@ test("a file is recorded with its workspace path and kind, after its caption as 
 
 test("a file the channel refuses is recorded with the error and still rejects", async () => {
   const events = newLog();
-  const { out } = fakeOut("wechat", true);
+  const { out } = fakeOut(true);
   await assert.rejects(recorded(out, events, { workspace }).file(path.join(workspace, "reports", "vps.md")), /upload failed/);
 
   const [message] = messages(events);
@@ -111,27 +114,17 @@ test("a file the channel refuses is recorded with the error and still rejects", 
   assert.equal(message?.runId, undefined);
 });
 
-test("typing passes through and is not recorded", async () => {
-  const events = newLog();
-  let started = 0;
-  const out: Outbound = { ...fakeOut("wechat").out, typing: async () => (started++, async () => {}) };
-  await (await recorded(out, events, { workspace }).typing())();
-  assert.equal(started, 1);
-  assert.deepEqual(events.readSince(0), []);
-});
-
 test("recordInbound records the files, the client id and the run, and skips a message with nothing to show", () => {
   const events = newLog();
-  recordInbound(events, { channel: "app", text: "帮我查一下 VPS 价格", files: [], clientId: "c-7f3a9e" }, "k7m2qa");
-  recordInbound(events, { channel: "wechat", text: "", files: [{ path: "inbox/2026-10-25/image-083110.jpg", kind: "image" }] });
-  recordInbound(events, { channel: "wechat", text: "", files: [], voice: true });
-  recordInbound(events, { channel: "wechat", text: "  \n", files: [], failed: ["image 保存失败：x"] });
+  recordInbound(events, "app", { text: "帮我查一下 VPS 价格", files: [], clientId: "c-7f3a9e" }, "k7m2qa");
+  recordInbound(events, "app", { text: "", files: [{ path: "inbox/2026-10-25/image-083110.jpg", kind: "image" }] });
+  recordInbound(events, "app", { text: "  \n", files: [] });
 
-  const [app, wechat, ...rest] = messages(events);
+  const [first, second, ...rest] = messages(events);
   assert.equal(rest.length, 0);
-  assert.deepEqual([app?.channel, app?.direction, app?.text, app?.clientId, app?.runId], ["app", "in", "帮我查一下 VPS 价格", "c-7f3a9e", "k7m2qa"]);
-  assert.deepEqual([wechat?.channel, wechat?.direction, wechat?.text, wechat?.clientId, wechat?.runId], ["wechat", "in", "", undefined, undefined]);
-  assert.deepEqual(wechat?.files, [{ path: "inbox/2026-10-25/image-083110.jpg", kind: "image" }]);
+  assert.deepEqual([first?.channel, first?.direction, first?.text, first?.clientId, first?.runId], ["app", "in", "帮我查一下 VPS 价格", "c-7f3a9e", "k7m2qa"]);
+  assert.deepEqual([second?.channel, second?.direction, second?.text, second?.clientId, second?.runId], ["app", "in", "", undefined, undefined]);
+  assert.deepEqual(second?.files, [{ path: "inbox/2026-10-25/image-083110.jpg", kind: "image" }]);
 });
 
 test("the serial queue runs tasks one at a time in order, and a failing task does not stop it", async () => {

@@ -38,6 +38,7 @@ export interface RunFileChange {
   tool: string;
 }
 
+/** A send that failed, as an earlier version recorded it on the run. */
 export interface Undelivered {
   /** A text reply, or a file sent with send_file. */
   kind: "reply" | "file";
@@ -68,7 +69,7 @@ export interface RunRecord {
   modelCostUsd?: Record<string, number>;
   toolCalls: number;
   files: RunFileChange[];
-  /** WeChat sends that failed; the card shows them as not delivered. */
+  /** Failed sends recorded by an earlier version. Nothing writes it any more, but old records still carry it and still load. */
   undelivered?: Undelivered[];
   error?: string;
 }
@@ -91,10 +92,6 @@ export interface Heartbeat {
   pid: number;
   startedAt: string;
   updatedAt: string;
-  lastPollAt?: string;
-  lastPollOk?: boolean;
-  /** When the owner last wrote; the WeChat push window counts from here (epoch ms). */
-  ownerLastInboundAt?: number;
   memory: { rssBytes: number; cgroupBytes?: number; cgroupMaxBytes?: number };
   /** Set on a clean shutdown, so the workbench shows Alfred as down at once. */
   stoppedAt?: string;
@@ -292,11 +289,6 @@ export class RunRecorder {
     this.wrote(toRel, "move_file");
   }
 
-  undelivered(entry: Omit<Undelivered, "at">): void {
-    (this.file.undelivered ??= []).push({ ...entry, at: new Date().toISOString() });
-    this.schedule();
-  }
-
   update(patch: Partial<Pick<RunRecord, "title" | "model" | "role" | "sessionId" | "costUsd" | "modelCostUsd" | "agentId" | "costEstimated">>): void {
     Object.assign(this.file, patch);
     this.schedule();
@@ -457,4 +449,26 @@ export function writeHeartbeat(beat: Heartbeat): void {
   } catch (err) {
     log.warn(`writing the heartbeat failed: ${describeError(err)}`);
   }
+}
+
+/** The workbench shows Alfred as down when the heartbeat is older than 90 s. */
+const HEARTBEAT_MS = 30_000;
+
+/**
+ * Writes Alfred's heartbeat now and every 30 s. The function it returns ends the beat and writes the mark
+ * of a clean stop, so the workbench shows Alfred as down at once.
+ */
+export function startHeartbeat(startedAt = new Date()): () => void {
+  const beat: Heartbeat = { pid: process.pid, startedAt: startedAt.toISOString(), updatedAt: "", memory: memoryUsage() };
+  const write = (patch: Partial<Heartbeat> = {}) => {
+    Object.assign(beat, patch, { updatedAt: new Date().toISOString(), memory: memoryUsage() });
+    writeHeartbeat(beat);
+  };
+  write();
+  const timer = setInterval(() => write(), HEARTBEAT_MS);
+  timer.unref();
+  return () => {
+    clearInterval(timer);
+    write({ stoppedAt: new Date().toISOString() });
+  };
 }

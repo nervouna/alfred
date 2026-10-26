@@ -69,14 +69,6 @@ export function describeError(err: unknown): string {
   return parts.join(" <- ");
 }
 
-const SECRET_FIELDS = /"(context_token|bot_token|typing_ticket|aes_key|aeskey|token)"\s*:\s*"[^"]*"/g;
-
-/** Mask credential-bearing JSON fields and truncate for logging. */
-export function redact(body: string, maxLen = 800): string {
-  const masked = body.replace(SECRET_FIELDS, '"$1":"***"');
-  return masked.length <= maxLen ? masked : `${masked.slice(0, maxLen)}…(${masked.length} chars)`;
-}
-
 /** Show only the edges of an identifier or token. */
 export function mask(value: string | undefined): string {
   if (!value) return "(none)";

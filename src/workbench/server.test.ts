@@ -524,3 +524,41 @@ test("POST /api/push refuses a body over 4096 bytes with 413", async () => {
   await assertApiError(await fetch(`${open}/api/push`, { method: "POST", headers: bearer(phone.token), body }), 413, "over the limit");
   assert.equal(pushOf(phone.id), undefined);
 });
+
+// --- what the workbench shows of a retired channel ---------------------------
+
+test("the overview shows Alfred's heartbeat, and no poll or push window", async () => {
+  const body = await (await fetch(`${open}/`)).text();
+  assert.ok(body.includes("心跳"));
+  assert.ok(body.includes("内存"));
+  assert.ok(!body.includes("上次拉取") && !body.includes("推送窗口"));
+});
+
+test("a run from an earlier version, with failed sends on its record, loads in the pages and the API and shows nothing about them", async () => {
+  const old = {
+    id: "w8h5ne",
+    kind: "task",
+    title: "旧的报告",
+    status: "done",
+    startedAt: "2026-10-20T01:00:00.000Z",
+    endedAt: "2026-10-20T01:05:00.000Z",
+    costUsd: 0.1,
+    toolCalls: 1,
+    files: [{ path: "reports/r.html", tool: "Write" }],
+    undelivered: [{ kind: "file", path: "reports/r.pdf", at: "2026-10-20T01:05:00.000Z", error: "sendMessage failed: ret=-2" }],
+  };
+  const runsDir = path.join(state, "workbench", "runs");
+  fs.mkdirSync(runsDir, { recursive: true });
+  fs.writeFileSync(path.join(runsDir, `${old.id}.json`), JSON.stringify({ ...old, updatedAt: old.endedAt, steps: [] }));
+
+  for (const page of [`/runs/${old.id}`, "/runs", "/"]) {
+    const res = await fetch(`${open}${page}`);
+    const body = await res.text();
+    assert.equal(res.status, 200, page);
+    assert.ok(!body.includes("未送达"), `${page} says something about failed sends`);
+    if (page === `/runs/${old.id}`) assert.ok(body.includes("旧的报告") && body.includes("reports/r.html"), `${page} shows the old run and its file`);
+  }
+  const detail = RunDetailSchema.parse(await (await fetch(`${open}/api/runs/${old.id}`, { headers: bearer(paired.token) })).json());
+  assert.equal(detail.run.title, "旧的报告");
+  assert.ok(!("undelivered" in detail.run), "the client's view leaves it out");
+});

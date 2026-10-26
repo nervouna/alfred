@@ -33,7 +33,7 @@ export function pairingSettings(env: Record<string, string | undefined> = proces
   const missing = [URL_VAR, ID_VAR, SECRET_VAR].filter((name) => !value(name));
   if (missing.length) throw new Error(`${missing.join(", ")} ${missing.length === 1 ? "is" : "are"} not set`);
 
-  // Like the links in WeChat replies, a trailing slash does not matter.
+  // Like the links in replies, a trailing slash does not matter.
   const server = value(URL_VAR).replace(/\/+$/, "");
   const clientId = value(ID_VAR);
   const clientSecret = value(SECRET_VAR);

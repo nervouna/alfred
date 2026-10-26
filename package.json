@@ -3,15 +3,13 @@
   "version": "0.1.0",
   "private": true,
   "license": "MIT",
-  "description": "Personal research assistant on WeChat (iLink) powered by the Claude Agent SDK",
+  "description": "Personal research assistant for one owner, reached through a native app, powered by the Claude Agent SDK",
   "type": "module",
   "engines": {
     "node": ">=24"
   },
   "scripts": {
-    "login": "node src/cli.ts login",
     "start": "node src/cli.ts run",
-    "push": "node src/cli.ts push",
     "status": "node src/cli.ts status",
     "setup:pdf": "node src/cli.ts setup-pdf",
     "memory-scan": "node src/cli.ts memory-scan",

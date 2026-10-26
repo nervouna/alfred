@@ -1,4 +1,4 @@
-// In-process MCP tools that let the agent act on the owner's channels and the workspace.
+// In-process MCP tools that let the agent reach the owner and act on the workspace.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -8,18 +8,17 @@ import { z } from "zod";
 
 import type { Outbound } from "../channels.ts";
 import { humanSize } from "../files.ts";
-import { MEDIA_MAX_BYTES } from "../ilink/inbound.ts";
 import { describeError, log } from "../log.ts";
 import { PDF_SOURCE_EXTS, isRendererMissing, renderPdf } from "../pdf.ts";
 import type { RunRecorder } from "../runs.ts";
 import { WORKSPACE_DIR } from "../store.ts";
-import { WORKBENCH_ON } from "./config.ts";
 import { resolveInside } from "./guard.ts";
 import { ASPECT_RATIOS, MAX_IMAGES_PER_CALL, MAX_IMAGES_PER_TASK, createImageGenerator } from "./image.ts";
 
 export const ALFRED_TOOL_NAMES = ["mcp__alfred__send_file", "mcp__alfred__move_file", "mcp__alfred__render_pdf", "mcp__alfred__generate_image"];
 
-const UNOPENABLE_EXTS = new Set([".html", ".htm"]);
+/** send_file refuses a file over this size. */
+const SEND_MAX_BYTES = 100 * 1024 * 1024;
 
 function ok(text: string) {
   return { content: [{ type: "text" as const, text }] };
@@ -47,14 +46,14 @@ function anySignal(run: AbortSignal | undefined, call: AbortSignal | undefined):
 }
 
 /**
- * Alfred's tools, bound to the channel a run answers on, for the duration of the run. Each one stops when
+ * Alfred's tools, bound to the channel a run delivers on, for the duration of the run. Each one stops when
  * `signal` aborts (the run is stopped) or when its own call's signal does (the turn is interrupted). `run`
- * records the files they write and failed sends.
+ * records the files they write.
  */
 export function alfredToolDefinitions(out: Outbound, signal?: AbortSignal, run?: RunRecorder) {
   const sendFile = tool(
     "send_file",
-    "Send a file from the workspace to the owner, on the channel this run answers on. WeChat opens Markdown, PDF, images, video and Office files; it cannot open HTML.",
+    "Send a file from the workspace to the owner in the app. The app opens Markdown, PDF, images, video, text files and HTML reports; an HTML report opens in a sandbox where inline scripts and SVG charts work, with no network access.",
     {
       path: z.string().describe("File path, relative to the workspace or absolute inside it"),
       caption: z.string().optional().describe("Short message sent just before the file"),
@@ -71,10 +70,7 @@ export function alfredToolDefinitions(out: Outbound, signal?: AbortSignal, run?:
         return fail(`${p} does not exist.`);
       }
       if (!stat.isFile()) return fail(`${p} is not a file.`);
-      if (stat.size > MEDIA_MAX_BYTES) return fail(`${p} is ${humanSize(stat.size)}, over the ${humanSize(MEDIA_MAX_BYTES)} limit.`);
-      if (UNOPENABLE_EXTS.has(path.extname(real).toLowerCase())) {
-        return fail("WeChat cannot open HTML files. Send Markdown or PDF instead.");
-      }
+      if (stat.size > SEND_MAX_BYTES) return fail(`${p} is ${humanSize(stat.size)}, over the ${humanSize(SEND_MAX_BYTES)} limit.`);
       try {
         const kind = await out.file(real, caption);
         log.info(`agent sent ${path.relative(WORKSPACE_DIR, real)} as ${kind}`);
@@ -82,10 +78,7 @@ export function alfredToolDefinitions(out: Outbound, signal?: AbortSignal, run?:
       } catch (err) {
         const error = describeError(err);
         log.warn(`sending ${relPath(real)} failed: ${error}`);
-        if (!run) return fail(`Sending failed: ${error}`);
-        run.undelivered({ kind: "file", path: relPath(real), error });
-        const where = WORKBENCH_ON ? ` and is listed on run ${run.id}'s card in the workbench, marked as not delivered` : "";
-        return fail(`Sending failed: ${error}. The file stays in the workspace${where}. Do not retry; say in your reply that it did not arrive and where it is.`);
+        return fail(`Sending failed: ${error}. The file stays in the workspace. Do not retry; say in your reply that it did not arrive and where it is.`);
       }
     },
   );

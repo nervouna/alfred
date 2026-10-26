@@ -48,10 +48,10 @@ test("system prompt: empty index", () => {
 test("system prompt: normal index is injected verbatim", () => {
   const ws = workspace();
   writeMemory(ws, "prefer-english-sources.md", { name: "英文资料优先", description: "调研时优先找英文资料", updated: "2026-10-09" });
-  writeMemory(ws, "works-on-alfred.md", { name: "Alfred project", description: "Builds a WeChat research bot", type: "project", updated: "2026-10-10" });
+  writeMemory(ws, "works-on-alfred.md", { name: "Alfred project", description: "Builds a personal research assistant", type: "project", updated: "2026-10-10" });
   const lines = syncMemoryIndex(ws);
   assert.deepEqual(lines, [
-    "- [Alfred project](works-on-alfred.md) — Builds a WeChat research bot",
+    "- [Alfred project](works-on-alfred.md) — Builds a personal research assistant",
     "- [英文资料优先](prefer-english-sources.md) — 调研时优先找英文资料",
   ]);
   const prompt = systemPrompt(NOW, { memory: capIndex(lines) });
