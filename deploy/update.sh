@@ -5,7 +5,7 @@
 #   deploy/update.sh               pull, build, restart if the image or the Quadlet changed
 #   deploy/update.sh --restart     restart the current build
 #   deploy/update.sh --rollback    switch back to the image that ran before the last update
-#   deploy/update.sh --stop        stop Alfred, e.g. for a new QR login
+#   deploy/update.sh --stop        stop Alfred
 #
 #   --wait SECONDS       how long to wait for a running task (default 900)
 #   --force              restart without waiting; live runs are lost and named
