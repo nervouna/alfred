@@ -41,7 +41,7 @@ final class RunsUITests: XCTestCase {
         let app = try launchPaired()
 
         let beforeAsk = messageIds(in: app)
-        send("在 notes/chip.md 里写一行“你好，附件”，用 send_file 把它发给我，然后只回复“发了”", in: app)
+        send("在 notes/chip.md 里写一行“你好，附件”，用 deliver 把它发给我，然后只回复“发了”", in: app)
         XCTAssertTrue(newReply(beforeAsk, in: app).waitForExistence(timeout: modelPatience), "Alfred did not answer\n\(app.debugDescription)")
 
         // An earlier run of this test left chips for the same file higher up; the one just sent is the last.

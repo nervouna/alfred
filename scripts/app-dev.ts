@@ -23,6 +23,7 @@ import { isModelKey } from "../src/agent/config.ts";
 import { describeEvent } from "../src/api/client.ts";
 import type { LiveEvent } from "../src/api/schema.ts";
 import { startApi } from "../src/api/server.ts";
+import { startDocuments } from "../src/documents/startup.ts";
 import { DocumentStore, documentKind, documentTitle } from "../src/documents/store.ts";
 import { VERSIONS_GIT_DIR, Versions } from "../src/documents/versions.ts";
 import { isLiveEvent, sharedEventLog } from "../src/events.ts";
@@ -255,9 +256,11 @@ async function main(options: Options): Promise<void> {
   const cleanups: (() => Promise<void> | void)[] = [];
   try {
     if (options.seedDocuments) await seedDocuments();
-    // Wired as `run` wires them: the one task store behind the handler, which runs the tasks, and the task commands.
+    // Wired as `run` wires them: the one history and document store (opened after the seed, so it finds the seeded
+    // documents and imports nothing), the one task store behind the handler, which runs the tasks, and the task commands.
+    const documents = await startDocuments();
     const tasks = new TaskStore();
-    const handler = createLocalHandler({ tasks });
+    const handler = createLocalHandler({ tasks, documents });
     cleanups.push(() => handler.shutdown());
     cleanups.push(await startApi({ socket, handler, events: sharedEventLog(), tasks: taskCommands(tasks, handler) }));
     cleanups.push(
