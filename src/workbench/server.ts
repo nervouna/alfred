@@ -79,6 +79,7 @@ const IMAGE_TYPES: Record<string, string> = {
 };
 const TEXT_EXTS = new Set([".txt", ".md", ".markdown", ".csv", ".tsv", ".json", ".jsonl", ".log", ".yaml", ".yml", ".xml", ".js", ".ts", ".py", ".sh", ".css"]);
 const REPORT_EXTS = new Set([".html", ".htm", ".svg"]);
+const HTML_EXTS = new Set([".html", ".htm"]);
 const MAX_PREVIEW_BYTES = 4 * 1024 * 1024;
 const MAX_INLINED_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_INLINED_TOTAL_BYTES = 24 * 1024 * 1024;
@@ -355,7 +356,11 @@ async function pushRegistrationReply(req: http.IncomingMessage, deviceId: string
   return { status: 204, headers: {}, body: "" };
 }
 
-/** GET /api/files/<path>: a workspace file's bytes, typed by extension as the pages type them, under the sandbox policy. */
+/**
+ * GET /api/files/<path>: a workspace file's bytes, typed by extension as the pages type them, under the sandbox policy.
+ * An HTML report comes with its workspace images inlined, as the report page shows it; one over the preview cap is
+ * sent as it is, since the page would refuse it.
+ */
 function fileReply(workspace: string, rest: string): Response {
   const notFound = () => jsonError(404, "There is no such file.");
   let rel: string;
@@ -373,8 +378,15 @@ function fileReply(workspace: string, rest: string): Response {
     throw err;
   }
   if (!target.stat.isFile()) return notFound();
-  const type = rawContentType(path.extname(target.real).toLowerCase());
-  return { headers: { "Content-Type": type, "Content-Length": String(target.stat.size), "Content-Security-Policy": "sandbox" }, body: fs.createReadStream(target.real) };
+  const ext = path.extname(target.real).toLowerCase();
+  const headers: Record<string, string> = { "Content-Type": rawContentType(ext), "Content-Security-Policy": "sandbox" };
+  if (HTML_EXTS.has(ext) && target.stat.size <= MAX_PREVIEW_BYTES) {
+    const markup = inlineImages(fs.readFileSync(target.real, "utf8"), target.real, workspace);
+    headers["Content-Length"] = String(Buffer.byteLength(markup));
+    return { headers, body: markup };
+  }
+  headers["Content-Length"] = String(target.stat.size);
+  return { headers, body: fs.createReadStream(target.real) };
 }
 
 /** The app's way in: the Access JWT (owner or service token) on the tunnel, then a paired device's bearer token everywhere. */

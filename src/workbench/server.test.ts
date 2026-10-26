@@ -435,6 +435,74 @@ test("GET /api/files/<path> serves a workspace file raw, with its type and the s
   assert.equal(svg.headers.get("content-security-policy"), "sandbox");
 });
 
+const MiB = 1024 * 1024;
+
+test("GET /api/files/<path> inlines a report's workspace images as data: URIs, in .html and .htm alike", async () => {
+  const get = (p: string) => fetch(`${open}/api/files/${p}`, { headers: bearer(paired.token) });
+  fs.writeFileSync(path.join(workspace, "reports", "h.htm"), '<img src="../images/p.png">');
+  const res = await get("reports/r.html");
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("content-type"), "text/plain; charset=utf-8");
+  assert.equal(res.headers.get("content-security-policy"), "sandbox");
+  const png = fs.readFileSync(path.join(workspace, "images", "p.png")).toString("base64");
+  const body = await res.text();
+  assert.equal(body, `<p>chart</p><img src="data:image/png;base64,${png}"><script>fetch("/")</script>`);
+  assert.equal(res.headers.get("content-length"), String(Buffer.byteLength(body)), "Content-Length is the inlined size");
+  const htm = await (await get("reports/h.htm")).text();
+  assert.equal(htm, `<img src="data:image/png;base64,${png}">`);
+});
+
+test("GET /api/files/<path> leaves a report's image alone when it is outside the workspace, reached through a link, or over the per-image cap", async () => {
+  const get = (p: string) => fetch(`${open}/api/files/${p}`, { headers: bearer(paired.token) });
+  fs.writeFileSync(path.join(tmp, "outside", "pic.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+  const outside = '<img src="../../outside/pic.png"><img src="../escape/pic.png">';
+  fs.writeFileSync(path.join(workspace, "reports", "outside.html"), outside);
+  assert.equal(await (await get("reports/outside.html")).text(), outside);
+
+  const big = path.join(workspace, "images", "big.png");
+  fs.writeFileSync(big, "");
+  fs.truncateSync(big, 8 * MiB + 1);
+  const over = '<img src="../images/big.png">';
+  fs.writeFileSync(path.join(workspace, "reports", "big.html"), over);
+  assert.equal(await (await get("reports/big.html")).text(), over);
+});
+
+test("GET /api/files/<path> sends an HTML report over the 4 MiB preview cap as it is", async () => {
+  const report = path.join(workspace, "reports", "huge.html");
+  fs.writeFileSync(report, '<img src="../images/p.png">');
+  fs.truncateSync(report, 4 * MiB + 1);
+  const res = await fetch(`${open}/api/files/reports/huge.html`, { headers: bearer(paired.token) });
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("content-length"), String(4 * MiB + 1));
+  assert.ok((await res.text()).startsWith('<img src="../images/p.png">'));
+});
+
+test("GET /api/files/<path> stops inlining an HTML report's images at the 24 MiB total", async () => {
+  const get = (p: string) => fetch(`${open}/api/files/${p}`, { headers: bearer(paired.token) });
+  const names = ["t1", "t2", "t3", "t4"];
+  for (const n of names) {
+    const file = path.join(workspace, "images", `${n}.png`);
+    fs.writeFileSync(file, "");
+    fs.truncateSync(file, 7 * MiB);
+  }
+  fs.writeFileSync(path.join(workspace, "reports", "total.html"), names.map((n) => `<img src="../images/${n}.png">`).join(""));
+  const body = await (await get("reports/total.html")).text();
+  assert.equal(body.split("data:image/png;base64,").length - 1, 3, "three 7 MiB images fit under 24 MiB");
+  assert.ok(body.endsWith('<img src="../images/t4.png">'), "the fourth is left as it was");
+});
+
+test("GET /api/files/<path> serves a non-HTML file byte for byte, even one that names a workspace image", async () => {
+  const get = (p: string) => fetch(`${open}/api/files/${p}`, { headers: bearer(paired.token) });
+  const refs = '<img src="../images/p.png"> <image href="../images/p.png"/>';
+  for (const rel of ["notes/refs.md", "notes/refs.txt", "reports/refs.svg"]) fs.writeFileSync(path.join(workspace, rel), refs);
+  for (const rel of ["notes/refs.md", "notes/refs.txt", "reports/refs.svg"]) {
+    const res = await get(rel);
+    assert.equal(res.status, 200, rel);
+    assert.deepEqual(Buffer.from(await res.arrayBuffer()), fs.readFileSync(path.join(workspace, rel)), rel);
+    assert.equal(res.headers.get("content-length"), String(fs.statSync(path.join(workspace, rel)).size), rel);
+  }
+});
+
 test("GET /api/files/<path> answers 404 for a missing path, a directory, anything outside the workspace and a .. segment", async () => {
   const paths = [
     "",
