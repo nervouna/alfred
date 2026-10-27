@@ -77,7 +77,7 @@ export interface DocumentCommands {
 }
 
 /** An idea command's answer: the body to send, or the status and the reason it was refused. */
-export type IdeaReply<T> = { ok: true; body: T } | { ok: false; status: 400 | 404 | 409 | 500; error: string };
+export type IdeaReply<T> = { ok: true; body: T } | { ok: false; status: 400 | 404 | 409 | 500 | 503; error: string };
 
 export interface IdeaCommands {
   /** Accepts an idea as a task, or refuses it. */

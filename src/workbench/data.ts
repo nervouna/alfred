@@ -7,8 +7,9 @@ import path from "node:path";
 
 import { AGENT_CONFIG_DIR } from "../agent/config.ts";
 import { transcriptDirs } from "../agent/memory-scan.ts";
-import { TaskListSchema } from "../api/schema.ts";
-import type { TaskList } from "../api/schema.ts";
+import { IdeaListSchema, TaskListSchema } from "../api/schema.ts";
+import type { IdeaList, TaskList } from "../api/schema.ts";
+import { IDEAS_FILE } from "../ideas/store.ts";
 import { describeError } from "../log.ts";
 import { LOG_FILE, STATUS_FILE, TASKS_FILE, readRunFile, readRunLog, runFileIds } from "../runs.ts";
 import type { Heartbeat, RunFile, RunRecord } from "../runs.ts";
@@ -55,6 +56,23 @@ export function readTaskList(file = TASKS_FILE): TaskList {
   if (raw === undefined) return { timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone, tasks: [] };
   const parsed = TaskListSchema.safeParse(raw);
   if (!parsed.success) throw new Error(`${file} does not fit a task list: ${parsed.error.message}`);
+  return parsed.data;
+}
+
+/**
+ * The ideas the idea store keeps in ideas.json, through IdeaListSchema, with the generation running when there is one.
+ * With no such file there are no ideas. A file that cannot be read or does not fit throws, naming the file.
+ */
+export function readIdeaList(file = IDEAS_FILE): IdeaList {
+  let raw: unknown;
+  try {
+    raw = readJson<unknown>(file);
+  } catch (err) {
+    throw new Error(`cannot read ${file}: ${describeError(err)}`);
+  }
+  if (raw === undefined) return { ideas: [] };
+  const parsed = IdeaListSchema.safeParse(raw);
+  if (!parsed.success) throw new Error(`${file} does not fit an idea list: ${parsed.error.message}`);
   return parsed.data;
 }
 

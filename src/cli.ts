@@ -17,6 +17,9 @@ import { documentCommands } from "./documents/commands.ts";
 import { startDocuments } from "./documents/startup.ts";
 import { sharedEventLog } from "./events.ts";
 import { humanAge } from "./files.ts";
+import { startArchiving } from "./ideas/archive.ts";
+import { ideaCommands } from "./ideas/commands.ts";
+import { IdeaStore } from "./ideas/store.ts";
 import { describeError, log, logToFile } from "./log.ts";
 import { BROWSERS_PATH, renderPdf } from "./pdf.ts";
 import { LOG_FILE, startHeartbeat } from "./runs.ts";
@@ -80,6 +83,8 @@ async function cmdRun(args: string[]): Promise<void> {
   const documents = await startDocuments();
   // The only task store: it is the only writer of tasks.json, and the handler and the task commands both use it.
   const tasks = new TaskStore();
+  // The only idea store: it is the only writer of ideas.json, and the idea commands and the archiving use it.
+  const ideas = new IdeaStore();
   const agent = createAgentHandler({ out: appOutbound(), tasks, documents });
   let closeApi: () => Promise<void>;
   try {
@@ -89,6 +94,7 @@ async function cmdRun(args: string[]): Promise<void> {
       handler: agent,
       events: sharedEventLog(),
       tasks: taskCommands(tasks, agent),
+      ideas: ideaCommands(ideas, tasks),
       ...(documents ? { documents: documentCommands(agent, documents) } : {}),
     });
   } catch (err) {
@@ -96,6 +102,7 @@ async function cmdRun(args: string[]): Promise<void> {
     throw err;
   }
   const stopHeartbeat = startHeartbeat(startedAt);
+  const stopArchiving = startArchiving(ideas);
   log.info(`Alfred running: workspace=${WORKSPACE_DIR} api=${socket}`);
 
   await untilSignal();
@@ -104,6 +111,7 @@ async function cmdRun(args: string[]): Promise<void> {
   try {
     await closeApi();
   } finally {
+    stopArchiving();
     // Running tasks would keep their Claude Code processes alive until the container is killed.
     await agent.shutdown();
     stopHeartbeat();

@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { after, before, mock, test } from "node:test";
 
-import type { TaskList } from "../api/schema.ts";
+import type { IdeaList, TaskList } from "../api/schema.ts";
 
 // store.ts reads these at import time, so set them before loading the modules under test.
 const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "alfred-workbench-")));
@@ -21,7 +21,8 @@ const { RunRecorder, TASKS_FILE, appendRunLog, newRunId, writeHeartbeat } = awai
 const { EventLog } = await import("../events.ts");
 const { DOCUMENTS_FILE, DocumentStore } = await import("../documents/store.ts");
 const { VERSIONS_GIT_DIR, Versions } = await import("../documents/versions.ts");
-const { DocumentDetailSchema, DocumentListSchema, ErrorResponseSchema, RunDetailSchema, RunListSchema, TaskDetailSchema, TaskListSchema } = await import("../api/schema.ts");
+const { IDEAS_FILE } = await import("../ideas/store.ts");
+const { DocumentDetailSchema, DocumentListSchema, ErrorResponseSchema, IdeaListSchema, RunDetailSchema, RunListSchema, TaskDetailSchema, TaskListSchema } = await import("../api/schema.ts");
 const { AccessVerifier } = await import("./access.ts");
 const { DeviceStore } = await import("./devices.ts");
 const { REPORT_CSP, createHandler, inlineImages, startWorkbench } = await import("./server.ts");
@@ -634,6 +635,55 @@ test("a tasks file that does not fit answers 500 on both routes, and the log nam
   }
   const logged = lines.mock.calls.map((call) => String(call.arguments[0]));
   assert.ok(logged.some((line) => line.includes(TASKS_FILE)), "the log names the file");
+});
+
+// --- /api/ideas -------------------------------------------------------------
+
+const ideaList = JSON.parse(fs.readFileSync(new URL("../../fixtures/api/responses/idea-list.json", import.meta.url), "utf8")) as IdeaList;
+
+test("GET /api/ideas answers an empty list when there is no ideas file", async () => {
+  fs.rmSync(IDEAS_FILE, { force: true });
+  const res = await fetch(`${open}/api/ideas`, { headers: bearer(paired.token) });
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("content-type"), "application/json; charset=utf-8");
+  assert.equal(res.headers.get("cache-control"), "no-store");
+  assert.deepEqual(IdeaListSchema.parse(await res.json()), { ideas: [] });
+});
+
+test("GET /api/ideas gives the ideas of the file in every state, with the generation running, as the file holds them", async () => {
+  fs.mkdirSync(path.dirname(IDEAS_FILE), { recursive: true });
+  fs.writeFileSync(IDEAS_FILE, JSON.stringify(ideaList));
+  const res = await fetch(`${open}/api/ideas`, { headers: bearer(paired.token) });
+  assert.equal(res.status, 200);
+  const body = IdeaListSchema.parse(await res.json());
+  assert.deepEqual(body, ideaList);
+  assert.deepEqual(new Set(body.ideas.map((idea) => idea.state)), new Set(["open", "accepted", "rejected", "archived"]));
+  assert.equal(body.generatingRunId, "c9t5hq");
+  fs.rmSync(IDEAS_FILE, { force: true });
+});
+
+test("GET /api/ideas needs a device token, and refuses other methods with 405", async () => {
+  await assertApiError(await fetch(`${open}/api/ideas`), 401, "without a token");
+  await assertApiError(await fetch(`${guarded}/api/ideas`), 403, "on the tunnel without Access");
+  const wrong = await fetch(`${open}/api/ideas`, { method: "POST", headers: bearer(paired.token), body: "{}" });
+  assert.equal(wrong.status, 405);
+  assert.equal(wrong.headers.get("allow"), "GET");
+});
+
+test("an ideas file that does not fit answers 500 on the route, and the log names the file", async () => {
+  fs.mkdirSync(path.dirname(IDEAS_FILE), { recursive: true });
+  const lines = mock.method(console, "error", () => {});
+  try {
+    for (const body of ["{ not json", JSON.stringify({ ideas: [{ id: "h3v8ct" }] })]) {
+      fs.writeFileSync(IDEAS_FILE, body);
+      await assertApiError(await fetch(`${open}/api/ideas`, { headers: bearer(paired.token) }), 500, `list: ${body}`);
+    }
+  } finally {
+    lines.mock.restore();
+    fs.rmSync(IDEAS_FILE, { force: true });
+  }
+  const logged = lines.mock.calls.map((call) => String(call.arguments[0]));
+  assert.ok(logged.some((line) => line.includes(IDEAS_FILE)), "the log names the file");
 });
 
 // --- /api/documents and /api/files at a version -----------------------------

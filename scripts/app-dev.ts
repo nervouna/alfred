@@ -3,7 +3,7 @@
 // device. It opens the workspace's history and the document store as `run` does, so deliveries become documents and the
 // app's revisions and undos run. It prints the pairing to paste into the app, then every event as it happens: [event] for
 // stored ones, [live] for message deltas and steps. Ctrl-C or SIGTERM stops everything; it exits 0.
-// usage: node scripts/app-dev.ts [--port <port>] [--model <sonnet|opus|haiku>] [--repair] [--seed-documents]
+// usage: node scripts/app-dev.ts [--port <port>] [--model <sonnet|opus|haiku>] [--repair] [--seed-documents] [--seed-ideas]
 //   --port            the workbench's loopback port (default 8787)
 //   --model           the model the owner's messages run on (default haiku)
 //   --repair          revoke the simulator's device and pair a new one. A device's token is shown once and
@@ -11,6 +11,8 @@
 //   --seed-documents  before Alfred starts, write two documents for the app's 文档 tab and register them: a Markdown
 //                     report with three versions and an HTML report with one. A document that is already there is
 //                     left alone, so a stack that is started again keeps what it has.
+//   --seed-ideas      before Alfred starts, write three open ideas (one once, two recurring) and one rejected idea into
+//                     ideas.json, for the app's ideas. An ideas file that already exists is left alone.
 // ALFRED_STATE_DIR and ALFRED_WORKSPACE must name scratch directories, and ALFRED_ANTHROPIC_API_KEY
 // must be set. The pairing carries placeholder Access values: this workbench runs without the Access check.
 
@@ -29,6 +31,9 @@ import { startDocuments } from "../src/documents/startup.ts";
 import { DocumentStore, documentKind, documentTitle } from "../src/documents/store.ts";
 import { VERSIONS_GIT_DIR, Versions } from "../src/documents/versions.ts";
 import { isLiveEvent, sharedEventLog } from "../src/events.ts";
+import { startArchiving } from "../src/ideas/archive.ts";
+import { ideaCommands } from "../src/ideas/commands.ts";
+import { IDEAS_FILE, IdeaStore, type IdeaDraft } from "../src/ideas/store.ts";
 import { describeError, log } from "../src/log.ts";
 import { newRunId } from "../src/runs.ts";
 import { STATE_DIR, WORKSPACE_DIR } from "../src/store.ts";
@@ -40,7 +45,7 @@ import { startWorkbench } from "../src/workbench/server.ts";
 import { createLocalHandler } from "./local-stack.ts";
 
 const REQUIRED = ["ALFRED_STATE_DIR", "ALFRED_WORKSPACE", "ALFRED_ANTHROPIC_API_KEY"];
-const USAGE = "usage: node scripts/app-dev.ts [--port <port>] [--model <sonnet|opus|haiku>] [--repair] [--seed-documents]";
+const USAGE = "usage: node scripts/app-dev.ts [--port <port>] [--model <sonnet|opus|haiku>] [--repair] [--seed-documents] [--seed-ideas]";
 const DEVICE_NAME = "simulator";
 /** Placeholder Access values for the pairing. Nothing checks them: the workbench runs here without the Access check. */
 const ACCESS_CLIENT_ID = "app-dev.access";
@@ -50,10 +55,11 @@ interface Options {
   model: string;
   repair: boolean;
   seedDocuments: boolean;
+  seedIdeas: boolean;
 }
 
 function parseArgs(args: string[]): Options {
-  const options: Options = { port: 8787, model: "haiku", repair: false, seedDocuments: false };
+  const options: Options = { port: 8787, model: "haiku", repair: false, seedDocuments: false, seedIdeas: false };
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     const value = args[i + 1];
@@ -61,6 +67,8 @@ function parseArgs(args: string[]): Options {
       options.repair = true;
     } else if (arg === "--seed-documents") {
       options.seedDocuments = true;
+    } else if (arg === "--seed-ideas") {
+      options.seedIdeas = true;
     } else if (arg === "--port" && value !== undefined && /^\d+$/.test(value)) {
       options.port = Number(value);
       i++;
@@ -237,6 +245,61 @@ async function seedDocuments(): Promise<void> {
   }
 }
 
+/** The seed ideas: three open ones (a once idea and two recurring ones), then one that is rejected, which is the last. */
+const SEED_IDEAS: IdeaDraft[] = [
+  {
+    title: "对比三家 VPS 的带宽配额",
+    why: "上一份价格报告没有写带宽，你在对话里问过这件事。",
+    brief: "查 Hetzner、Vultr 和 DigitalOcean 官网的带宽与流量政策，整理成一张表，附上来源链接。",
+    kind: "once",
+    model: "sonnet",
+    estimateUsd: 0.35,
+  },
+  {
+    title: "每周追踪 VPS 价格变化",
+    why: "这周你两次问到价格，每周看一次能及时发现调价。",
+    brief: "每周一看一次三家供应商的定价页，只报告和上周相比的变化。",
+    kind: "recurring",
+    schedule: { kind: "weekly", days: [1], time: "09:00" },
+    model: "sonnet",
+    estimateUsd: 0.2,
+  },
+  {
+    title: "每天检查供应商状态页",
+    why: "供应商的维护公告常在报告之后才出现，你之前因此漏掉过一次变化。",
+    brief: "每天早上打开三家供应商的状态页，只报告新出现的故障或维护公告。",
+    kind: "recurring",
+    schedule: { kind: "daily", time: "08:00" },
+    model: "haiku",
+    estimateUsd: 0.1,
+  },
+  {
+    title: "把报告译成英文",
+    why: "你的报告大多是中文，英文版可能对合作方有用。",
+    brief: "把 VPS 价格报告译成英文，保留表格和来源链接。",
+    kind: "once",
+    model: "haiku",
+    estimateUsd: 0.12,
+  },
+];
+
+/**
+ * Writes the seed ideas through the idea store, all of one made-up generation run: the last one is rejected as "not
+ * now", with a note. Only when there is no ideas file yet, as seedDocuments leaves the documents that exist.
+ */
+function seedIdeas(): void {
+  if (fs.existsSync(IDEAS_FILE)) {
+    log.info(`app-dev: ${IDEAS_FILE} exists, so the ideas are not seeded again`);
+    return;
+  }
+  const store = new IdeaStore();
+  const added = store.add(SEED_IDEAS, newRunId());
+  const declined = added.at(-1);
+  if (!declined) throw new Error("the seed ideas were not added");
+  store.reject(declined.id, { reason: "not-now", note: "等这周的报告定稿再说。" });
+  log.info(`app-dev: seeded ${added.length} ideas into ${IDEAS_FILE}`);
+}
+
 async function main(options: Options): Promise<void> {
   const server = `http://127.0.0.1:${options.port}`;
   // Set here whatever the shell says, so the workbench forwards to this stack's command API and to no other.
@@ -258,12 +321,17 @@ async function main(options: Options): Promise<void> {
   const cleanups: (() => Promise<void> | void)[] = [];
   try {
     if (options.seedDocuments) await seedDocuments();
+    if (options.seedIdeas) seedIdeas();
     // Wired as `run` wires them: the one history and document store (opened after the seed, so it finds the seeded
-    // documents and imports nothing), the one task store behind the handler, which runs the tasks, and the task commands.
+    // documents and imports nothing), the one task store behind the handler, which runs the tasks, the one idea store,
+    // and the commands of both stores.
     const documents = await startDocuments();
     const tasks = new TaskStore();
+    const ideas = new IdeaStore();
     const handler = createLocalHandler({ tasks, documents });
     cleanups.push(() => handler.shutdown());
+    // Pushed before the API's cleanup, so it runs after the API closes, as archiving stops after the API in `run`.
+    cleanups.push(startArchiving(ideas));
     // Without documents the API answers every document command 503, as in `run`.
     cleanups.push(
       await startApi({
@@ -271,6 +339,7 @@ async function main(options: Options): Promise<void> {
         handler,
         events: sharedEventLog(),
         tasks: taskCommands(tasks, handler),
+        ideas: ideaCommands(ideas, tasks),
         ...(documents ? { documents: documentCommands(handler, documents) } : {}),
       }),
     );
