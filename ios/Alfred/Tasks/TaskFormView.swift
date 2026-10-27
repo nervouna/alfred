@@ -1,9 +1,9 @@
 import AlfredKit
 import SwiftUI
 
-/// The form that creates a task, or changes one. It checks what the contract checks before it sends; a refusal from the
-/// server shows as its message, and the form keeps what the owner typed. Changing a task sends only the fields that
-/// changed.
+/// The form that creates a task, changes one, or accepts an idea as one. It checks what the contract checks before it
+/// sends; a refusal from the server shows as its message, and the form keeps what the owner typed. Changing a task sends
+/// only the fields that changed. Accepting an idea fills the form in from the idea and sends `idea.accept`.
 struct TaskFormView: View {
     private static let weekdayNames = ["一", "二", "三", "四", "五", "六", "日"]
 
@@ -16,11 +16,24 @@ struct TaskFormView: View {
     @FocusState private var budgetFocused: Bool
 
     private let editing: AlfredTask?
+    private let accepting: AlfredIdea?
+    /// Told of the task an accepted idea made, just before the form closes.
+    private let onAccepted: (AlfredTask) -> Void
 
     /// A form for a new task, or for changing `task`.
     init(editing task: AlfredTask?) {
         editing = task
+        accepting = nil
+        onAccepted = { _ in }
         _form = State(initialValue: task.map(TaskForm.init(editing:)) ?? TaskForm())
+    }
+
+    /// A form that accepts `idea`.
+    init(accepting idea: AlfredIdea, onAccepted: @escaping (AlfredTask) -> Void) {
+        editing = nil
+        accepting = idea
+        self.onAccepted = onAccepted
+        _form = State(initialValue: TaskForm(accepting: idea))
     }
 
     var body: some View {
@@ -50,7 +63,7 @@ struct TaskFormView: View {
                 }
                 Section {
                     Picker("重复", selection: $form.kind) {
-                        ForEach(TaskForm.Kind.allCases, id: \.self) { kind in
+                        ForEach(form.kinds, id: \.self) { kind in
                             Text(kind.title).tag(kind)
                         }
                     }
@@ -77,7 +90,7 @@ struct TaskFormView: View {
                 }
             }
             .scrollDismissesKeyboard(.interactively)
-            .navigationTitle(editing == nil ? "新建任务" : "编辑任务")
+            .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -85,7 +98,7 @@ struct TaskFormView: View {
                         .accessibilityIdentifier("task.form.cancel")
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("保存") { Task { await save() } }
+                    Button(accepting == nil ? "保存" : "采纳") { Task { await save() } }
                         .disabled(isSaving)
                         .accessibilityIdentifier("task.form.save")
                 }
@@ -100,11 +113,18 @@ struct TaskFormView: View {
         }
     }
 
+    private var title: String {
+        if accepting != nil { return "采纳想法" }
+        return editing == nil ? "新建任务" : "编辑任务"
+    }
+
     // MARK: The schedule's controls
 
     @ViewBuilder
     private var schedule: some View {
         switch form.kind {
+        case .now:
+            EmptyView()
         case .daily:
             timeOfDay
         case .weekly:
@@ -166,7 +186,10 @@ struct TaskFormView: View {
         isSaving = true
         defer { isSaving = false }
         do {
-            if let editing {
+            if let accepting {
+                let task = try await model.acceptIdea(accepting, as: form.acceptance())
+                onAccepted(task)
+            } else if let editing {
                 // A form that changed nothing has nothing to send, and the server refuses an empty change.
                 if let changes = form.changes() {
                     try await model.updateTask(id: editing.id, changes: changes)

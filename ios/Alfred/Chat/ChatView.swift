@@ -359,15 +359,15 @@ private struct TaskRunBanners: View {
 }
 
 private struct Composer: View {
-    let model: AppModel
-    @State private var text = ""
+    /// The text being typed is the model's (`composerText`), so 讨论 can add an idea to it from another tab.
+    @Bindable var model: AppModel
     @State private var showsPhotoPicker = false
     @State private var showsFileImporter = false
     @State private var pickedPhotos: [PhotosPickerItem] = []
     @State private var loadingPhotos = 0
 
     private var isBlank: Bool {
-        text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        model.composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private var room: Int {
@@ -397,7 +397,7 @@ private struct Composer: View {
                 }
                 .disabled(room <= 0)
                 .accessibilityLabel("添加附件")
-                TextField("消息", text: $text, axis: .vertical)
+                TextField("消息", text: $model.composerText, axis: .vertical)
                     .lineLimit(1...6)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
@@ -414,8 +414,8 @@ private struct Composer: View {
                     .accessibilityLabel("停止")
                 }
                 Button {
-                    let sent = text
-                    text = ""
+                    let sent = model.composerText
+                    model.composerText = ""
                     Task { await model.sendDraft(sent) }
                 } label: {
                     Image(systemName: "arrow.up.circle.fill")

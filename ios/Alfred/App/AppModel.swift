@@ -7,6 +7,7 @@ enum AppTab: Hashable {
     case chat
     case tasks
     case documents
+    case ideas
 }
 
 /// What the app knows and does: whether it is paired, the stream of events from Alfred and the timeline they
@@ -66,6 +67,12 @@ final class AppModel {
         let number: Int
     }
 
+    /// A task the 任务 tab should show. `number` is new for each request, so asking for the same task twice opens it twice.
+    struct TaskOpenRequest: Hashable {
+        let taskId: String
+        let number: Int
+    }
+
     /// Opens the event stream of a client from an event id. The app opens an `EventStream`; tests open streams they script.
     typealias StreamOpener = @Sendable (AlfredClient, Int64) async -> AsyncStream<EventStreamUpdate>
 
@@ -80,6 +87,12 @@ final class AppModel {
     private(set) var documentCatalog = DocumentCatalog()
     /// Why the last read of the document list failed, until a read works.
     private(set) var documentFailure: String?
+    /// Alfred's ideas: the list read from the server, kept current by `idea.updated` events.
+    private(set) var ideaCatalog = IdeaCatalog()
+    /// Why the last read of the idea list failed, until a read works.
+    private(set) var ideaFailure: String?
+    /// The ideas the owner has seen, kept on the phone.
+    let seenIdeas: SeenIdeas
     /// The comments on documents that the owner wrote and has not submitted. They are kept on the phone.
     let annotationDrafts: DraftStore
     /// Whether the event stream is connected right now.
@@ -104,7 +117,13 @@ final class AppModel {
     /// How many calls to `attach` are bringing files in.
     private var stagingCount = 0
     /// The tab on screen.
-    var selectedTab = AppTab.chat
+    var selectedTab = AppTab.chat {
+        didSet { noteIdeasSeen() }
+    }
+    /// What the owner has typed in the chat's composer and not sent. 讨论 adds an idea to it.
+    var composerText = ""
+    /// The task whose detail the 任务 tab should open. It stays until the tab has opened it (`taskOpenHandled`).
+    private(set) var taskOpenRequest: TaskOpenRequest?
     /// Where the chat should scroll to. It stays until the chat has seen the row on screen (`revealHandled`).
     private(set) var revealRequest: RevealRequest?
 
@@ -123,6 +142,7 @@ final class AppModel {
     /// names an event.
     @ObservationIgnored private var itemIdsByEvent: [Int64: String] = [:]
     @ObservationIgnored private var revealCount = 0
+    @ObservationIgnored private var taskOpenCount = 0
     /// Whether the scene is in the foreground. The stream runs only then.
     @ObservationIgnored private var isForeground = false
     @ObservationIgnored private var streamTask: Task<Void, Never>?
@@ -135,11 +155,13 @@ final class AppModel {
         push: any PushSystem = NoPushSystem(),
         pushEnvironment: PushEnvironment? = nil,
         draftFile: DraftFile? = nil,
+        seenIdeas: SeenIdeas = SeenIdeas(),
         makeClientId: @escaping () -> String = { "c-" + UUID().uuidString.lowercased() },
         openStream: @escaping StreamOpener = AppModel.openEventStream
     ) {
         self.store = store
         annotationDrafts = DraftStore(file: draftFile)
+        self.seenIdeas = seenIdeas
         self.session = session
         self.push = push
         self.pushEnvironment = pushEnvironment
@@ -151,7 +173,13 @@ final class AppModel {
     /// The model the app runs on: credentials from the keychain, requests on the shared session, notifications from
     /// the system, registered for the APNs environment the build was signed for.
     static func live() -> AppModel {
-        AppModel(store: AppKeychain.store(), push: LivePushSystem(), pushEnvironment: PushToken.environment(), draftFile: .standard)
+        AppModel(
+            store: AppKeychain.store(),
+            push: LivePushSystem(),
+            pushEnvironment: PushToken.environment(),
+            draftFile: .standard,
+            seenIdeas: SeenIdeas(defaults: .standard)
+        )
     }
 
     nonisolated static func openEventStream(_ client: AlfredClient, after lastEventId: Int64) async -> AsyncStream<EventStreamUpdate> {
@@ -223,6 +251,11 @@ final class AppModel {
         taskFailure = nil
         documentCatalog = DocumentCatalog()
         documentFailure = nil
+        ideaCatalog = IdeaCatalog()
+        ideaFailure = nil
+        seenIdeas.clear()
+        composerText = ""
+        taskOpenRequest = nil
         annotationDrafts.clear()
         failedClientIds = []
         AttachmentStaging.discard(draftAttachments + outgoingAttachments.values.flatMap { $0 })
@@ -257,6 +290,7 @@ final class AppModel {
     func foreground() {
         isForeground = true
         startStreamIfNeeded()
+        noteIdeasSeen()
     }
 
     /// The scene went to the background: drop the stream. The timeline keeps its place for the next `foreground`.
@@ -306,10 +340,13 @@ final class AppModel {
             isConnected = true
             // The stream is up, or up again: whatever changed while it was down is in the list.
             Task { await refreshTasks() }
+            Task { await refreshIdeas() }
         case let .received(event):
             timeline.apply(event)
             taskCatalog.apply(event)
             documentCatalog.apply(event)
+            ideaCatalog.apply(event)
+            noteIdeasSeen()
             trackItem(of: event)
             if case let .event(stored) = event, case let .messageCreated(message) = stored.payload, let clientId = message.clientId {
                 failedClientIds.remove(clientId)
@@ -462,6 +499,99 @@ final class AppModel {
             }
             throw error
         }
+    }
+
+    /// Makes the 任务 tab open a task's detail: the tab is shown, and opens it once it has appeared.
+    func openTask(id: String) {
+        taskOpenCount += 1
+        taskOpenRequest = TaskOpenRequest(taskId: id, number: taskOpenCount)
+        selectedTab = .tasks
+    }
+
+    /// The tab has opened a request's task (or given up on it): the request is done. A newer request stays.
+    func taskOpenHandled(_ request: TaskOpenRequest) {
+        if taskOpenRequest == request {
+            taskOpenRequest = nil
+        }
+    }
+
+    // MARK: Ideas
+
+    /// Reads the idea list (`GET /api/ideas`) and merges it with what events have told. The stream asks for it each time
+    /// it connects, and the tab asks on pull to refresh. A failure is kept in `ideaFailure`. Once a list is read, the
+    /// seen ideas are pruned to the ones the catalog holds.
+    func refreshIdeas() async {
+        guard let client, let credentials else { return }
+        do {
+            let list = try await client.ideas()
+            // The pairing may have changed while the request was out.
+            guard self.credentials == credentials else { return }
+            ideaCatalog.load(list)
+            ideaFailure = nil
+            seenIdeas.prune(keeping: ideaCatalog.ids)
+            noteIdeasSeen()
+        } catch where LoadFailure.isCancellation(error) {
+            return
+        } catch {
+            guard self.credentials == credentials else { return }
+            ideaFailure = LoadFailure.message(for: error)
+        }
+    }
+
+    /// The open ideas the owner has not seen: the 想法 tab's badge.
+    var unseenIdeaCount: Int {
+        ideaCatalog.open.filter { !seenIdeas.contains($0.id) }.count
+    }
+
+    /// Whether the 想法 tab is what the owner is looking at: the app is active and paired, and the tab is selected.
+    private var isIdeasVisible: Bool {
+        isForeground && isPaired && streamFailure == nil && selectedTab == .ideas
+    }
+
+    /// Every open idea is seen while the tab is on screen, the ones that arrive meanwhile included.
+    private func noteIdeasSeen() {
+        guard isIdeasVisible else { return }
+        seenIdeas.markSeen(ideaCatalog.open.map(\.id))
+    }
+
+    /// Accepts an idea as the task the owner confirmed in the form. The idea and its task are listed at once. A refusal is
+    /// thrown, for the form to show.
+    @discardableResult
+    func acceptIdea(_ idea: AlfredIdea, as acceptance: IdeaAcceptance) async throws -> AlfredTask {
+        let accepted = try await perform({
+            try await $0.acceptIdea(
+                ideaId: idea.id,
+                title: acceptance.title,
+                brief: acceptance.brief,
+                schedule: acceptance.schedule,
+                model: acceptance.model,
+                budgetUsd: acceptance.budgetUsd
+            )
+        }, then: { accepted in
+            ideaCatalog.apply(accepted.idea)
+            taskCatalog.apply(accepted.task)
+        })
+        return accepted.task
+    }
+
+    /// Turns an idea down with a reason and a note, if the owner wrote one. The idea moves to history at once. A refusal
+    /// is thrown.
+    func rejectIdea(id: String, reason: RejectionReason, note: String?) async throws {
+        let note = note.flatMap(IdeaPresentation.note(from:))
+        try await perform({ try await $0.rejectIdea(ideaId: id, reason: reason, note: note) }, then: { ideaCatalog.apply($0) })
+    }
+
+    /// Asks Alfred to think of ideas now. The generation shows as under way at once; its run follows in the events. A
+    /// refusal is thrown.
+    func generateIdeas() async throws {
+        try await perform({ try await $0.generateIdeas() }, then: { ideaCatalog.noteGeneration(runId: $0) })
+    }
+
+    /// 讨论: shows the chat with the idea's title and brief in the composer, after whatever the owner had typed there.
+    /// Nothing is sent.
+    func discuss(_ idea: AlfredIdea) {
+        composerText = IdeaPresentation.discussion(of: idea, after: composerText)
+        selectedTab = .chat
     }
 
     // MARK: Documents
