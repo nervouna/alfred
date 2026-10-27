@@ -3,7 +3,7 @@
 // device. It opens the workspace's history and the document store as `run` does, so deliveries become documents and the
 // app's revisions and undos run. It prints the pairing to paste into the app, then every event as it happens: [event] for
 // stored ones, [live] for message deltas and steps. Ctrl-C or SIGTERM stops everything; it exits 0.
-// usage: node scripts/app-dev.ts [--port <port>] [--model <sonnet|opus|haiku>] [--repair] [--seed-documents] [--seed-ideas]
+// usage: node scripts/app-dev.ts [--port <port>] [--model <sonnet|opus|haiku>] [--repair] [--seed-documents] [--seed-ideas] [--ideas-at <HH:MM>]
 //   --port            the workbench's loopback port (default 8787)
 //   --model           the model the owner's messages run on (default haiku)
 //   --repair          revoke the simulator's device and pair a new one. A device's token is shown once and
@@ -13,6 +13,9 @@
 //                     left alone, so a stack that is started again keeps what it has.
 //   --seed-ideas      before Alfred starts, write three open ideas (one once, two recurring) and one rejected idea into
 //                     ideas.json, for the app's ideas. An ideas file that already exists is left alone.
+//   --ideas-at        start the daily generation of ideas at this local time (HH:MM). Without it the stack never generates
+//                     ideas on its own, so it spends nothing on them; the app's button (idea.generate) works either way and
+//                     calls the model (Sonnet, at most $0.20 a generation).
 // ALFRED_STATE_DIR and ALFRED_WORKSPACE must name scratch directories, and ALFRED_ANTHROPIC_API_KEY
 // must be set. The pairing carries placeholder Access values: this workbench runs without the Access check.
 
@@ -22,7 +25,7 @@ import path from "node:path";
 
 import qrcode from "qrcode-terminal";
 
-import { isModelKey } from "../src/agent/config.ts";
+import { isModelKey, parseIdeasAt } from "../src/agent/config.ts";
 import { describeEvent } from "../src/api/client.ts";
 import type { LiveEvent } from "../src/api/schema.ts";
 import { startApi } from "../src/api/server.ts";
@@ -33,6 +36,7 @@ import { VERSIONS_GIT_DIR, Versions } from "../src/documents/versions.ts";
 import { isLiveEvent, sharedEventLog } from "../src/events.ts";
 import { startArchiving } from "../src/ideas/archive.ts";
 import { ideaCommands } from "../src/ideas/commands.ts";
+import { startDailyIdeas } from "../src/ideas/schedule.ts";
 import { IDEAS_FILE, IdeaStore, type IdeaDraft } from "../src/ideas/store.ts";
 import { describeError, log } from "../src/log.ts";
 import { newRunId } from "../src/runs.ts";
@@ -45,7 +49,7 @@ import { startWorkbench } from "../src/workbench/server.ts";
 import { createLocalHandler } from "./local-stack.ts";
 
 const REQUIRED = ["ALFRED_STATE_DIR", "ALFRED_WORKSPACE", "ALFRED_ANTHROPIC_API_KEY"];
-const USAGE = "usage: node scripts/app-dev.ts [--port <port>] [--model <sonnet|opus|haiku>] [--repair] [--seed-documents] [--seed-ideas]";
+const USAGE = "usage: node scripts/app-dev.ts [--port <port>] [--model <sonnet|opus|haiku>] [--repair] [--seed-documents] [--seed-ideas] [--ideas-at <HH:MM>]";
 const DEVICE_NAME = "simulator";
 /** Placeholder Access values for the pairing. Nothing checks them: the workbench runs here without the Access check. */
 const ACCESS_CLIENT_ID = "app-dev.access";
@@ -56,6 +60,8 @@ interface Options {
   repair: boolean;
   seedDocuments: boolean;
   seedIdeas: boolean;
+  /** The local time (HH:MM) of the daily generation of ideas; none means the stack never generates them on its own. */
+  ideasAt?: string;
 }
 
 function parseArgs(args: string[]): Options {
@@ -69,6 +75,16 @@ function parseArgs(args: string[]): Options {
       options.seedDocuments = true;
     } else if (arg === "--seed-ideas") {
       options.seedIdeas = true;
+    } else if (arg === "--ideas-at" && value !== undefined) {
+      let time: string | undefined;
+      try {
+        time = parseIdeasAt(value);
+      } catch {
+        // Reported below, in this flag's own words.
+      }
+      if (time === undefined) throw new Error(`--ideas-at must be a 24-hour time as HH:MM, got "${value}"`);
+      options.ideasAt = time;
+      i++;
     } else if (arg === "--port" && value !== undefined && /^\d+$/.test(value)) {
       options.port = Number(value);
       i++;
@@ -328,10 +344,12 @@ async function main(options: Options): Promise<void> {
     const documents = await startDocuments();
     const tasks = new TaskStore();
     const ideas = new IdeaStore();
-    const handler = createLocalHandler({ tasks, documents });
+    const handler = createLocalHandler({ tasks, documents, ideas });
     cleanups.push(() => handler.shutdown());
     // Pushed before the API's cleanup, so it runs after the API closes, as archiving stops after the API in `run`.
     cleanups.push(startArchiving(ideas));
+    // Only with --ideas-at: the stack does not spend on ideas on its own. The app's button works without it.
+    cleanups.push(startDailyIdeas({ at: options.ideasAt, ideas, generate: () => handler.generateIdeas() }));
     // Without documents the API answers every document command 503, as in `run`.
     cleanups.push(
       await startApi({
@@ -339,7 +357,7 @@ async function main(options: Options): Promise<void> {
         handler,
         events: sharedEventLog(),
         tasks: taskCommands(tasks, handler),
-        ideas: ideaCommands(ideas, tasks),
+        ideas: ideaCommands(ideas, tasks, { generate: () => handler.generateIdeas() }),
         ...(documents ? { documents: documentCommands(handler, documents) } : {}),
       }),
     );

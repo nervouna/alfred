@@ -42,6 +42,12 @@
 // annotations it answered are resolved, the others go back to the owner (DocumentStore.finishRevision), and one message
 // with the run's id says what happened. Stopping it, queued or running, ends it stopped.
 //
+// Generating ideas (generateIdeas, see ideas/generate.ts) is a run of its own kind: one model call with no tools, no
+// session and no workspace access, so it needs neither the side runs' lane nor the memory lock and runs beside the
+// chat and beside a task or revision run. It is started by the owner's request or the daily schedule (ideas/schedule.ts),
+// charges its cost to the owner's day as a task run does, says nothing to the owner and ends in the idea store: the app
+// learns of it from idea.updated and run.updated. A shutdown aborts it, and it ends lost.
+//
 // While a run works it also publishes live events (see events.ts): the main
 // agent's reply text as it is written, and every step the run records.
 
@@ -52,14 +58,16 @@ import path from "node:path";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { HookCallbackMatcher, Options, Query, SDKPartialAssistantMessage, SDKResultMessage } from "@anthropic-ai/claude-agent-sdk";
 
-import type { DocumentReply } from "../api/server.ts";
-import type { Annotation, DocumentRevise, Question, RevisionAccepted, Task } from "../api/schema.ts";
+import type { DocumentReply, IdeaReply } from "../api/server.ts";
+import type { Annotation, DocumentRevise, IdeaGenerationAccepted, Question, RevisionAccepted, Task } from "../api/schema.ts";
 import { InvalidAnswer, SerialQueue, outboundKind, recordInbound, recorded, workspaceRelative } from "../channels.ts";
 import type { Inbound, Intake, Outbound } from "../channels.ts";
 import type { Documents } from "../documents/register.ts";
 import { DocumentRefused } from "../documents/store.ts";
 import { type EventLog, sharedEventLog } from "../events.ts";
 import { firstLine, humanAge, localDate, localStamp } from "../files.ts";
+import { IdeaGenerationFailed, collectInputs, generateIdeas as askForIdeas, inputsLine } from "../ideas/generate.ts";
+import type { IdeaStore } from "../ideas/store.ts";
 import { describeError, log } from "../log.ts";
 import { RunRecorder, findRun, markLostRuns, newRunId, pruneRunFiles, runIdCandidates, stepDetail } from "../runs.ts";
 import type { RunRecord, RunStatus } from "../runs.ts";
@@ -119,6 +127,8 @@ const SHUTDOWN_STOP_MS = 10_000;
 /** After a stop interrupts a turn, how long the turn gets to end before the whole run is aborted. */
 const INTERRUPT_GRACE_MS = 10_000;
 const RUN_TITLE_CHARS = 60;
+/** The title of the run record of a generation of ideas. */
+const IDEAS_RUN_TITLE = "想法";
 /** Built-in tools whose file_path a run creates or changes. */
 const FILE_WRITE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
 const WORKSPACE_SUBDIRS = ["inbox", "reports", "notes", "images", "memory", SKILLS_DIR, ".trash"];
@@ -287,6 +297,8 @@ export interface AgentHandlerOptions {
    * ends. Without them Alfred delivers files as before and commits nothing.
    */
   documents?: Documents;
+  /** The owner's ideas: with them the handler generates ideas (generateIdeas). Without them it refuses to. */
+  ideas?: IdeaStore;
 }
 
 /** What the handler offers: the intake queue and the stop for the channel, a run of a task, and a shutdown for the process. */
@@ -299,6 +311,12 @@ export interface AgentHandler extends Intake {
    * 400). A refused batch leaves nothing behind.
    */
   reviseDocument(command: DocumentRevise): DocumentReply<RevisionAccepted>;
+  /**
+   * Records a run of kind ideas, marks it in the idea store and generates ideas beside everything else, without
+   * waiting for it. Refused with 503 without an idea store, 409 while Alfred is shutting down, when the day's spend cap
+   * is reached, and while a generation is running. A refusal leaves nothing behind.
+   */
+  generateIdeas(): IdeaReply<IdeaGenerationAccepted>;
   /** Stop the work the handler started, before the process exits. */
   shutdown(): Promise<void>;
 }
@@ -680,7 +698,8 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
     }
   }
   if (lost.length) {
-    const named = lost.filter((r) => r.kind !== "scan").map((r) => ({ id: r.id, title: r.title }));
+    // A scan or a generation of ideas the owner never saw is not named.
+    const named = lost.filter((r) => r.kind !== "scan" && r.kind !== "ideas").map((r) => ({ id: r.id, title: r.title }));
     if (named.length) store.update(owner, { lostRuns: [...(store.get(owner).lostRuns ?? []), ...named] });
   }
   const prune = () => {
@@ -697,11 +716,14 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
   const intakeQueue = new SerialQueue();
   const tasks = opts.tasks;
   const documents = opts.documents;
+  const ideas = opts.ideas;
   /** Runs beside the chat (a task's, a revision's) waiting for their turn, in the order they came. */
   const sideQueue: QueuedSideRun[] = [];
   /** The run beside the chat in progress. One runs at a time, whatever the chat is doing. */
   let sideRun: Run | undefined;
   let pumping = false;
+  /** The generation of ideas in progress; it has no lane, so it is not one of the side runs. */
+  let ideasRun: { recorder: RunRecorder; abort: AbortController; shutdown: boolean } | undefined;
   /** Set once a shutdown has begun: nothing new starts. */
   let closing = false;
   let pollTimer: NodeJS.Timeout | undefined;
@@ -1561,6 +1583,93 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
     return { ok: true, body: { runId, annotations } };
   }
 
+  /** Adds a cost to the owner's day and total, as the results of a task run's turns are: it counts toward the daily cap. */
+  function chargeOwner(costUsd: number): void {
+    if (costUsd <= 0) return;
+    const user = store.get(owner);
+    store.update(owner, { totalCostUsd: user.totalCostUsd + costUsd, spendDay: localDate(), spendDayUsd: spentToday(user) + costUsd });
+  }
+
+  function generateIdeas(): IdeaReply<IdeaGenerationAccepted> {
+    if (!ideas) return { ok: false, status: 503, error: "idea generation is not available" };
+    if (closing) return { ok: false, status: 409, error: "Alfred is shutting down" };
+    if (overBudget(owner)) return { ok: false, status: 409, error: "today's spend cap is reached" };
+    if (ideas.generatingRunId() !== undefined) return { ok: false, status: 409, error: "ideas are being generated" };
+    const recorder = new RunRecorder({ kind: "ideas", title: IDEAS_RUN_TITLE, model: MODELS.sonnet, events });
+    try {
+      ideas.startGeneration(recorder.id);
+    } catch (err) {
+      recorder.finish("failed", describeError(err));
+      throw err;
+    }
+    const run = { recorder, abort: new AbortController(), shutdown: false };
+    ideasRun = run;
+    const generation = runIdeas(run, ideas);
+    inFlight.add(generation);
+    void generation.finally(() => inFlight.delete(generation));
+    return { ok: true, body: { runId: recorder.id } };
+  }
+
+  /**
+   * Generates the ideas of one run: reads the inputs, asks the model, adds the ideas to the store, charges the cost
+   * and ends the run, done or failed, or lost when a shutdown aborted it. The store's generation is cleared before the
+   * run is recorded as ended, so a client told it ended finds no generation. It says nothing to the owner and never throws.
+   */
+  async function runIdeas(run: NonNullable<typeof ideasRun>, ideaStore: IdeaStore): Promise<void> {
+    const { recorder } = run;
+    let status: SideEnd["status"] = "done";
+    let failure: string | undefined;
+    let cost = 0;
+    let added = 0;
+    try {
+      const inputs = collectInputs({ workspace: WORKSPACE_DIR, ideas: ideaStore, tasks, documents: documents?.store, events });
+      log.info(inputsLine(recorder.id, inputs));
+      const generation = await askForIdeas(inputs, { runId: recorder.id, abortController: run.abort, runQuery });
+      cost = generation.costUsd;
+      // A call that answers after the shutdown began adds nothing: the run is lost.
+      if (!run.shutdown) {
+        const proposed = generation.ideas;
+        const stored = ideaStore.add(
+          proposed.map((idea) => idea.draft),
+          recorder.id,
+        );
+        added = stored.length;
+        // The store keeps the order and may drop a draft, so each idea it kept is matched to the next draft that is its own.
+        let next = 0;
+        for (const idea of stored) {
+          const at = proposed.findIndex((candidate, i) => i >= next && candidate.draft.title === idea.title && candidate.draft.brief === idea.brief);
+          if (at >= 0) next = at + 1;
+          log.info(`ideas added run=${recorder.id} idea=${idea.id} title=${JSON.stringify(idea.title)} provenance=${JSON.stringify(proposed[at]?.provenance ?? "")}`);
+        }
+      }
+    } catch (err) {
+      if (err instanceof IdeaGenerationFailed) cost = err.costUsd;
+      status = "failed";
+      failure = describeError(err);
+    } finally {
+      if (run.shutdown) {
+        status = "lost";
+        failure = "Alfred 重启，想法生成中断";
+      }
+      try {
+        chargeOwner(cost);
+      } catch (err) {
+        log.error(`saving the cost of run ${recorder.id} failed: ${describeError(err)}`);
+      }
+      recorder.update({ costUsd: cost });
+      try {
+        ideaStore.finishGeneration(recorder.id);
+      } catch (err) {
+        log.error(`clearing the generation of run ${recorder.id} failed: ${describeError(err)}`);
+      }
+      recorder.finish(status, failure);
+      ideasRun = undefined;
+      if (status === "done") log.info(`ideas done run=${recorder.id} cost=${usd(cost)} added=${added}`);
+      else if (status === "lost") log.warn(`ideas lost run=${recorder.id} cost=${usd(cost)}: ${failure}`);
+      else log.error(`ideas failed run=${recorder.id} cost=${usd(cost)}: ${failure}`);
+    }
+  }
+
   async function drain(userId: string, first: Start): Promise<void> {
     const rt = runtime(userId);
     rt.busy = true;
@@ -1885,6 +1994,11 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
       sideRun.input.close();
       sideRun.abort.abort();
     }
+    if (ideasRun) {
+      log.info(`stopping run ${ideasRun.recorder.id} (ideas) for shutdown`);
+      ideasRun.shutdown = true;
+      ideasRun.abort.abort();
+    }
     scheduler.stop();
     const timeout = new Promise<void>((resolve) => setTimeout(resolve, SHUTDOWN_STOP_MS).unref());
     await Promise.race([Promise.allSettled([...inFlight]), timeout]);
@@ -1907,6 +2021,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
     answerQuestion,
     runTask,
     reviseDocument,
+    generateIdeas,
     shutdown,
   };
 }

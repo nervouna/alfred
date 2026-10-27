@@ -66,7 +66,7 @@ function fileLink(rel: string): Html {
 export function runCard(r: RunRecord, opts: { live: boolean; now: number; latest?: string; link?: boolean }): Html {
   const end = r.endedAt ? Date.parse(r.endedAt) : opts.now;
   const meta = [
-    r.kind === "scan" ? "记忆扫描" : r.kind === "subagent" ? `${r.role ?? "子任务"} · ${shortModel(r.model)}` : shortModel(r.model),
+    r.kind === "scan" ? "记忆扫描" : r.kind === "ideas" ? "想法" : r.kind === "subagent" ? `${r.role ?? "子任务"} · ${shortModel(r.model)}` : shortModel(r.model),
     fmtTime(r.startedAt),
     r.status === "queued" ? "" : fmtAge(end - Date.parse(r.startedAt)),
     `${r.costEstimated ? "≈" : ""}${fmtUsd(r.costUsd)}`,
