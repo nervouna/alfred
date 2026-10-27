@@ -10,7 +10,8 @@ struct ChatView: View {
         NavigationStack {
             // The avatar hangs below the bar: the list starts under it.
             MessageList(model: model, topMargin: AvatarMetrics.hang)
-                // The bar holds only the two buttons and is as tall as the system's own: its scrim ends at its bottom edge.
+                // The bar holds only the two buttons and is as tall as the system's own: the list's soft edge
+                // effect ends at its bottom edge.
                 .safeAreaBar(edge: .top, spacing: 0) {
                     ChatHeader {
                         confirmsUnpairing = true
@@ -73,8 +74,9 @@ private struct MessageList: View {
             }
             .contentMargins(.top, topMargin, for: .scrollContent)
             .defaultScrollAnchor(.bottom)
-            // No edge effect at the top: the scrim behind the bar (ChatHeader) is what the messages show through.
-            .scrollEdgeEffectHidden(true, for: .top)
+            // The system's soft edge effect at the top: messages blur and fade out under the bar's bottom edge, as in
+            // Photos.
+            .scrollEdgeEffectStyle(.soft, for: .top)
             .scrollDismissesKeyboard(.interactively)
             .onScrollTargetVisibilityChange(idType: String.self, threshold: 0.5) { visibleIds = Set($0) }
             .onChange(of: contentSignature) {
