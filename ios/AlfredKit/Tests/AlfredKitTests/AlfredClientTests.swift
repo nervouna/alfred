@@ -316,4 +316,68 @@ final class AlfredClientTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: liveCopy.deletingLastPathComponent()) }
         XCTAssertNil(try encodedQuery(try XCTUnwrap(liveLog.entries.first).request), "the live file has no query")
     }
+
+    func testIdeasFetchesTheListAndDecodesIt() async throws {
+        let (client, log) = try makeClient { _ in StubReply(chunks: [(try? fixture("responses/idea-list.json")) ?? Data()]) }
+        let list = try await client.ideas()
+        XCTAssertEqual(list.ideas.count, 5)
+        XCTAssertEqual(list.generatingRunId, "c9t5hq")
+        let entry = try XCTUnwrap(log.entries.first)
+        XCTAssertEqual(entry.request.httpMethod, "GET")
+        XCTAssertEqual(try encodedPath(entry.request), "/api/ideas")
+        assertCredentials(entry.request)
+    }
+
+    func testAcceptIdeaPostsTheCommandAndDecodesTheIdeaAndItsTask() async throws {
+        let (client, log) = try makeClient { _ in StubReply(chunks: [(try? fixture("responses/idea-accepted.json")) ?? Data()]) }
+        let accepted = try await client.acceptIdea(
+            ideaId: "h3v8ct",
+            title: "对比三家 VPS 的带宽配额",
+            brief: "查 Hetzner、Vultr 和 DigitalOcean 官网的带宽与流量政策，整理成一张表，附上来源链接。",
+            schedule: nil,
+            model: .sonnet,
+            budgetUsd: 1
+        )
+        XCTAssertEqual(accepted.idea.id, "k4p9rx")
+        XCTAssertEqual(accepted.task.id, "n2c7bq")
+        let entry = try XCTUnwrap(log.entries.first)
+        XCTAssertEqual(entry.request.httpMethod, "POST")
+        XCTAssertEqual(try encodedPath(entry.request), "/api/commands")
+        try assertSameJSON(entry.body, fixture("commands/idea-accept-once.json"))
+        assertCredentials(entry.request)
+    }
+
+    func testRejectIdeaPostsTheCommandAndDecodesTheIdea() async throws {
+        let (client, log) = try makeClient { _ in StubReply(chunks: [(try? fixture("responses/idea-result.json")) ?? Data()]) }
+        let rejected = try await client.rejectIdea(ideaId: "m7x2zd", reason: .notInterested, note: "我自己会翻。")
+        XCTAssertEqual(rejected.id, "m7x2zd")
+        XCTAssertEqual(rejected.state, .rejected)
+        let entry = try XCTUnwrap(log.entries.first)
+        XCTAssertEqual(entry.request.httpMethod, "POST")
+        XCTAssertEqual(try encodedPath(entry.request), "/api/commands")
+        try assertSameJSON(entry.body, fixture("commands/idea-reject.json"))
+        assertCredentials(entry.request)
+    }
+
+    func testGenerateIdeasPostsTheCommandAndReturnsTheRunId() async throws {
+        let (client, log) = try makeClient { _ in
+            StubReply(status: 202, chunks: [(try? fixture("responses/idea-generation-accepted.json")) ?? Data()])
+        }
+        let runId = try await client.generateIdeas()
+        XCTAssertEqual(runId, "c9t5hq")
+        let entry = try XCTUnwrap(log.entries.first)
+        XCTAssertEqual(entry.request.httpMethod, "POST")
+        XCTAssertEqual(try encodedPath(entry.request), "/api/commands")
+        try assertSameJSON(entry.body, fixture("commands/idea-generate.json"))
+        assertCredentials(entry.request)
+    }
+
+    func testAnIdeaRefusalFailsWithTheStatusAndMessage() async throws {
+        let (client, _) = try makeClient { _ in
+            StubReply(status: 409, chunks: [Data(#"{"error":"a generation is already queued or running"}"#.utf8)])
+        }
+        await assertFails(with: .http(status: 409, message: "a generation is already queued or running")) {
+            _ = try await client.generateIdeas()
+        }
+    }
 }

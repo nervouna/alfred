@@ -59,6 +59,28 @@ public struct RevisionAccepted: Decodable, Hashable, Sendable {
     public let annotations: [Annotation]
 }
 
+/// The body of a successful `idea.reject`: the idea as Alfred now holds it.
+public struct IdeaResult: Decodable, Hashable, Sendable {
+    public let idea: AlfredIdea
+}
+
+/// The body of a successful `idea.accept`: the idea, now accepted, and the task it made.
+public struct IdeaAccepted: Decodable, Hashable, Sendable {
+    public let idea: AlfredIdea
+    public let task: AlfredTask
+}
+
+/// The body of a successful `idea.generate`: the generation run, queued or running.
+public struct IdeaGenerationAccepted: Decodable, Hashable, Sendable {
+    public let runId: String
+}
+
+/// The body of `GET /api/ideas`: every idea Alfred keeps, newest created first, and the generation run while one is queued or running.
+public struct IdeaList: Decodable, Hashable, Sendable {
+    public let ideas: [AlfredIdea]
+    public let generatingRunId: String?
+}
+
 /// The body of any error response from the app API.
 public struct ErrorResponse: Decodable, Hashable, Sendable {
     public let error: String

@@ -62,6 +62,40 @@ public struct AlfredClient: Sendable {
         try JSONDecoder().decode(DocumentResult.self, from: await post(.documentUndo(documentId: documentId, runId: runId))).document
     }
 
+    /// POST /api/commands with `idea.accept`. Alfred answers 200 with the idea and the task it made.
+    public func acceptIdea(
+        ideaId: String,
+        title: String,
+        brief: String,
+        schedule: Schedule?,
+        model: TaskModel,
+        budgetUsd: Double
+    ) async throws -> IdeaAccepted {
+        try JSONDecoder().decode(IdeaAccepted.self, from: await post(.ideaAccept(
+            ideaId: ideaId,
+            title: title,
+            brief: brief,
+            schedule: schedule,
+            model: model,
+            budgetUsd: budgetUsd
+        )))
+    }
+
+    /// POST /api/commands with `idea.reject`. Alfred answers 200 with the idea.
+    public func rejectIdea(ideaId: String, reason: RejectionReason, note: String?) async throws -> AlfredIdea {
+        try JSONDecoder().decode(IdeaResult.self, from: await post(.ideaReject(ideaId: ideaId, reason: reason, note: note))).idea
+    }
+
+    /// POST /api/commands with `idea.generate`. Alfred answers 202 with the generation run, and this returns its id.
+    public func generateIdeas() async throws -> String {
+        try JSONDecoder().decode(IdeaGenerationAccepted.self, from: await post(.ideaGenerate)).runId
+    }
+
+    /// GET /api/ideas: every idea Alfred keeps, newest created first, and the generation run while one is going.
+    public func ideas() async throws -> IdeaList {
+        try await get(IdeaList.self, "/api/ideas")
+    }
+
     /// GET /api/documents: the documents, newest updated first.
     public func documents() async throws -> DocumentList {
         try await get(DocumentList.self, "/api/documents")

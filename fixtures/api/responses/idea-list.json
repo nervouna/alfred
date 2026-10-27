@@ -1,0 +1,86 @@
+{
+  "ideas": [
+    {
+      "id": "h3v8ct",
+      "title": "对比三家 VPS 的带宽配额",
+      "why": "上一份价格报告没有写带宽，你在对话里问过这件事。",
+      "brief": "查 Hetzner、Vultr 和 DigitalOcean 官网的带宽与流量政策，整理成一张表，附上来源链接。",
+      "kind": "once",
+      "model": "sonnet",
+      "estimateUsd": 0.35,
+      "state": "open",
+      "runId": "v7c2mb",
+      "createdAt": "2026-10-27T01:12:04.000Z",
+      "updatedAt": "2026-10-27T01:12:04.000Z"
+    },
+    {
+      "id": "d6n2gs",
+      "title": "每周追踪 VPS 价格变化",
+      "why": "这周你两次问到价格，每周看一次能及时发现调价。",
+      "brief": "每周一看一次 Hetzner、Vultr 和 DigitalOcean 的定价页，只报告和上周相比的变化。",
+      "kind": "recurring",
+      "schedule": {
+        "kind": "weekly",
+        "days": [
+          1
+        ],
+        "time": "09:00"
+      },
+      "model": "sonnet",
+      "estimateUsd": 0.2,
+      "state": "open",
+      "runId": "v7c2mb",
+      "createdAt": "2026-10-27T01:12:02.000Z",
+      "updatedAt": "2026-10-27T01:12:02.000Z"
+    },
+    {
+      "id": "m7x2zd",
+      "title": "把报告译成英文",
+      "why": "你的报告大多是中文，英文版可能对合作方有用。",
+      "brief": "把 VPS 价格报告译成英文，保留表格和来源链接。",
+      "kind": "once",
+      "model": "haiku",
+      "estimateUsd": 0.12,
+      "state": "rejected",
+      "rejection": {
+        "reason": "not-interested",
+        "note": "我自己会翻。"
+      },
+      "runId": "b5r8wn",
+      "createdAt": "2026-10-26T01:10:14.000Z",
+      "updatedAt": "2026-10-26T06:20:00.000Z"
+    },
+    {
+      "id": "k4p9rx",
+      "title": "盯住供应商状态页",
+      "why": "供应商的维护公告常在报告之后才出现，你之前因此漏掉过一次变化。",
+      "brief": "打开三家供应商的状态页，只报告新出现的故障或维护公告。",
+      "kind": "recurring",
+      "schedule": {
+        "kind": "interval",
+        "hours": 6
+      },
+      "model": "sonnet",
+      "estimateUsd": 0.4,
+      "state": "accepted",
+      "taskId": "n2c7bq",
+      "runId": "q2e7gx",
+      "createdAt": "2026-10-21T01:10:12.000Z",
+      "updatedAt": "2026-10-22T09:00:00.000Z"
+    },
+    {
+      "id": "t5w6pf",
+      "title": "查一下 Hetzner 的快照价格",
+      "why": "你之前问过快照价格，但没有下文。",
+      "brief": "查 Hetzner 官网的快照与备份价格，列出每 GB 的月价。",
+      "kind": "once",
+      "model": "haiku",
+      "estimateUsd": 0.08,
+      "state": "archived",
+      "runId": "b5r8wn",
+      "createdAt": "2026-10-19T01:10:20.000Z",
+      "updatedAt": "2026-10-26T01:10:20.000Z"
+    }
+  ],
+  "generatingRunId": "c9t5hq"
+}

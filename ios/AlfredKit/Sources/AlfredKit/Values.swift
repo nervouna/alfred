@@ -42,7 +42,7 @@ public struct FileKind: ExtensibleString {
     public static let file = FileKind(rawValue: "file")
 }
 
-/// What started a run: a task from the owner, a scheduled scan, a subagent of another run, or a revision of a document.
+/// What started a run: a task from the owner, a scheduled scan, a subagent of another run, a revision of a document, or a generation of ideas.
 public struct RunKind: ExtensibleString {
     public let rawValue: String
 
@@ -54,6 +54,7 @@ public struct RunKind: ExtensibleString {
     public static let scan = RunKind(rawValue: "scan")
     public static let subagent = RunKind(rawValue: "subagent")
     public static let revision = RunKind(rawValue: "revision")
+    public static let ideas = RunKind(rawValue: "ideas")
 }
 
 /// The APNs environment a device token belongs to. A development-signed build uses the sandbox.
@@ -115,6 +116,47 @@ public struct TaskModel: ExtensibleString {
     public static let sonnet = TaskModel(rawValue: "sonnet")
     public static let opus = TaskModel(rawValue: "opus")
     public static let haiku = TaskModel(rawValue: "haiku")
+}
+
+/// What an idea proposes: a task to run once, or a recurring one.
+public struct IdeaKind: ExtensibleString {
+    public let rawValue: String
+
+    public init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+
+    public static let once = IdeaKind(rawValue: "once")
+    public static let recurring = IdeaKind(rawValue: "recurring")
+}
+
+/// Where an idea stands: open for the owner, accepted as a task, rejected with a reason, or archived unanswered.
+public struct IdeaState: ExtensibleString {
+    public let rawValue: String
+
+    public init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+
+    public static let open = IdeaState(rawValue: "open")
+    public static let accepted = IdeaState(rawValue: "accepted")
+    public static let rejected = IdeaState(rawValue: "rejected")
+    public static let archived = IdeaState(rawValue: "archived")
+}
+
+/// Why the owner rejected an idea.
+public struct RejectionReason: ExtensibleString {
+    public let rawValue: String
+
+    public init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+
+    public static let notInterested = RejectionReason(rawValue: "not-interested")
+    public static let alreadyDoing = RejectionReason(rawValue: "already-doing")
+    public static let notNow = RejectionReason(rawValue: "not-now")
+    public static let tooExpensive = RejectionReason(rawValue: "too-expensive")
+    public static let wrongDirection = RejectionReason(rawValue: "wrong-direction")
 }
 
 /// What kind of file a document is. Only markdown and text documents take passage annotations.

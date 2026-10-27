@@ -17,11 +17,18 @@ public enum Command: Hashable, Sendable, Codable {
     case documentRevise(documentId: String, version: String, annotations: [AnnotationDraft])
     /// Undoes a document's latest revision, named by the revision run that made it.
     case documentUndo(documentId: String, runId: String)
+    /// Accepts an idea as a task, with the task as the owner confirmed it. A nil `schedule` makes a one-time task that runs at once.
+    case ideaAccept(ideaId: String, title: String, brief: String, schedule: Schedule?, model: TaskModel, budgetUsd: Double)
+    /// Rejects an idea with a reason, and an optional note of 1 to 500 characters.
+    case ideaReject(ideaId: String, reason: RejectionReason, note: String?)
+    /// Asks Alfred to generate ideas now.
+    case ideaGenerate
 
     private enum CodingKeys: String, CodingKey {
         case type, clientId, text, runId, files, questionId, answers
         case title, brief, schedule, model, budgetUsd, taskId, status
         case documentId, version, annotations
+        case ideaId, reason, note
     }
 
     public init(from decoder: any Decoder) throws {
@@ -74,6 +81,23 @@ public enum Command: Hashable, Sendable, Codable {
                 documentId: try container.decode(String.self, forKey: .documentId),
                 runId: try container.decode(String.self, forKey: .runId)
             )
+        case "idea.accept":
+            self = .ideaAccept(
+                ideaId: try container.decode(String.self, forKey: .ideaId),
+                title: try container.decode(String.self, forKey: .title),
+                brief: try container.decode(String.self, forKey: .brief),
+                schedule: try container.decodeIfPresent(Schedule.self, forKey: .schedule),
+                model: try container.decode(TaskModel.self, forKey: .model),
+                budgetUsd: try container.decode(Double.self, forKey: .budgetUsd)
+            )
+        case "idea.reject":
+            self = .ideaReject(
+                ideaId: try container.decode(String.self, forKey: .ideaId),
+                reason: try container.decode(RejectionReason.self, forKey: .reason),
+                note: try container.decodeIfPresent(String.self, forKey: .note)
+            )
+        case "idea.generate":
+            self = .ideaGenerate
         default:
             throw DecodingError.dataCorruptedError(
                 forKey: .type,
@@ -128,6 +152,21 @@ public enum Command: Hashable, Sendable, Codable {
             try container.encode("document.undo", forKey: .type)
             try container.encode(documentId, forKey: .documentId)
             try container.encode(runId, forKey: .runId)
+        case let .ideaAccept(ideaId, title, brief, schedule, model, budgetUsd):
+            try container.encode("idea.accept", forKey: .type)
+            try container.encode(ideaId, forKey: .ideaId)
+            try container.encode(title, forKey: .title)
+            try container.encode(brief, forKey: .brief)
+            try container.encodeIfPresent(schedule, forKey: .schedule)
+            try container.encode(model, forKey: .model)
+            try container.encode(budgetUsd, forKey: .budgetUsd)
+        case let .ideaReject(ideaId, reason, note):
+            try container.encode("idea.reject", forKey: .type)
+            try container.encode(ideaId, forKey: .ideaId)
+            try container.encode(reason, forKey: .reason)
+            try container.encodeIfPresent(note, forKey: .note)
+        case .ideaGenerate:
+            try container.encode("idea.generate", forKey: .type)
         }
     }
 }

@@ -1,6 +1,6 @@
 // The command API: the owner's commands in, Alfred's events out, over a Unix
 // socket (no TCP listener). A process on the same host posts message.send,
-// run.stop, question.answer, the task commands and the document commands to /commands, uploads files to /uploads (into the
+// run.stop, question.answer, the task, document and idea commands to /commands, uploads files to /uploads (into the
 // workspace's inbox, for a message to name) and follows /events as server-sent
 // events, resuming by event id. Every command is validated here by parseCommand.
 // Live events (reply text as it is written, the steps of a run) go out as frames
@@ -19,7 +19,24 @@ import { localDate, localTime, sanitizeFileName, uniquePath } from "../files.ts"
 import { describeError, log } from "../log.ts";
 import { STATE_DIR, WORKSPACE_DIR } from "../store.ts";
 import { MAX_COMMAND_BYTES, MAX_UPLOAD_BYTES, parseCommand } from "./schema.ts";
-import type { DocumentResult, DocumentRevise, DocumentUndo, Event, LiveEvent, RevisionAccepted, Task, TaskCreate, TaskUpdate, UploadResult } from "./schema.ts";
+import type {
+  DocumentResult,
+  DocumentRevise,
+  DocumentUndo,
+  Event,
+  IdeaAccept,
+  IdeaAccepted,
+  IdeaGenerate,
+  IdeaGenerationAccepted,
+  IdeaReject,
+  IdeaResult,
+  LiveEvent,
+  RevisionAccepted,
+  Task,
+  TaskCreate,
+  TaskUpdate,
+  UploadResult,
+} from "./schema.ts";
 
 /** How often an event stream gets a `: ping` comment. */
 export const HEARTBEAT_MS = 30_000;
@@ -59,6 +76,18 @@ export interface DocumentCommands {
   undo?(command: DocumentUndo): DocumentReply<DocumentResult> | Promise<DocumentReply<DocumentResult>>;
 }
 
+/** An idea command's answer: the body to send, or the status and the reason it was refused. */
+export type IdeaReply<T> = { ok: true; body: T } | { ok: false; status: 400 | 404 | 409 | 500; error: string };
+
+export interface IdeaCommands {
+  /** Accepts an idea as a task, or refuses it. */
+  accept(command: IdeaAccept): IdeaReply<IdeaAccepted> | Promise<IdeaReply<IdeaAccepted>>;
+  /** Rejects an idea with its reason, or refuses it. */
+  reject(command: IdeaReject): IdeaReply<IdeaResult> | Promise<IdeaReply<IdeaResult>>;
+  /** Starts a generation run of ideas, or refuses it. */
+  generate(command: IdeaGenerate): IdeaReply<IdeaGenerationAccepted> | Promise<IdeaReply<IdeaGenerationAccepted>>;
+}
+
 export interface ApiOptions {
   /** Path of the Unix socket. */
   socket: string;
@@ -69,6 +98,8 @@ export interface ApiOptions {
   tasks?: TaskCommands;
   /** Where document commands go, once the document store is wired in; without it every document command answers 503. */
   documents?: DocumentCommands;
+  /** Where idea commands go, once the idea store is wired in; without it every idea command answers 503. */
+  ideas?: IdeaCommands;
   /** Interval between pings on an event stream; 30 s by default. */
   heartbeatMs?: number;
   /** Events read per page of a stream's backlog. */
@@ -208,7 +239,7 @@ function receiveUpload(req: http.IncomingMessage, file: string): Promise<number 
 
 /** Start the API; resolves to a function that closes it. */
 export async function startApi(opts: ApiOptions): Promise<() => Promise<void>> {
-  const { socket, handler, events, tasks, documents } = opts;
+  const { socket, handler, events, tasks, documents, ideas } = opts;
   const heartbeatMs = opts.heartbeatMs ?? HEARTBEAT_MS;
   const pageSize = opts.pageSize ?? BACKLOG_PAGE;
 
@@ -279,6 +310,23 @@ export async function startApi(opts: ApiOptions): Promise<() => Promise<void>> {
       const reply = await documents.undo(command);
       if (!reply.ok) return sendJson(res, reply.status, { error: reply.error });
       return sendJson(res, 200, reply.body);
+    }
+    // An idea command never reaches the message path either. Without an idea store it is refused with 503.
+    if (command.type === "idea.accept" || command.type === "idea.reject" || command.type === "idea.generate") {
+      if (!ideas) return sendJson(res, 503, { error: "ideas are not available" });
+      if (command.type === "idea.accept") {
+        const reply = await ideas.accept(command);
+        if (!reply.ok) return sendJson(res, reply.status, { error: reply.error });
+        return sendJson(res, 200, reply.body);
+      }
+      if (command.type === "idea.reject") {
+        const reply = await ideas.reject(command);
+        if (!reply.ok) return sendJson(res, reply.status, { error: reply.error });
+        return sendJson(res, 200, reply.body);
+      }
+      const reply = await ideas.generate(command);
+      if (!reply.ok) return sendJson(res, reply.status, { error: reply.error });
+      return sendJson(res, 202, reply.body);
     }
     // A message's files are checked before anything is submitted: one that is not in the inbox refuses the message.
     const files = command.files ?? [];

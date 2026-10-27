@@ -28,7 +28,7 @@ const MAX_STEPS = 400;
 const DAY_MS = 86_400_000;
 
 /** A subagent run is a background subagent a task started; it has a card of its own. */
-export type RunKind = "task" | "scan" | "subagent" | "revision";
+export type RunKind = "task" | "scan" | "subagent" | "revision" | "ideas";
 /** `queued`: a subagent waiting for a background slot. `lost`: the process ended while the run was live, e.g. a restart. */
 export type RunStatus = "queued" | "running" | "done" | "stopped" | "failed" | "lost";
 
