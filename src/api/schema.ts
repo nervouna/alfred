@@ -42,6 +42,8 @@ export const MAX_ANNOTATIONS_PER_REVISION = 50;
 export const MAX_IDEA_WHY_CHARS = 300;
 /** The most characters an idea's rejection note holds. */
 export const MAX_IDEA_NOTE_CHARS = 500;
+/** A generation adds at most this many ideas. */
+export const MAX_NEW_IDEAS = 3;
 const MAX_ANNOTATION_REPLY_CHARS = 4000;
 const MAX_TEXT_CHARS = 20_000;
 const MAX_ANSWER_CHARS = 2000;
@@ -569,13 +571,34 @@ export const IdeaAcceptedSchema = z
 /** The body of a successful idea.generate: the generation run, queued or running. */
 export const IdeaGenerationAcceptedSchema = z.object({ runId: RunIdSchema });
 
+/** How a generation of ideas ended: with an answer (done), or without one (failed). A lost run is neither. */
+export const IdeaGenerationStatusSchema = z.enum(["done", "failed"]);
+
+/** What started a generation of ideas: the owner asking for it, or the daily schedule. */
+export const IdeaTriggerSchema = z.enum(["requested", "daily"]);
+
 /**
- * The body of GET /api/ideas: every idea Alfred keeps, newest created first, and the generation run while one is
- * queued or running.
+ * The latest generation of ideas that ended, done or failed: its run, when it ended, what started it, how many ideas
+ * it added and, when it was done, Alfred's note on what it found. A note is a sentence for the owner of 1 to
+ * MAX_IDEA_WHY_CHARS characters, not blank; a failed generation has none.
+ */
+export const IdeaGenerationSchema = z.object({
+  runId: RunIdSchema,
+  endedAt: IsoTimestampSchema,
+  status: IdeaGenerationStatusSchema,
+  trigger: IdeaTriggerSchema,
+  added: z.int().min(0, "must be at least 0").max(MAX_NEW_IDEAS, `must be at most ${MAX_NEW_IDEAS}`),
+  note: IdeaWhySchema.optional(),
+});
+
+/**
+ * The body of GET /api/ideas: every idea Alfred keeps, newest created first, the generation run while one is queued
+ * or running, and the latest generation that ended.
  */
 export const IdeaListSchema = z.object({
   ideas: z.array(IdeaSchema),
   generatingRunId: RunIdSchema.optional(),
+  lastGeneration: IdeaGenerationSchema.optional(),
 });
 
 /** The body of POST /api/uploads: the file Alfred saved under inbox/. */
@@ -790,6 +813,9 @@ export type Rejection = z.infer<typeof RejectionSchema>;
 export type IdeaResult = z.infer<typeof IdeaResultSchema>;
 export type IdeaAccepted = z.infer<typeof IdeaAcceptedSchema>;
 export type IdeaGenerationAccepted = z.infer<typeof IdeaGenerationAcceptedSchema>;
+export type IdeaGeneration = z.infer<typeof IdeaGenerationSchema>;
+export type IdeaGenerationStatus = z.infer<typeof IdeaGenerationStatusSchema>;
+export type IdeaTrigger = z.infer<typeof IdeaTriggerSchema>;
 export type IdeaList = z.infer<typeof IdeaListSchema>;
 export type IdeaAccept = z.infer<typeof IdeaAcceptSchema>;
 export type IdeaReject = z.infer<typeof IdeaRejectSchema>;

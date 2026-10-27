@@ -62,6 +62,16 @@ enum IdeaPresentation {
         brief.count > longBriefChars || brief.split(separator: "\n", omittingEmptySubsequences: false).count > longBriefLines
     }
 
+    // MARK: The last generation
+
+    /// What the top of the list says when the last generation added no ideas: Alfred's note, `这次没有新想法` when it gave
+    /// none, and `这次没想成，可以再试一次` when the generation failed. Nothing when it added ideas.
+    static func generationLine(_ generation: IdeaGeneration) -> String? {
+        guard generation.added == 0 else { return nil }
+        if generation.status == .failed { return "这次没想成，可以再试一次" }
+        return generation.note.flatMap(note(from:)) ?? "这次没有新想法"
+    }
+
     // MARK: History
 
     /// What became of an idea that is not open: `已采纳`, `不要：时机不对`, `已归档`, or the state as the server sent it.

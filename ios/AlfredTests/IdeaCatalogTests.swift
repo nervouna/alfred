@@ -4,9 +4,9 @@ import XCTest
 @testable import Alfred
 
 final class IdeaCatalogTests: XCTestCase {
-    private func catalog(_ ideas: [[String: Any]], generatingRunId: String? = nil) throws -> IdeaCatalog {
+    private func catalog(_ ideas: [[String: Any]], generatingRunId: String? = nil, lastGeneration: [String: Any]? = nil) throws -> IdeaCatalog {
         var catalog = IdeaCatalog()
-        catalog.load(try TestData.decodedIdeaList(ideas, generatingRunId: generatingRunId))
+        catalog.load(try TestData.decodedIdeaList(ideas, generatingRunId: generatingRunId, lastGeneration: lastGeneration))
         return catalog
     }
 
@@ -176,5 +176,105 @@ final class IdeaCatalogTests: XCTestCase {
         catalog.apply(try TestData.generationEvent(1, run: "c9t5hq", status: "done"))
         catalog.noteGeneration(runId: "c9t5hq")
         XCTAssertFalse(catalog.isGenerating, "the end came before the answer to the command")
+    }
+
+    // MARK: The last generation
+
+    func testNoGenerationHasEndedUntilAListSaysSo() throws {
+        XCTAssertNil(IdeaCatalog().lastGeneration)
+        XCTAssertNil(try catalog([TestData.ideaObject("aaaaaa")]).lastGeneration)
+        XCTAssertNil(IdeaCatalog().generationLine)
+    }
+
+    func testAListKeepsItsLastGenerationAndTheLineIsItsNote() throws {
+        let loaded = try catalog([], lastGeneration: TestData.generationObject("w4k8ns", note: "最近的对话多是在测试功能，暂时没有值得提的。"))
+        XCTAssertEqual(loaded.lastGeneration?.runId, "w4k8ns")
+        XCTAssertEqual(loaded.lastGeneration?.added, 0)
+        XCTAssertEqual(loaded.generationLine, "最近的对话多是在测试功能，暂时没有值得提的。")
+    }
+
+    func testTheLineHasThePresentationsThreeTexts() throws {
+        XCTAssertEqual(try catalog([], lastGeneration: TestData.generationObject(note: "今天没有。")).generationLine, "今天没有。")
+        XCTAssertEqual(try catalog([], lastGeneration: TestData.generationObject(note: nil)).generationLine, "这次没有新想法")
+        XCTAssertEqual(try catalog([], lastGeneration: TestData.generationObject(status: "failed", note: nil)).generationLine, "这次没想成，可以再试一次")
+    }
+
+    func testThereIsNoLineWhenTheLastGenerationAddedIdeas() throws {
+        let loaded = try catalog([TestData.ideaObject("aaaaaa")], lastGeneration: TestData.generationObject(added: 2, note: "想到两个。"))
+        XCTAssertEqual(loaded.lastGeneration?.added, 2)
+        XCTAssertNil(loaded.generationLine)
+    }
+
+    func testANewerLastGenerationReplacesTheOneBeforeAndAnOlderOrMissingOneDoesNot() throws {
+        var catalog = try catalog([], lastGeneration: TestData.generationObject("aaaaa2", note: "第一次。", endedAt: "2026-10-28T01:00:00.000Z"))
+        catalog.load(try TestData.decodedIdeaList([], lastGeneration: TestData.generationObject("bbbbb2", note: "第二次。", endedAt: "2026-10-28T02:00:00.000Z")))
+        XCTAssertEqual(catalog.generationLine, "第二次。")
+
+        catalog.load(try TestData.decodedIdeaList([], lastGeneration: TestData.generationObject("aaaaa2", note: "第一次。", endedAt: "2026-10-28T01:00:00.000Z")))
+        XCTAssertEqual(catalog.generationLine, "第二次。", "a list read before the second generation ended cannot undo it")
+        catalog.load(try TestData.decodedIdeaList([]))
+        XCTAssertEqual(catalog.generationLine, "第二次。", "nor can one that has no generation")
+    }
+
+    // MARK: The line while a generation runs
+
+    func testTheLineGoesWhenAGenerationStartsOrIsAcceptedAndWhenTheListSaysOneIsRunning() throws {
+        let last = TestData.generationObject(note: "暂时没有值得提的。")
+
+        var accepted = try catalog([], lastGeneration: last)
+        XCTAssertEqual(accepted.generationLine, "暂时没有值得提的。")
+        accepted.noteGeneration(runId: "c9t5hq")
+        XCTAssertNil(accepted.generationLine, "the command was accepted")
+
+        var running = try catalog([], lastGeneration: last)
+        running.apply(try TestData.generationEvent(1, run: "c9t5hq", status: "running"))
+        XCTAssertNil(running.generationLine, "its run is running")
+
+        XCTAssertNil(try catalog([], generatingRunId: "c9t5hq", lastGeneration: last).generationLine, "the list says one is running")
+    }
+
+    func testTheLineStaysAwayWhenTheRunEndsUntilAListTellsHowItEnded() throws {
+        var catalog = try catalog([], lastGeneration: TestData.generationObject("aaaaa2", note: "上一次没有。", endedAt: "2026-10-28T01:00:00.000Z"))
+        catalog.apply(try TestData.generationEvent(1, run: "c9t5hq", status: "running"))
+        catalog.apply(try TestData.generationEvent(2, run: "c9t5hq", status: "done"))
+        XCTAssertFalse(catalog.isGenerating)
+        XCTAssertNil(catalog.generationLine, "the line before would be about the generation before")
+
+        catalog.load(try TestData.decodedIdeaList([TestData.ideaObject("bbbbbb")], lastGeneration: TestData.generationObject("c9t5hq", added: 1, note: "想到一个。", endedAt: "2026-10-28T02:00:00.000Z")))
+        XCTAssertNil(catalog.generationLine, "the generation added an idea, so there is no line")
+    }
+
+    func testTheLineReturnsWithTheNoteOfTheGenerationThatEndedWhenItAddedNone() throws {
+        var catalog = try catalog([], lastGeneration: TestData.generationObject("aaaaa2", note: "上一次没有。", endedAt: "2026-10-28T01:00:00.000Z"))
+        catalog.apply(try TestData.generationEvent(1, run: "c9t5hq", status: "running"))
+        catalog.apply(try TestData.generationEvent(2, run: "c9t5hq", status: "done"))
+        catalog.load(try TestData.decodedIdeaList([], lastGeneration: TestData.generationObject("c9t5hq", note: "这次也没有。", endedAt: "2026-10-28T02:00:00.000Z")))
+        XCTAssertEqual(catalog.generationLine, "这次也没有。")
+    }
+
+    func testAFailedRunShowsItsLineOnceTheListHasBeenRead() throws {
+        var catalog = try catalog([], lastGeneration: TestData.generationObject("aaaaa2", note: "上一次没有。", endedAt: "2026-10-28T01:00:00.000Z"))
+        catalog.apply(try TestData.generationEvent(1, run: "c9t5hq", status: "running"))
+        catalog.apply(try TestData.generationEvent(2, run: "c9t5hq", status: "failed"))
+        XCTAssertNil(catalog.generationLine)
+        catalog.load(try TestData.decodedIdeaList([], lastGeneration: TestData.generationObject("c9t5hq", status: "failed", note: nil, endedAt: "2026-10-28T02:00:00.000Z")))
+        XCTAssertEqual(catalog.generationLine, "这次没想成，可以再试一次")
+    }
+
+    // MARK: Which events end a generation
+
+    func testARunOfKindIdeasThatLeavesQueuedAndRunningEndsAGeneration() throws {
+        for status in ["done", "failed", "stopped", "lost", "paused"] {
+            XCTAssertTrue(IdeaCatalog.endsGeneration(try TestData.generationEvent(1, run: "c9t5hq", status: status)), status)
+        }
+        for status in ["queued", "running"] {
+            XCTAssertFalse(IdeaCatalog.endsGeneration(try TestData.generationEvent(1, run: "c9t5hq", status: status)), status)
+        }
+    }
+
+    func testOtherRunsAndOtherEventsEndNoGeneration() throws {
+        let task = try TestData.streamEvent(TestData.runEvent(1, run: TestData.runObject("r1", status: "done"), at: "2026-10-27T01:00:00.000Z"))
+        XCTAssertFalse(IdeaCatalog.endsGeneration(task), "a run of another kind")
+        XCTAssertFalse(IdeaCatalog.endsGeneration(try event(2, TestData.ideaObject("aaaaaa"))), "an idea")
     }
 }

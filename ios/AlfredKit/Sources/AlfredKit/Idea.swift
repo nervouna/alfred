@@ -6,6 +6,33 @@ public struct Rejection: Decodable, Hashable, Sendable {
     public let note: String?
 }
 
+/// The latest generation of ideas that ended, done or failed: what the 想法 tab says about it when it added none.
+public struct IdeaGeneration: Decodable, Hashable, Sendable {
+    /// The generation's run.
+    public let runId: String
+    public let endedAt: Date
+    public let status: IdeaGenerationStatus
+    public let trigger: IdeaTrigger
+    /// How many ideas the generation added, from 0 to 3.
+    public let added: Int
+    /// Alfred's sentence on what the generation found, and when it found nothing, why. A failed generation has none.
+    public let note: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case runId, endedAt, status, trigger, added, note
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        runId = try container.decode(String.self, forKey: .runId)
+        endedAt = try container.decodeTimestamp(forKey: .endedAt)
+        status = try container.decode(IdeaGenerationStatus.self, forKey: .status)
+        trigger = try container.decode(IdeaTrigger.self, forKey: .trigger)
+        added = try container.decode(Int.self, forKey: .added)
+        note = try container.decodeIfPresent(String.self, forKey: .note)
+    }
+}
+
 /// An idea: a suggestion Alfred made from memory and recent conversations. Alfred's idea object, with every field the client shows.
 public struct AlfredIdea: Decodable, Identifiable, Hashable, Sendable {
     public let id: String

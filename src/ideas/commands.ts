@@ -1,9 +1,10 @@
 // The idea commands of the command API (see IdeaCommands in src/api/server.ts) on the idea store and the task store:
 // accepting an idea makes a task, and rejecting one records why. Generating ideas goes to the generation given in the
-// options; without one it is refused with 503 until a generation is wired in.
+// options, as one the owner requested; without one it is refused with 503 until a generation is wired in.
 
 import type { IdeaCommands } from "../api/server.ts";
-import type { Rejection, Schedule } from "../api/schema.ts";
+import type { IdeaGenerationAccepted, IdeaTrigger, Rejection, Schedule } from "../api/schema.ts";
+import type { IdeaReply } from "../api/server.ts";
 import { InvalidTask, type TaskStore } from "../tasks/store.ts";
 import { IdeaNotOpen, type IdeaStore } from "./store.ts";
 
@@ -13,8 +14,8 @@ const ACCEPTED_DELAY_MS = 60_000;
 export interface IdeaCommandsOptions {
   /** The clock; the real one by default. */
   now?: () => Date;
-  /** Starts a generation of ideas. Without it, generating is refused with 503. */
-  generate?: IdeaCommands["generate"];
+  /** Starts a generation of ideas, told what started it. Without it, generating is refused with 503. */
+  generate?: (trigger: IdeaTrigger) => IdeaReply<IdeaGenerationAccepted>;
 }
 
 /** Refused unless the idea exists and is open: 404 for an unknown one, 409 with the store's message for a closed one. */
@@ -27,6 +28,7 @@ function refuseUnlessOpen(store: IdeaStore, id: string): { ok: false; status: 40
 
 export function ideaCommands(store: IdeaStore, tasks: TaskStore, options: IdeaCommandsOptions = {}): IdeaCommands {
   const now = options.now ?? (() => new Date());
+  const { generate } = options;
   return {
     accept(command) {
       // The check, the task and the acceptance run with no await between them, so two accepts of one idea cannot both make a task.
@@ -53,6 +55,7 @@ export function ideaCommands(store: IdeaStore, tasks: TaskStore, options: IdeaCo
       if (!idea) throw new Error(`idea ${command.ideaId} vanished during its rejection`);
       return { ok: true, body: { idea } };
     },
-    generate: options.generate ?? (() => ({ ok: false, status: 503, error: "idea generation is not available" })),
+    // An idea.generate command is the owner asking.
+    generate: () => generate?.("requested") ?? { ok: false, status: 503, error: "idea generation is not available" },
   };
 }

@@ -163,8 +163,7 @@ test("archiveStale archives an open idea 7 days old, not one a minute younger, a
   assert.deepEqual(store.archiveStale(), [], "nothing is archived twice");
 });
 
-test("startGeneration records the run, finishGeneration clears it only for that run, and neither logs an event", () => {
-  const { file, events, store } = open();
+test("startGeneration records the run, finishGeneration clears it only for that run, and neither logs an event", () => {  const { file, events, store } = open();
   store.startGeneration(RUN);
   assert.equal(store.generatingRunId(), RUN);
   assert.deepEqual(IdeaListSchema.parse(JSON.parse(fs.readFileSync(file, "utf8"))), { ideas: [], generatingRunId: RUN });
@@ -175,6 +174,114 @@ test("startGeneration records the run, finishGeneration clears it only for that 
   assert.equal(store.generatingRunId(), undefined);
   assert.deepEqual(IdeaListSchema.parse(JSON.parse(fs.readFileSync(file, "utf8"))), { ideas: [] });
   assert.equal(events.readSince(0).length, 0);
+});
+
+/** What the file holds, as the contract reads it. */
+const saved = (file: string) => IdeaListSchema.parse(JSON.parse(fs.readFileSync(file, "utf8")));
+
+test("finishGeneration records a done outcome with the run, the time, the trigger, the count and the note, and clears the generation", () => {
+  const { file, events, store } = open();
+  store.startGeneration(RUN);
+  clock = new Date("2026-10-26T01:02:03.456Z");
+
+  store.finishGeneration(RUN, { status: "done", trigger: "requested", added: 0, note: "最近的对话多是在测试功能，暂时没有值得提的。" });
+
+  const expected = { runId: RUN, endedAt: "2026-10-26T01:02:03.456Z", status: "done", trigger: "requested", added: 0, note: "最近的对话多是在测试功能，暂时没有值得提的。" };
+  assert.deepEqual(store.lastGeneration(), expected);
+  assert.equal(store.generatingRunId(), undefined);
+  assert.deepEqual(saved(file), { ideas: [], lastGeneration: expected });
+  assert.equal(events.readSince(0).length, 0, "no event");
+});
+
+test("finishGeneration records a failed outcome with no note, and a done one that added ideas", () => {
+  const { file, store } = open();
+  store.startGeneration(RUN);
+  store.finishGeneration(RUN, { status: "failed", trigger: "daily", added: 0 });
+  assert.deepEqual(store.lastGeneration(), { runId: RUN, endedAt: START.toISOString(), status: "failed", trigger: "daily", added: 0 });
+  assert.equal("note" in (saved(file).lastGeneration ?? {}), false, "no note key");
+
+  clock = new Date("2026-10-27T01:00:00Z");
+  store.startGeneration(OTHER_RUN);
+  store.finishGeneration(OTHER_RUN, { status: "done", trigger: "daily", added: 3, note: "找到三个值得做的。" });
+  assert.deepEqual(store.lastGeneration(), { runId: OTHER_RUN, endedAt: clock.toISOString(), status: "done", trigger: "daily", added: 3, note: "找到三个值得做的。" }, "the latest replaces the one before");
+  assert.deepEqual(saved(file).lastGeneration, store.lastGeneration());
+});
+
+test("finishGeneration for another run's id records nothing and leaves the generation and the last outcome as they were", () => {
+  const { file, events, store } = open();
+  store.startGeneration(RUN);
+  store.finishGeneration(RUN, { status: "done", trigger: "requested", added: 1, note: "一个。" });
+  const before = store.lastGeneration();
+  store.startGeneration(OTHER_RUN);
+
+  store.finishGeneration("m7x2zd", { status: "failed", trigger: "daily", added: 0 });
+
+  assert.equal(store.generatingRunId(), OTHER_RUN, "the running generation is not finished");
+  assert.deepEqual(store.lastGeneration(), before);
+  assert.deepEqual(saved(file), { ideas: [], generatingRunId: OTHER_RUN, lastGeneration: before });
+  assert.equal(events.readSince(0).length, 0);
+});
+
+test("finishGeneration with no outcome, as for a lost run, clears the generation and records nothing", () => {
+  const { file, store } = open();
+  store.startGeneration(RUN);
+  store.finishGeneration(RUN, { status: "done", trigger: "requested", added: 0, note: "没有。" });
+  const before = store.lastGeneration();
+  store.startGeneration(OTHER_RUN);
+
+  store.finishGeneration(OTHER_RUN);
+
+  assert.equal(store.generatingRunId(), undefined);
+  assert.deepEqual(store.lastGeneration(), before, "the earlier outcome stays");
+  assert.deepEqual(saved(file), { ideas: [], lastGeneration: before });
+});
+
+test("an outcome the contract refuses throws and changes nothing", () => {
+  const { file, store } = open();
+  store.startGeneration(RUN);
+  const before = fs.readFileSync(file, "utf8");
+  for (const outcome of [
+    { status: "done", trigger: "requested", added: 4, note: "太多。" },
+    { status: "done", trigger: "requested", added: 0, note: "  " },
+    { status: "done", trigger: "requested", added: 0, note: "x".repeat(301) },
+    { status: "lost", trigger: "requested", added: 0 },
+    { status: "done", trigger: "weekly", added: 0 },
+  ] as const) {
+    assert.throws(() => store.finishGeneration(RUN, outcome as never), JSON.stringify(outcome));
+    assert.equal(store.generatingRunId(), RUN);
+    assert.equal(store.lastGeneration(), undefined);
+    assert.equal(fs.readFileSync(file, "utf8"), before);
+  }
+});
+
+test("the last outcome survives the other writes, the start of a generation and a restart, which drops only a leftover generation", () => {
+  const { file, events, store } = open();
+  store.startGeneration(RUN);
+  const [added] = store.add([once("一")], RUN);
+  store.finishGeneration(RUN, { status: "done", trigger: "requested", added: 1, note: "想到一个。" });
+  const last = store.lastGeneration();
+  assert.ok(added && last);
+
+  store.reject(added.id, { reason: "not-now" });
+  assert.deepEqual(saved(file).lastGeneration, last, "a rejection keeps it");
+  store.archiveStale();
+  store.startGeneration(OTHER_RUN);
+  assert.deepEqual(store.lastGeneration(), last, "starting a generation keeps it");
+  assert.deepEqual(saved(file), { ideas: store.list(), generatingRunId: OTHER_RUN, lastGeneration: last });
+
+  const reopened = new IdeaStore({ file, events, now });
+  assert.equal(reopened.generatingRunId(), undefined, "the leftover generation is dropped");
+  assert.deepEqual(reopened.lastGeneration(), last, "the last outcome is not");
+  assert.deepEqual(saved(file), { ideas: reopened.list(), lastGeneration: last });
+  assert.equal(new IdeaStore({ file, events, now }).lastGeneration()?.runId, RUN);
+});
+
+test("a store with no outcome yet has none", () => {
+  const { file, store } = open();
+  assert.equal(store.lastGeneration(), undefined);
+  store.startGeneration(RUN);
+  assert.equal(store.lastGeneration(), undefined);
+  assert.equal("lastGeneration" in saved(file), false);
 });
 
 test("a generation left in the file by a restart is dropped when the store opens", () => {

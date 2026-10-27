@@ -21,6 +21,33 @@ final class IdeaPresentationTests: XCTestCase {
         XCTAssertEqual(IdeaPresentation.reasonLabel(RejectionReason(rawValue: "boring")), "boring")
     }
 
+    // MARK: The line about the last generation
+
+    func testAGenerationThatAddedNoneSaysItsNote() throws {
+        let generation = try TestData.generation(note: "最近的对话多是在测试功能，暂时没有值得提的。")
+        XCTAssertEqual(IdeaPresentation.generationLine(generation), "最近的对话多是在测试功能，暂时没有值得提的。")
+        XCTAssertEqual(IdeaPresentation.generationLine(try TestData.generation(trigger: "daily", note: " 今天没有。\n")), "今天没有。")
+    }
+
+    func testAGenerationThatAddedNoneAndHasNoNoteSaysThereAreNoNewIdeas() throws {
+        XCTAssertEqual(IdeaPresentation.generationLine(try TestData.generation(note: nil)), "这次没有新想法")
+        XCTAssertEqual(IdeaPresentation.generationLine(try TestData.generation(note: "  ")), "这次没有新想法")
+    }
+
+    func testAFailedGenerationSaysItDidNotWorkAndCanBeTriedAgain() throws {
+        XCTAssertEqual(IdeaPresentation.generationLine(try TestData.generation(status: "failed", note: nil)), "这次没想成，可以再试一次")
+        XCTAssertEqual(
+            IdeaPresentation.generationLine(try TestData.generation(status: "failed", trigger: "daily", note: "不该有的说明")),
+            "这次没想成，可以再试一次",
+            "a failure has the one text, whatever came with it"
+        )
+    }
+
+    func testAGenerationThatAddedIdeasHasNoLine() throws {
+        XCTAssertNil(IdeaPresentation.generationLine(try TestData.generation(added: 1, note: "想到一个。")))
+        XCTAssertNil(IdeaPresentation.generationLine(try TestData.generation(added: 3, note: nil)))
+    }
+
     // MARK: The note
 
     func testANoteIsTrimmedAndABlankOneIsNoNote() {

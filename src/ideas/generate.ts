@@ -16,7 +16,9 @@ import {
   type Idea,
   IdeaKindSchema,
   IdeaSchema,
+  type IdeaTrigger,
   MAX_IDEA_WHY_CHARS,
+  MAX_NEW_IDEAS,
   MAX_TASK_BUDGET_USD,
   MAX_TASK_TITLE_CHARS,
   ModelSchema,
@@ -52,8 +54,6 @@ export const MAX_CLOSED_IDEAS_SHOWN = 20;
 export const MAX_REFERENCE_RUNS = 20;
 /** A reference run's title is cut to this many characters. */
 const MAX_RUN_TITLE_CHARS = 80;
-/** A generation adds at most this many ideas. */
-export const MAX_NEW_IDEAS = 3;
 /** A provenance is cut to this many characters in the log. */
 const MAX_LOGGED_PROVENANCE_CHARS = 500;
 
@@ -260,8 +260,8 @@ function block(tag: string, heading: string, lines: string[]): string {
   return `${heading}\n<${tag}>\n${lines.length ? lines.join("\n") : "(none)"}\n</${tag}>`;
 }
 
-/** The user message of a generation: the day, and the inputs in tagged blocks, each marked as data. */
-export function ideasPrompt(inputs: IdeaInputs): string {
+/** The user message of a generation: the day, and the inputs in tagged blocks, each marked as data, then what is asked. */
+export function ideasPrompt(inputs: IdeaInputs, trigger: IdeaTrigger): string {
   const memories = inputs.memories.length
     ? [...inputs.memories.map(escapeTags), ...(inputs.memories.length < inputs.memoriesTotal ? [`(${inputs.memoriesTotal - inputs.memories.length} more memories are not listed)`] : [])]
     : [];
@@ -302,18 +302,27 @@ export function ideasPrompt(inputs: IdeaInputs): string {
       "What finished task and revision runs actually cost, newest first, to base your estimates on:",
       inputs.costs.map((cost) => jsonLine({ kind: cost.kind, title: cost.title, model: cost.model, costUsd: cost.costUsd })),
     ),
-    "Suggest up to three ideas, or none.",
+    trigger === "requested"
+      ? "The owner asked for ideas just now. Suggest one to three ideas: the best available, even if modest."
+      : "Suggest up to three ideas, or none.",
   ];
   return sections.join("\n\n");
 }
 
+/** How many ideas a generation is asked for: a requested one must give at least one, a daily one may give none. */
+function howMany(trigger: IdeaTrigger): string {
+  return trigger === "requested"
+    ? `The owner asked for ideas just now, so suggest at least one and at most ${MAX_NEW_IDEAS}: the best available, even if modest. Do not answer with none.`
+    : `Zero ideas is a good answer when nothing is worth suggesting. Suggest at most ${MAX_NEW_IDEAS}.`;
+}
+
 /** Alfred's own system prompt for a generation; the agent's is not used. The zone is the owner's. */
-export function ideasSystemPrompt(zone: string): string {
+export function ideasSystemPrompt(zone: string, trigger: IdeaTrigger): string {
   return `You come up with ideas for Alfred, a personal research assistant that works for one person, the owner, through an app. Alfred can search the web and read pages, read and write files in its workspace, and deliver what it writes as a document the owner reads and annotates. You read what Alfred knows about the owner and suggest work Alfred could do for them. The owner accepts an idea, which makes it a task, or turns it down.
 
 What to suggest:
 - Research or writing Alfred can do on its own, with its tools, for this owner, from what they care about and are working on: their memories, recent conversation, tasks and documents. Not a generic good idea.
-- Zero ideas is a good answer when nothing is worth suggesting. Suggest at most ${MAX_NEW_IDEAS}.
+- ${howMany(trigger)}
 - Research and writing only. An idea never has Alfred act outward: no messages, purchases, sign-ups or posts.
 - Do not repeat an open, accepted or archived idea, nor anything like a rejected one. An idea rejected as not-now may come back when circumstances have changed; the other reasons (not-interested, already-doing, too-expensive, wrong-direction) mean nothing like it.
 
@@ -325,7 +334,10 @@ How to write an idea:
 - kind: once for a single piece of work. recurring only when the value recurs, such as new material that keeps appearing; then give a schedule: daily at a time, weekly on chosen weekdays at a time, or every N hours. Times are in the owner's time zone, ${zone}; name it in the brief when it states a time. A once idea has no schedule.
 - model: the cheapest model that does the job. haiku or sonnet; opus only for long writing.
 - estimateUsd: your estimate of what one run costs, in USD, at most ${MAX_TASK_BUDGET_USD}. Base it on the reference costs of runs that really finished, not on a guess.
-- provenance: what the idea came from, for Alfred's log; the owner does not see it. Name the memories, the dates of the conversation, the tasks or the documents.`;
+- provenance: what the idea came from, for Alfred's log; the owner does not see it. Name the memories, the dates of the conversation, the tasks or the documents.
+
+How to write the note, which comes after the ideas:
+- note: one sentence in Simplified Chinese, at most ${MAX_IDEA_WHY_CHARS} characters, to the owner, on what this generation found. When you suggest nothing, say why. The owner reads it in the app.`;
 }
 
 /** The JSON schema of the answer. A recurring idea gives a schedule of one of three kinds; a once idea gives null. */
@@ -378,13 +390,21 @@ const IDEAS_JSON_SCHEMA = {
         additionalProperties: false,
       },
     },
+    note: { type: "string", description: "one sentence in Simplified Chinese for the owner on what this generation found; when it suggests nothing, why" },
   },
-  required: ["ideas"],
+  required: ["ideas", "note"],
   additionalProperties: false,
 };
 
+/** The schema of a generation's answer: a requested one must give at least one idea, a daily one may give none. */
+function ideasJsonSchema(trigger: IdeaTrigger) {
+  if (trigger === "daily") return IDEAS_JSON_SCHEMA;
+  const { ideas } = IDEAS_JSON_SCHEMA.properties;
+  return { ...IDEAS_JSON_SCHEMA, properties: { ...IDEAS_JSON_SCHEMA.properties, ideas: { ...ideas, minItems: 1 } } };
+}
+
 /** SDK options for one generation: no tools, no settings sources, no saved session, and the cap on its spend. */
-export function ideasOptions(abortController: AbortController): Options {
+export function ideasOptions(abortController: AbortController, trigger: IdeaTrigger): Options {
   return {
     model: MODELS.sonnet,
     // Not the workspace: the call has no tools and shares no project directory.
@@ -392,14 +412,14 @@ export function ideasOptions(abortController: AbortController): Options {
     env: agentEnv(),
     settingSources: [],
     settings: AGENT_SETTINGS,
-    systemPrompt: ideasSystemPrompt(Intl.DateTimeFormat().resolvedOptions().timeZone),
+    systemPrompt: ideasSystemPrompt(Intl.DateTimeFormat().resolvedOptions().timeZone, trigger),
     tools: [],
     allowedTools: [],
     permissionMode: "dontAsk",
     // The structured answer is delivered through a tool call, which takes a second turn.
     maxTurns: 3,
     maxBudgetUsd: IDEAS_BUDGET_USD,
-    outputFormat: { type: "json_schema", schema: IDEAS_JSON_SCHEMA },
+    outputFormat: { type: "json_schema", schema: ideasJsonSchema(trigger) },
     persistSession: false,
     abortController,
     stderr: (data) => log.debug(`ideas claude: ${data.trimEnd()}`),
@@ -417,7 +437,7 @@ const GeneratedIdeaSchema = z.object({
   estimateUsd: z.number(),
   provenance: z.string().default(""),
 });
-const GenerationSchema = z.object({ ideas: z.array(z.unknown()) });
+const GenerationSchema = z.object({ ideas: z.array(z.unknown()), note: z.string().refine((note) => note.trim() !== "", "must not be blank") });
 
 /** An idea the model proposed, and what it came from: the provenance is for the log only. */
 export interface GeneratedIdea {
@@ -427,6 +447,8 @@ export interface GeneratedIdea {
 
 export interface Generation {
   ideas: GeneratedIdea[];
+  /** The model's sentence for the owner on what the generation found, as one line of at most MAX_IDEA_WHY_CHARS characters. */
+  note: string;
   costUsd: number;
 }
 
@@ -483,19 +505,22 @@ export function draftsFrom(values: unknown[], runId: string): GeneratedIdea[] {
 
 export interface GenerateOptions {
   runId: string;
+  /** What started the generation: a requested one is asked for at least one idea, a daily one may give none. */
+  trigger: IdeaTrigger;
   abortController: AbortController;
   /** The SDK's query() by default; replaced in tests. */
   runQuery?: typeof query;
 }
 
 /**
- * Asks the model for ideas on the inputs. Resolves to the ideas that map onto drafts and what the call cost. Rejects
- * with IdeaGenerationFailed, carrying the cost, when the call ended without a success or its answer is malformed;
- * with the SDK's error when the call is aborted or breaks (no result, so no cost).
+ * Asks the model for ideas on the inputs. Resolves to the ideas that map onto drafts, the model's note and what the call
+ * cost. Rejects with IdeaGenerationFailed, carrying the cost, when the call ended without a success or its answer is
+ * malformed (a missing or blank note included); with the SDK's error when the call is aborted or breaks (no result, so
+ * no cost).
  */
-export async function generateIdeas(inputs: IdeaInputs, { runId, abortController, runQuery = query }: GenerateOptions): Promise<Generation> {
+export async function generateIdeas(inputs: IdeaInputs, { runId, trigger, abortController, runQuery = query }: GenerateOptions): Promise<Generation> {
   let result: SDKResultMessage | undefined;
-  for await (const message of runQuery({ prompt: ideasPrompt(inputs), options: ideasOptions(abortController) })) {
+  for await (const message of runQuery({ prompt: ideasPrompt(inputs, trigger), options: ideasOptions(abortController, trigger) })) {
     if (message.type === "result") result = message;
   }
   if (!result) throw new IdeaGenerationFailed("the call ended without a result", 0);
@@ -506,5 +531,5 @@ export async function generateIdeas(inputs: IdeaInputs, { runId, abortController
   }
   const answer = GenerationSchema.safeParse(result.structured_output);
   if (!answer.success) throw new IdeaGenerationFailed(`the call returned a malformed answer: ${problem(answer.error, "")}`, costUsd);
-  return { ideas: draftsFrom(answer.data.ideas, runId), costUsd };
+  return { ideas: draftsFrom(answer.data.ideas, runId), note: oneLine(answer.data.note, MAX_IDEA_WHY_CHARS), costUsd };
 }

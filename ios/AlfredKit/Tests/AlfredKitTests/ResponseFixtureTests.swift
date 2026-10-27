@@ -25,7 +25,8 @@ final class ResponseFixtureTests: XCTestCase {
                 case "idea-result.json": _ = try decoder.decode(IdeaResult.self, from: data)
                 case "idea-accepted.json": _ = try decoder.decode(IdeaAccepted.self, from: data)
                 case "idea-generation-accepted.json": _ = try decoder.decode(IdeaGenerationAccepted.self, from: data)
-                case "idea-list.json", "idea-list-empty.json": _ = try decoder.decode(IdeaList.self, from: data)
+                case "idea-list.json", "idea-list-empty.json", "idea-list-nothing-new.json", "idea-list-failed.json":
+                    _ = try decoder.decode(IdeaList.self, from: data)
                 case "error.json": _ = try decoder.decode(ErrorResponse.self, from: data)
                 default: XCTFail("\(name) has no response type")
                 }

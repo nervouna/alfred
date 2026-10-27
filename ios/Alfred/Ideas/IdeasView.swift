@@ -2,9 +2,9 @@ import AlfredKit
 import SwiftUI
 
 /// The 想法 tab: the open ideas, each with 采纳, 不要 and 讨论, a button that has Alfred think of ideas now, and the ideas
-/// that were accepted, rejected or archived collapsed below. The ideas come from the model, which keeps them current
-/// from the stream. Looking at the tab is what marks the open ideas seen (the model does that), which clears the tab's
-/// badge.
+/// that were accepted, rejected or archived collapsed below. When the last generation added no ideas, one line at the
+/// top says why, until the next generation starts. The ideas come from the model, which keeps them current from the
+/// stream. Looking at the tab is what marks the open ideas seen (the model does that), which clears the tab's badge.
 struct IdeasView: View {
     @Environment(AppModel.self) private var model
     @State private var showsHistory = false
@@ -23,6 +23,13 @@ struct IdeasView: View {
         let history = model.ideaCatalog.history
         NavigationStack {
             List {
+                if !isStarting, let line = model.ideaCatalog.generationLine {
+                    Text(line)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .accessibilityIdentifier("ideas.generationLine")
+                }
                 if let failure {
                     Label(failure, systemImage: "exclamationmark.triangle")
                         .font(.footnote)

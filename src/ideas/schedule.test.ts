@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { after, afterEach, mock, test } from "node:test";
 
-import type { IdeaGenerationAccepted } from "../api/schema.ts";
+import type { IdeaGenerationAccepted, IdeaTrigger } from "../api/schema.ts";
 import type { IdeaReply } from "../api/server.ts";
 import type { IdeaDraft } from "./store.ts";
 
@@ -57,9 +57,12 @@ function setup({ time = "08:00", start = at("07:00"), open = 0, file, replies }:
   const ideas = new IdeaStore({ file: path.join(dir, "ideas.json"), events: new EventLog(path.join(dir, "events.jsonl")), now: () => clock.now });
   if (open > 0) ideas.add(Array.from({ length: open }, (_, i) => ({ ...draft, title: `想法 ${i}` })), "k7m2qa");
   const calls: number[] = [];
+  /** What each call to `generate` was told started the generation. */
+  const triggers: IdeaTrigger[] = [];
   const queued = [...(replies ?? [])];
-  const generate = (): IdeaReply<IdeaGenerationAccepted> => {
+  const generate = (trigger: IdeaTrigger): IdeaReply<IdeaGenerationAccepted> => {
     calls.push(clock.now.getTime());
+    triggers.push(trigger);
     return queued.shift() ?? { ok: true, body: { runId: "k7m2qa" } };
   };
   const stop = startDailyIdeas({ at: time ?? undefined, ideas, generate, file: stateFile, now: () => clock.now });
@@ -79,7 +82,7 @@ function setup({ time = "08:00", start = at("07:00"), open = 0, file, replies }:
       return undefined;
     }
   };
-  return { clock, ideas, calls, generate, stop, tick, jump, stateFile, savedDay };
+  return { clock, ideas, calls, triggers, generate, stop, tick, jump, stateFile, savedDay };
 }
 
 /** The lines the log wrote while `fn` ran. */
@@ -100,6 +103,16 @@ test("it checks at startup and then every minute: not before the time, and when 
   s.tick(1); // 08:00:00 on the check
   assert.equal(s.calls.length, 1);
   assert.equal(s.calls[0], at("08:00").getTime());
+  s.stop();
+});
+
+test("the generation it starts is a daily one, on every day and on a retry after a refusal", () => {
+  const s = setup({ start: at("07:59"), replies: [{ ok: false, status: 409, error: "ideas are being generated" }] });
+  s.tick(MINUTE_MS); // refused
+  s.tick(MINUTE_MS); // started
+  s.jump(at("08:00", "2026-10-28"));
+  assert.equal(s.calls.length, 3);
+  assert.deepEqual(s.triggers, ["daily", "daily", "daily"]);
   s.stop();
 });
 

@@ -144,6 +144,30 @@ public struct IdeaState: ExtensibleString {
     public static let archived = IdeaState(rawValue: "archived")
 }
 
+/// How a generation of ideas ended: with an answer (done), or without one (failed).
+public struct IdeaGenerationStatus: ExtensibleString {
+    public let rawValue: String
+
+    public init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+
+    public static let done = IdeaGenerationStatus(rawValue: "done")
+    public static let failed = IdeaGenerationStatus(rawValue: "failed")
+}
+
+/// What started a generation of ideas: the owner asking for it, or the daily schedule.
+public struct IdeaTrigger: ExtensibleString {
+    public let rawValue: String
+
+    public init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+
+    public static let requested = IdeaTrigger(rawValue: "requested")
+    public static let daily = IdeaTrigger(rawValue: "daily")
+}
+
 /// Why the owner rejected an idea.
 public struct RejectionReason: ExtensibleString {
     public let rawValue: String

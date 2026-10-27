@@ -38,8 +38,8 @@ final class AppModelIdeasTests: XCTestCase {
         return (model, server)
     }
 
-    private func ideas(_ objects: [[String: Any]], generatingRunId: String? = nil) throws -> StubReply {
-        StubReply(chunks: [try TestData.ideaList(objects, generatingRunId: generatingRunId)])
+    private func ideas(_ objects: [[String: Any]], generatingRunId: String? = nil, lastGeneration: [String: Any]? = nil) throws -> StubReply {
+        StubReply(chunks: [try TestData.ideaList(objects, generatingRunId: generatingRunId, lastGeneration: lastGeneration)])
     }
 
     private func event(_ id: Int, _ idea: [String: Any]) throws -> EventStreamUpdate {
@@ -106,6 +106,84 @@ final class AppModelIdeasTests: XCTestCase {
         await model.refreshIdeas()
         XCTAssertNil(model.ideaFailure)
         XCTAssertTrue(model.ideaCatalog.hasLoaded)
+    }
+
+    // MARK: The line about the last generation
+
+    func testTheListsLastGenerationIsKeptAndSaysItsNote() async throws {
+        let (model, _) = try makeModel(list: [try ideas([], lastGeneration: TestData.generationObject(note: "最近的对话多是在测试功能，暂时没有值得提的。"))])
+        XCTAssertNil(model.ideaCatalog.generationLine)
+        await model.refreshIdeas()
+        XCTAssertEqual(model.ideaCatalog.generationLine, "最近的对话多是在测试功能，暂时没有值得提的。")
+    }
+
+    func testAFinishedGenerationRunReadsTheListAgainSoTheLineAppearsWithoutAReconnect() async throws {
+        let (model, server) = try makeModel(
+            updates: [
+                .connected,
+                .received(try TestData.generationEvent(1, run: "c9t5hq", status: "queued")),
+                .received(try TestData.generationEvent(2, run: "c9t5hq", status: "running")),
+                .received(try TestData.generationEvent(3, run: "c9t5hq", status: "done")),
+            ],
+            list: [
+                try ideas([TestData.ideaObject("aaaaaa")], generatingRunId: "c9t5hq"),
+                try ideas([TestData.ideaObject("aaaaaa")], lastGeneration: TestData.generationObject("c9t5hq", note: "这次没找到新的。")),
+            ]
+        )
+        model.foreground()
+
+        await eventually { model.ideaCatalog.generationLine == "这次没找到新的。" }
+        XCTAssertEqual(server.requests(to: "/api/ideas").count, 2, "once when the stream connected, once when the run ended")
+        XCTAssertFalse(model.ideaCatalog.isGenerating)
+    }
+
+    func testARunThatHasNotEndedAndRunsOfOtherKindsDoNotReadTheListAgain() async throws {
+        let (model, server) = try makeModel(updates: [
+            .connected,
+            .received(try TestData.generationEvent(1, run: "c9t5hq", status: "queued")),
+            .received(try TestData.generationEvent(2, run: "c9t5hq", status: "running")),
+            .received(try TestData.streamEvent(TestData.runEvent(3, run: TestData.runObject("r1", status: "done"), at: "2026-10-27T01:00:00.000Z"))),
+            try event(4, TestData.ideaObject("aaaaaa")),
+        ])
+        model.foreground()
+
+        await eventually { model.timeline.lastEventId == 4 }
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(server.requests(to: "/api/ideas").count, 1, "only the read when the stream connected")
+    }
+
+    func testAGenerationThatAddedIdeasLeavesNoLine() async throws {
+        let (model, _) = try makeModel(
+            updates: [
+                .connected,
+                .received(try TestData.generationEvent(1, run: "c9t5hq", status: "running")),
+                .received(try TestData.generationEvent(2, run: "c9t5hq", status: "done")),
+            ],
+            list: [
+                try ideas([], lastGeneration: TestData.generationObject("aaaaa2", note: "上一次没有。", endedAt: "2026-10-28T01:00:00.000Z")),
+                try ideas(
+                    [TestData.ideaObject("aaaaaa")],
+                    lastGeneration: TestData.generationObject("c9t5hq", added: 1, note: "想到一个。", endedAt: "2026-10-28T02:00:00.000Z")
+                ),
+            ]
+        )
+        model.foreground()
+
+        await eventually { model.ideaCatalog.lastGeneration?.runId == "c9t5hq" }
+        XCTAssertNil(model.ideaCatalog.generationLine)
+        XCTAssertEqual(model.ideaCatalog.open.map(\.id), ["aaaaaa"])
+    }
+
+    func testAnEndedGenerationIsReadOnceAgainForEachBurstOfEndsNotOncePerEnd() async throws {
+        let ends = try (1...6).map { EventStreamUpdate.received(try TestData.generationEvent($0, run: "c9t5h\($0)", status: "done")) }
+        let (model, server) = try makeModel(
+            updates: [.connected] + ends,
+            list: [try ideas([]), try ideas([], lastGeneration: TestData.generationObject("c9t5h6", note: "最后一次没有。"))]
+        )
+        model.foreground()
+
+        await eventually { model.ideaCatalog.generationLine == "最后一次没有。" }
+        XCTAssertLessThanOrEqual(server.requests(to: "/api/ideas").count, 3, "the read at the connection and at most two for the ends")
     }
 
     // MARK: A generation under way

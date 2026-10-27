@@ -1,11 +1,13 @@
 // The owner's ideas, in $STATE_DIR/workbench/ideas.json, which only this store writes. An idea is a suggestion Alfred
 // made from memory and recent conversations: open until the owner accepts it as a task or rejects it, or until it is
 // archived unanswered. Every change is written at once and appended to the event log as idea.updated with the whole
-// idea. Nothing here generates ideas, creates tasks or answers commands.
+// idea. The store also records the generation that is running and the outcome of the last one that ended, in the same
+// file and with no event: the app reads them with the list. Nothing here generates ideas, creates tasks or answers
+// commands.
 
 import path from "node:path";
 
-import { type Idea, type IdeaList, IdeaListSchema, IdeaSchema, type Rejection } from "../api/schema.ts";
+import { type Idea, type IdeaGeneration, IdeaGenerationSchema, type IdeaList, IdeaListSchema, IdeaSchema, type Rejection } from "../api/schema.ts";
 import { type EventLog, sharedEventLog } from "../events.ts";
 import { log } from "../log.ts";
 import { WORKBENCH_STATE_DIR, newRunId } from "../runs.ts";
@@ -21,6 +23,9 @@ export const MAX_CLOSED_IDEAS = 200;
 
 /** What a generation proposes: an idea before the store gives it an id, a state and its timestamps. */
 export type IdeaDraft = Pick<Idea, "title" | "why" | "brief" | "kind" | "schedule" | "model" | "estimateUsd">;
+
+/** How a generation ended, for the store to record: the contract's IdeaGeneration without the run and the time. */
+export type GenerationOutcome = Omit<IdeaGeneration, "runId" | "endedAt">;
 
 /** A change to an idea that is not open. Its message says the state the idea is in. */
 export class IdeaNotOpen extends Error {
@@ -43,6 +48,7 @@ export class IdeaStore {
   /** Newest created first. A change replaces an idea's object, so an idea returned earlier does not change. */
   private ideas: Idea[];
   private generating: string | undefined;
+  private last: IdeaGeneration | undefined;
 
   constructor({ file = IDEAS_FILE, events = sharedEventLog(), now = () => new Date() }: IdeaStoreOptions = {}) {
     this.file = file;
@@ -51,7 +57,8 @@ export class IdeaStore {
     const loaded = loadIdeas(file);
     this.ideas = loaded.ideas;
     this.generating = loaded.generatingRunId;
-    // A generation left in the file was cut short by a restart, so it is not running.
+    this.last = loaded.lastGeneration;
+    // A generation left in the file was cut short by a restart, so it is not running. The last outcome is left alone.
     if (this.generating !== undefined) this.save(this.ideas, [], undefined);
   }
 
@@ -66,6 +73,11 @@ export class IdeaStore {
   /** The run that is generating ideas, when one is. */
   generatingRunId(): string | undefined {
     return this.generating;
+  }
+
+  /** How the latest generation that ended (done or failed) ended; undefined when none has. */
+  lastGeneration(): IdeaGeneration | undefined {
+    return this.last;
   }
 
   /**
@@ -142,10 +154,15 @@ export class IdeaStore {
     this.save(this.ideas, [], runId);
   }
 
-  /** Clears the running generation when it is this run's. A run that is not recorded finishes nothing. */
-  finishGeneration(runId: string): void {
+  /**
+   * Clears the running generation when it is this run's, and records the outcome as the last generation, ended now. No
+   * outcome, as for a run that was lost, clears it and leaves the last one as it was. A run that is not recorded
+   * finishes nothing. An outcome the contract refuses throws and changes nothing. No event is logged.
+   */
+  finishGeneration(runId: string, outcome?: GenerationOutcome): void {
     if (this.generating !== runId) return;
-    this.save(this.ideas, [], undefined);
+    const last = outcome && IdeaGenerationSchema.parse({ runId, endedAt: this.now().toISOString(), ...outcome });
+    this.save(this.ideas, [], undefined, last ?? this.last);
   }
 
   /** The idea with the id when it is open; undefined when there is none, and IdeaNotOpen when it is closed. */
@@ -162,15 +179,16 @@ export class IdeaStore {
   }
 
   /**
-   * Checks the changed ideas, then writes the ideas and the running generation, pruned, and tells the log of each
-   * change. The list is kept in memory only once the file is written.
+   * Checks the changed ideas, then writes the ideas, pruned, the running generation and the last one, and tells the
+   * log of each change. The state is kept in memory only once the file is written.
    */
-  private save(ideas: Idea[], changed: Idea[], generating: string | undefined): void {
+  private save(ideas: Idea[], changed: Idea[], generating: string | undefined, last = this.last): void {
     for (const idea of changed) IdeaSchema.parse(idea);
     const kept = prune(ideas);
-    writeJson(this.file, { ideas: kept, ...(generating ? { generatingRunId: generating } : {}) });
+    writeJson(this.file, { ideas: kept, ...(generating ? { generatingRunId: generating } : {}), ...(last ? { lastGeneration: last } : {}) });
     this.ideas = kept;
     this.generating = generating;
+    this.last = last;
     for (const idea of changed) this.events.append("idea.updated", idea);
   }
 }
@@ -186,8 +204,8 @@ function prune(ideas: Idea[]): Idea[] {
 }
 
 /**
- * The ideas in the file, newest created first, and the generation a restart cut short, if any. A missing file holds
- * none. A file that is not an idea list is an error: starting over would lose the ideas.
+ * The ideas in the file, newest created first, the generation a restart cut short, if any, and the last outcome. A
+ * missing file holds none. A file that is not an idea list is an error: starting over would lose the ideas.
  */
 function loadIdeas(file: string): IdeaList {
   let raw: unknown;
@@ -204,5 +222,5 @@ function loadIdeas(file: string): IdeaList {
     throw new Error(`${file} is not an idea list: ${issue?.path.map(String).join(".") ?? ""} ${issue?.message ?? ""}`.trim());
   }
   const ideas = parsed.data.ideas.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
-  return { ideas, generatingRunId: parsed.data.generatingRunId };
+  return { ideas, generatingRunId: parsed.data.generatingRunId, lastGeneration: parsed.data.lastGeneration };
 }

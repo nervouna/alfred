@@ -190,17 +190,20 @@ test("reject records the reason, with the note when there is one, and answers 40
   assert.equal(updates.length, 2, "one idea.updated for each of the two rejections, and none for the refused ones");
 });
 
-test("generate answers 503 while no generation is wired in, and the generation's answer when one is", async () => {
+test("generate answers 503 while no generation is wired in, and the generation's answer when one is, started as a requested one", async () => {
   const unwired = open();
   assert.deepEqual(await unwired.commands.generate({ type: "idea.generate" }), { ok: false, status: 503, error: "idea generation is not available" });
 
   const seen: string[] = [];
   const wired = open({
-    generate(command) {
-      seen.push(command.type);
+    generate(trigger) {
+      seen.push(trigger);
       return { ok: true, body: { runId: "c9t5hq" } };
     },
   });
   assert.deepEqual(await wired.commands.generate({ type: "idea.generate" }), { ok: true, body: { runId: "c9t5hq" } });
-  assert.deepEqual(seen, ["idea.generate"]);
+  assert.deepEqual(seen, ["requested"]);
+
+  const refusing = open({ generate: () => ({ ok: false, status: 409, error: "ideas are being generated" }) });
+  assert.deepEqual(await refusing.commands.generate({ type: "idea.generate" }), { ok: false, status: 409, error: "ideas are being generated" });
 });

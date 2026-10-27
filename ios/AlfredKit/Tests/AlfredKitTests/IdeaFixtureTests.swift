@@ -93,6 +93,45 @@ final class IdeaFixtureTests: XCTestCase {
         XCTAssertNil(list.generatingRunId)
     }
 
+    func testIdeaListsWithoutALastGenerationHaveNone() throws {
+        XCTAssertNil(try decodeFixture(IdeaList.self, "responses/idea-list.json").lastGeneration)
+        XCTAssertNil(try decodeFixture(IdeaList.self, "responses/idea-list-empty.json").lastGeneration)
+    }
+
+    func testAListThatFoundNothingNewCarriesTheLastGenerationWithItsNote() throws {
+        let list = try decodeFixture(IdeaList.self, "responses/idea-list-nothing-new.json")
+        XCTAssertEqual(list.ideas, [])
+        XCTAssertNil(list.generatingRunId)
+        let generation = try XCTUnwrap(list.lastGeneration)
+        XCTAssertEqual(generation.runId, "w4k8ns")
+        XCTAssertEqual(generation.endedAt, Date(timeIntervalSince1970: 1_793_150_132))
+        XCTAssertEqual(generation.status, .done)
+        XCTAssertEqual(generation.trigger, .requested)
+        XCTAssertEqual(generation.added, 0)
+        XCTAssertEqual(generation.note, "最近的对话多是在测试功能，暂时没有值得提的。")
+    }
+
+    func testAFailedGenerationHasNoNoteAndSitsBesideTheOpenIdeas() throws {
+        let list = try decodeFixture(IdeaList.self, "responses/idea-list-failed.json")
+        XCTAssertEqual(list.ideas.map(\.id), ["h3v8ct"])
+        let generation = try XCTUnwrap(list.lastGeneration)
+        XCTAssertEqual(generation.runId, "x6p3dc")
+        XCTAssertEqual(generation.status, .failed)
+        XCTAssertEqual(generation.trigger, .daily)
+        XCTAssertEqual(generation.added, 0)
+        XCTAssertNil(generation.note)
+    }
+
+    func testAnUnknownGenerationStatusAndTriggerDecodeAsThemselves() throws {
+        let json = """
+        {"ideas":[],"lastGeneration":{"runId":"w4k8ns","endedAt":"2026-10-28T01:15:32.000Z","status":"cancelled","trigger":"weekly","added":2}}
+        """
+        let generation = try XCTUnwrap(try JSONDecoder().decode(IdeaList.self, from: Data(json.utf8)).lastGeneration)
+        XCTAssertEqual(generation.status.rawValue, "cancelled")
+        XCTAssertEqual(generation.trigger.rawValue, "weekly")
+        XCTAssertEqual(generation.added, 2)
+    }
+
     func testIdeaAcceptedIsTheIdeaAndTheTaskItMade() throws {
         let accepted = try decodeFixture(IdeaAccepted.self, "responses/idea-accepted.json")
         XCTAssertEqual(accepted.idea.state, .accepted)
