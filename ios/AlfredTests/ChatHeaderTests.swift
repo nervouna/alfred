@@ -59,6 +59,41 @@ final class ChatHeaderTests: XCTestCase {
         XCTAssertEqual(barBottom - avatarTop, 48, accuracy: 0.001)
     }
 
+    // MARK: The scrim
+
+    /// The scrim behind the bar is the system background colour, half opaque at the top edge of the screen and clear at
+    /// the bar's bottom edge.
+    func testTheScrimIsHalfOpaqueAtTheTopAndClearAtTheBottom() {
+        XCTAssertEqual(ChatHeader.scrimTopOpacity, 0.5)
+        XCTAssertEqual(ChatHeader.scrimBottomOpacity, 0)
+    }
+
+    /// The bar hosted in a window of the phone's size, over black, in the light appearance: the scrim is white over the
+    /// black, so its opacity is the red channel's value over 255. It is half opaque at the top edge of the screen, a quarter
+    /// of the way to clear at half the bar's height, clear at the bar's bottom edge, and there is nothing below the bar.
+    func testTheScrimRunsFromTheTopEdgeOfTheScreenToTheBarsBottomEdge() async throws {
+        let host = UIHostingController(rootView: ZStack(alignment: .top) {
+            Color.black.ignoresSafeArea()
+            ChatHeader(unpair: {})
+        })
+        host.overrideUserInterfaceStyle = .light
+        let window = try show(host)
+        window.overrideUserInterfaceStyle = .light
+        await settle()
+
+        let barBottom = window.safeAreaInsets.top + ChatHeader.barHeight
+        let picture = try XCTUnwrap(Self.pixels(of: snapshot(of: window)), "no snapshot of the window")
+        // A column at the screen's centre, where the bar has no buttons.
+        let column = Int(window.bounds.midX * Self.scale)
+        func opacity(atY y: CGFloat) -> Double {
+            Double(picture.bytes[(Int(y * Self.scale) * picture.width + column) * 4]) / 255
+        }
+        XCTAssertEqual(opacity(atY: 0.5), 0.5, accuracy: 0.02, "at the screen's top edge")
+        XCTAssertEqual(opacity(atY: barBottom / 2), 0.25, accuracy: 0.02, "halfway to the bar's bottom edge")
+        XCTAssertEqual(opacity(atY: barBottom - 0.5), 0, accuracy: 0.02, "at the bar's bottom edge")
+        XCTAssertEqual(opacity(atY: barBottom + 2), 0, accuracy: 0.02, "below the bar")
+    }
+
     // MARK: The chat on screen
 
     /// The real chat in a window of the phone's size: the avatar, found by its ring on the dark background, is 72 pt
@@ -101,38 +136,55 @@ final class ChatHeaderTests: XCTestCase {
         window.overrideUserInterfaceStyle = .dark
         await settle(1000)
 
-        let bounds = window.bounds
-        let scale = 3 as CGFloat
-        let format = UIGraphicsImageRendererFormat()
-        format.scale = scale
-        let image = UIGraphicsImageRenderer(bounds: bounds, format: format).image { _ in
-            window.drawHierarchy(in: bounds, afterScreenUpdates: true)
-        }
-        return try XCTUnwrap(Self.rows(of: image, around: bounds.midX, scale: scale), "no avatar in the snapshot")
+        return try XCTUnwrap(Self.rows(of: snapshot(of: window), around: window.bounds.midX, scale: Self.scale), "no avatar in the snapshot")
     }
 
     /// The first run of rows, in a thin column about `x`, whose pixels are not the black of the dark background.
     private static func rows(of image: UIImage, around x: CGFloat, scale: CGFloat) -> (top: CGFloat, bottom: CGFloat)? {
-        guard let cgImage = image.cgImage else { return nil }
-        let width = cgImage.width
-        let height = cgImage.height
-        var pixels = [UInt8](repeating: 0, count: width * height * 4)
-        guard let context = CGContext(
-            data: &pixels, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
-            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else { return nil }
-        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+        guard let picture = pixels(of: image) else { return nil }
         let column = Int(x * scale)
         func isAvatar(row: Int) -> Bool {
             (column - 6...column + 6).contains { c in
-                let i = (row * width + c) * 4
-                return Int(pixels[i]) + Int(pixels[i + 1]) + Int(pixels[i + 2]) > 60
+                let i = (row * picture.width + c) * 4
+                return Int(picture.bytes[i]) + Int(picture.bytes[i + 1]) + Int(picture.bytes[i + 2]) > 60
             }
         }
-        guard let first = (0..<height).first(where: isAvatar) else { return nil }
+        guard let first = (0..<picture.height).first(where: isAvatar) else { return nil }
         var last = first
-        while last + 1 < height, isAvatar(row: last + 1) { last += 1 }
+        while last + 1 < picture.height, isAvatar(row: last + 1) { last += 1 }
         return (CGFloat(first) / scale, CGFloat(last + 1) / scale)
+    }
+
+    /// The pixels of a snapshot: RGBA, four bytes to a pixel, `width` pixels to a row.
+    private struct Pixels {
+        let bytes: [UInt8]
+        let width: Int
+        let height: Int
+    }
+
+    private static func pixels(of image: UIImage) -> Pixels? {
+        guard let cgImage = image.cgImage else { return nil }
+        let width = cgImage.width
+        let height = cgImage.height
+        var bytes = [UInt8](repeating: 0, count: width * height * 4)
+        guard let context = CGContext(
+            data: &bytes, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
+            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return Pixels(bytes: bytes, width: width, height: height)
+    }
+
+    /// The pixels of a snapshot are this many to the point.
+    private static let scale: CGFloat = 3
+
+    /// A snapshot of the whole window, as the screen shows it.
+    private func snapshot(of window: UIWindow) -> UIImage {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = Self.scale
+        return UIGraphicsImageRenderer(bounds: window.bounds, format: format).image { _ in
+            window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+        }
     }
 
     // MARK: Windows
