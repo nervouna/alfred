@@ -8,29 +8,26 @@ struct ChatView: View {
 
     var body: some View {
         NavigationStack {
-            MessageList(model: model)
-                .safeAreaInset(edge: .top, spacing: 0) {
-                    if !model.isConnected {
-                        ConnectingBanner()
+            // The avatar hangs below the header: the list starts under it, or under the banner that sits there.
+            MessageList(model: model, topMargin: model.isConnected ? AvatarMetrics.hang : 0)
+                .safeAreaBar(edge: .top, spacing: 0) {
+                    VStack(spacing: 0) {
+                        ChatHeader(state: AvatarState(isWorking: model.runningChatRun != nil)) {
+                            confirmsUnpairing = true
+                        }
+                        // Above the banner, so that the avatar is not drawn under it.
+                        .zIndex(1)
+                        if !model.isConnected {
+                            ConnectingBanner(clearance: AvatarMetrics.hang)
+                        }
                     }
                 }
                 .safeAreaInset(edge: .bottom, spacing: 0) {
                     Composer(model: model)
                 }
+                // The header is drawn by hand. The title stays for the back button of the screens this one opens.
                 .navigationTitle("对话")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Menu {
-                            Button("取消配对", systemImage: "iphone.slash", role: .destructive) {
-                                confirmsUnpairing = true
-                            }
-                        } label: {
-                            Image(systemName: "ellipsis.circle")
-                        }
-                        .accessibilityLabel("更多")
-                    }
-                }
+                .toolbar(.hidden, for: .navigationBar)
                 .confirmationDialog("取消配对？", isPresented: $confirmsUnpairing, titleVisibility: .visible) {
                     Button("取消配对", role: .destructive) { model.unpair() }
                 }
@@ -38,7 +35,10 @@ struct ChatView: View {
     }
 }
 
+/// Says the stream is not connected, under the header. `clearance` keeps its text below the avatar that hangs over the top.
 private struct ConnectingBanner: View {
+    let clearance: CGFloat
+
     var body: some View {
         HStack(spacing: 8) {
             ProgressView()
@@ -47,7 +47,8 @@ private struct ConnectingBanner: View {
                 .font(.footnote)
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 6)
+        .padding(.top, clearance + 6)
+        .padding(.bottom, 6)
         .background(.bar)
     }
 }
@@ -56,6 +57,8 @@ private struct ConnectingBanner: View {
 /// writing. The list keeps to the bottom as content arrives.
 private struct MessageList: View {
     let model: AppModel
+    /// Space above the first message, for the avatar that hangs over the top of the list.
+    let topMargin: CGFloat
     /// The rows at least half on screen, by id.
     @State private var visibleIds: Set<String> = []
     private let bottom = "bottom"
@@ -88,6 +91,7 @@ private struct MessageList: View {
                 .padding(.vertical, 12)
                 .scrollTargetLayout()
             }
+            .contentMargins(.top, topMargin, for: .scrollContent)
             .defaultScrollAnchor(.bottom)
             .scrollDismissesKeyboard(.interactively)
             .onScrollTargetVisibilityChange(idType: String.self, threshold: 0.5) { visibleIds = Set($0) }
