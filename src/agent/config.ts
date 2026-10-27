@@ -83,6 +83,26 @@ export function checkMemoryScanSettings(): void {
   }
 }
 
+/** Spend cap for one generation of ideas. A typical one costs $0.05 to $0.10; the 1-hour cache write makes $0.10 too tight. */
+export const IDEAS_BUDGET_USD = 0.2;
+/** Unset means 08:00; empty turns the daily generation off. */
+const IDEAS_AT_SETTING = (process.env.ALFRED_IDEAS_AT ?? "08:00").trim();
+
+/** The time of day (HH:MM) a setting names; undefined for an empty one, which turns the daily generation off. Anything else throws. */
+export function parseIdeasAt(setting: string): string | undefined {
+  const value = setting.trim();
+  if (value === "") return undefined;
+  if (!/^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(value)) {
+    throw new Error(`ALFRED_IDEAS_AT must be a 24-hour time as HH:MM, or empty to turn the daily generation off, got "${setting}"`);
+  }
+  return value;
+}
+
+/** When the day's ideas are generated, in the owner's time zone: HH:MM from ALFRED_IDEAS_AT, undefined when it is off. Fails on an invalid setting. */
+export function ideasAt(): string | undefined {
+  return parseIdeasAt(IDEAS_AT_SETTING);
+}
+
 const WORKBENCH_URL_SETTING = process.env.ALFRED_WORKBENCH_URL?.trim() ?? "";
 /** Base URL of the workbench, for links in replies; empty means replies carry run ids only. */
 export const WORKBENCH_URL = WORKBENCH_URL_SETTING.replace(/\/+$/, "");

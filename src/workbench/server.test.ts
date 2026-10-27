@@ -130,6 +130,20 @@ test("no page shows a secret, and every response carries nosniff and a CSP", asy
   }
 });
 
+test("a run's card names a memory scan and a generation of ideas by their kind, where a task's names its model", async () => {
+  const scan = new RunRecorder({ kind: "scan", title: "scan card", model: "claude-haiku-5-5" });
+  scan.finish("done");
+  const ideas = new RunRecorder({ kind: "ideas", title: "ideas card", model: "claude-sonnet-5-5" });
+  ideas.finish("done");
+  const task = new RunRecorder({ kind: "task", title: "task card", model: "claude-sonnet-5-5" });
+  task.finish("done");
+  const meta = async (id: string) => /<div class="meta">([^<]*)/.exec(await (await fetch(`${open}/runs/${id}`)).text())?.[1] ?? "";
+
+  assert.match(await meta(scan.id), /^记忆扫描 · /);
+  assert.match(await meta(ideas.id), /^想法 · /);
+  assert.doesNotMatch(await meta(task.id), /^(记忆扫描|想法)/);
+});
+
 test("values from state and the workspace are escaped", async () => {
   const body = await (await fetch(`${open}/runs/${runId}`)).text();
   assert.ok(body.includes("&lt;b&gt;title&lt;/b&gt;"));

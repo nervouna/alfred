@@ -5,7 +5,7 @@ import path from "node:path";
 
 import qrcode from "qrcode-terminal";
 
-import { checkMemoryScanSettings } from "./agent/config.ts";
+import { checkMemoryScanSettings, ideasAt } from "./agent/config.ts";
 import { resolveInside } from "./agent/guard.ts";
 import { createAgentHandler } from "./agent/handler.ts";
 import { MEMORY_LOCK_FILE, describeScan, scanTranscripts } from "./agent/memory-scan.ts";
@@ -19,6 +19,7 @@ import { sharedEventLog } from "./events.ts";
 import { humanAge } from "./files.ts";
 import { startArchiving } from "./ideas/archive.ts";
 import { ideaCommands } from "./ideas/commands.ts";
+import { startDailyIdeas } from "./ideas/schedule.ts";
 import { IdeaStore } from "./ideas/store.ts";
 import { describeError, log, logToFile } from "./log.ts";
 import { BROWSERS_PATH, renderPdf } from "./pdf.ts";
@@ -70,11 +71,13 @@ function untilSignal(): Promise<void> {
   });
 }
 
-/** The assistant: the agent handler with the app as its channel, running the owner's tasks, behind the command API, and its memory scans. */
+/** The assistant: the agent handler with the app as its channel, running the owner's tasks, behind the command API, and its memory scans and daily ideas. */
 async function cmdRun(args: string[]): Promise<void> {
   if (args.length) throw new Error("usage: run");
   const socket = apiSocketPath();
   if (!socket) throw new Error("Alfred is reached through its command API, so ALFRED_API_SOCKET=off leaves it nothing to serve");
+  // A setting that is not a time fails here, before anything is opened.
+  const dailyIdeasAt = ideasAt();
   logToFile(LOG_FILE);
   const startedAt = new Date();
   // The one history of the workspace and the one document store, shared by the handler and its tools, and by whatever
@@ -85,7 +88,7 @@ async function cmdRun(args: string[]): Promise<void> {
   const tasks = new TaskStore();
   // The only idea store: it is the only writer of ideas.json, and the idea commands and the archiving use it.
   const ideas = new IdeaStore();
-  const agent = createAgentHandler({ out: appOutbound(), tasks, documents });
+  const agent = createAgentHandler({ out: appOutbound(), tasks, documents, ideas });
   let closeApi: () => Promise<void>;
   try {
     // Without documents the API answers every document command 503.
@@ -94,7 +97,7 @@ async function cmdRun(args: string[]): Promise<void> {
       handler: agent,
       events: sharedEventLog(),
       tasks: taskCommands(tasks, agent),
-      ideas: ideaCommands(ideas, tasks),
+      ideas: ideaCommands(ideas, tasks, { generate: () => agent.generateIdeas() }),
       ...(documents ? { documents: documentCommands(agent, documents) } : {}),
     });
   } catch (err) {
@@ -103,6 +106,8 @@ async function cmdRun(args: string[]): Promise<void> {
   }
   const stopHeartbeat = startHeartbeat(startedAt);
   const stopArchiving = startArchiving(ideas);
+  log.info(dailyIdeasAt ? `daily ideas at ${dailyIdeasAt}` : "daily ideas are off");
+  const stopDailyIdeas = startDailyIdeas({ at: dailyIdeasAt, ideas, generate: () => agent.generateIdeas() });
   log.info(`Alfred running: workspace=${WORKSPACE_DIR} api=${socket}`);
 
   await untilSignal();
@@ -111,6 +116,7 @@ async function cmdRun(args: string[]): Promise<void> {
   try {
     await closeApi();
   } finally {
+    stopDailyIdeas();
     stopArchiving();
     // Running tasks would keep their Claude Code processes alive until the container is killed.
     await agent.shutdown();
