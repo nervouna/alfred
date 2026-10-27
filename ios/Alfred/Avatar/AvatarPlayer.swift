@@ -76,7 +76,9 @@ struct AvatarResources {
 
 /// One of the two players the clips take turns on. A player that is given a new item draws nothing until the item's first
 /// frame is ready, so a clip that follows another one plays on the other player, and the first one keeps its last frame
-/// on screen until then.
+/// on screen until then. A lane's layer is on screen only while it has a frame: it is transparent from the start and goes
+/// on screen when its layer says the first frame is ready, and it leaves the screen when the lane is cleared. A layer that
+/// is on screen without a frame would cover the picture under the video with nothing.
 @MainActor
 final class AvatarLane {
     let player = AVPlayer()
@@ -89,12 +91,27 @@ final class AvatarLane {
         player.preventsDisplaySleepDuringVideoPlayback = false
         layer = AVPlayerLayer(player: player)
         layer.videoGravity = .resizeAspectFill
+        layer.opacity = 0
     }
 
-    /// Takes the clip away: the layer draws nothing.
+    /// Puts the layer on screen, once it has a frame.
+    func show() {
+        setOnScreen(true)
+    }
+
+    /// Takes the clip away: the layer is off screen and draws nothing.
     func clear() {
+        setOnScreen(false)
         player.pause()
         player.replaceCurrentItem(with: nil)
+    }
+
+    /// At once, not by the fade a layer's opacity would otherwise animate with.
+    private func setOnScreen(_ onScreen: Bool) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.opacity = onScreen ? 1 : 0
+        CATransaction.commit()
     }
 }
 
@@ -102,9 +119,10 @@ final class AvatarLane {
 /// the audio session, so music or a podcast from another app plays on undisturbed.
 ///
 /// - **The video** is drawn by two players' layers, one over the other (`AvatarPlayerSurface` puts them in the view). A
-///   clip plays on the player that is not on screen, and its layer goes on top. The layer draws nothing until the clip's
-///   first frame is ready, so the clip before it stays visible, and only once `isReadyForDisplay` says that the first
-///   frame is there is the old clip taken away. At no moment is there no frame.
+///   clip plays on the player that is not on screen, with its layer above the other's but off screen (transparent), so the
+///   clip before it, or the picture under the video, stays visible. Only once `isReadyForDisplay` says that the first frame
+///   is there does the layer go on screen, and in the same commit the old clip is taken away. A lane is on screen only with
+///   a frame: at no moment is there an empty layer over the picture, and at no moment neither a frame nor the picture.
 /// - **The picture under the video** is the pose the clip starts on while it plays (`still.png`, or `typing.png`), the
 ///   pose it ended on when it has ended, and the still at rest. It shows only where the video does not: before the first
 ///   clip, after a rest, and for a clip that cannot play. `AvatarClip.startPose` and `endPose` say which pose is which.
@@ -114,7 +132,7 @@ final class AvatarPlayer {
     /// How long a clip that cannot play is stood in for: the director waits this long before it goes on.
     static let standIn = Duration.seconds(2)
     /// How long a clip is given to draw its first frame. A layer that is not on a screen never does, and the clip then
-    /// takes the screen without having drawn.
+    /// takes the screen without having drawn (the one case in which a lane is on screen with no frame).
     static let firstFrameTimeout = Duration.seconds(1)
 
     /// The pose of the picture under the video.
@@ -204,7 +222,7 @@ final class AvatarPlayer {
     }
 
     /// Plays the file from the start on the player that is not on screen, puts it on screen once it has drawn its first
-    /// frame, and returns when it has played to its end or has failed to.
+    /// frame (until then whatever is under it shows), and returns when it has played to its end or has failed to.
     private func run(_ url: URL) async {
         let incoming = lanes[1 - onScreen]
         let outgoing = lanes[onScreen]
@@ -214,8 +232,8 @@ final class AvatarPlayer {
         let ends = center.notifications(named: AVPlayerItem.didPlayToEndTimeNotification, object: item)
         let failures = center.notifications(named: AVPlayerItem.failedToPlayToEndTimeNotification, object: item)
 
-        // The new clip's layer goes over the old one. It draws nothing until its first frame is ready, so the old
-        // clip's last frame shows through until then.
+        // The new clip's layer is above the old one but not on screen, so the old clip's last frame, or the picture under
+        // the video, shows until the new clip's first frame is ready.
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         incoming.layer.zPosition = 1
@@ -225,8 +243,12 @@ final class AvatarPlayer {
         incoming.player.play()
         await firstFrame(of: incoming.layer)
         guard !Task.isCancelled else { return }
-        // The new clip covers the old one now, and the old one can go.
+        // The new clip has a frame: it goes on screen, and the old one goes, in the same commit.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        incoming.show()
         outgoing.clear()
+        CATransaction.commit()
         onScreen = 1 - onScreen
 
         await withTaskGroup(of: Void.self) { group in
