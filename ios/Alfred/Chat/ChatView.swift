@@ -8,29 +8,24 @@ struct ChatView: View {
 
     var body: some View {
         NavigationStack {
-            MessageList(model: model)
-                .safeAreaInset(edge: .top, spacing: 0) {
-                    if !model.isConnected {
-                        ConnectingBanner()
+            // The avatar hangs below the bar: the list starts under it.
+            MessageList(model: model, topMargin: AvatarMetrics.hang)
+                // The bar holds only the two buttons and is as tall as the system's own, so its edge effect ends there.
+                .safeAreaBar(edge: .top, spacing: 0) {
+                    ChatHeader {
+                        confirmsUnpairing = true
                     }
+                }
+                // Over the bar and the list, and not in the bar's content: the bar's edge effect would cover it.
+                .overlay(alignment: .top) {
+                    ChatHeaderOverlay(state: AvatarState(isWorking: model.runningChatRun != nil), isConnected: model.isConnected)
                 }
                 .safeAreaInset(edge: .bottom, spacing: 0) {
                     Composer(model: model)
                 }
+                // The header is drawn by hand. The title stays for the back button of the screens this one opens.
                 .navigationTitle("对话")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Menu {
-                            Button("取消配对", systemImage: "iphone.slash", role: .destructive) {
-                                confirmsUnpairing = true
-                            }
-                        } label: {
-                            Image(systemName: "ellipsis.circle")
-                        }
-                        .accessibilityLabel("更多")
-                    }
-                }
+                .toolbar(.hidden, for: .navigationBar)
                 .confirmationDialog("取消配对？", isPresented: $confirmsUnpairing, titleVisibility: .visible) {
                     Button("取消配对", role: .destructive) { model.unpair() }
                 }
@@ -38,24 +33,12 @@ struct ChatView: View {
     }
 }
 
-private struct ConnectingBanner: View {
-    var body: some View {
-        HStack(spacing: 8) {
-            ProgressView()
-                .controlSize(.small)
-            Text("连接中…")
-                .font(.footnote)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 6)
-        .background(.bar)
-    }
-}
-
 /// The conversation: stored messages in timeline order, then the owner's pending ones, then what Alfred is
 /// writing. The list keeps to the bottom as content arrives.
 private struct MessageList: View {
     let model: AppModel
+    /// Space above the first message, for the avatar that hangs over the top of the list.
+    let topMargin: CGFloat
     /// The rows at least half on screen, by id.
     @State private var visibleIds: Set<String> = []
     private let bottom = "bottom"
@@ -88,6 +71,7 @@ private struct MessageList: View {
                 .padding(.vertical, 12)
                 .scrollTargetLayout()
             }
+            .contentMargins(.top, topMargin, for: .scrollContent)
             .defaultScrollAnchor(.bottom)
             .scrollDismissesKeyboard(.interactively)
             .onScrollTargetVisibilityChange(idType: String.self, threshold: 0.5) { visibleIds = Set($0) }
