@@ -658,7 +658,7 @@ test("GET /events streams the backlog, then live events, as server-sent events",
   assert.deepEqual(sse.ids(), [1, 2, 3]);
   assert.ok(sse.text().endsWith(`id: 3\nevent: message.created\ndata: ${JSON.stringify(live)}\n\n`));
   const first = events.readSince(0, 1)[0];
-  assert.ok(sse.text().startsWith(`id: 1\nevent: run.updated\ndata: ${JSON.stringify(first)}\n\n`), "the whole event on one line");
+  assert.ok(sse.text().startsWith(`: ping\n\nid: 1\nevent: run.updated\ndata: ${JSON.stringify(first)}\n\n`), "the whole event on one line, after the opening ping");
 });
 
 test("events appended while the backlog is read are neither skipped nor repeated", async (t) => {
@@ -720,6 +720,12 @@ test("an id that is not a non-negative integer gets 400", async (t) => {
   // Only the value in use is checked.
   const sse = await open(t, socket, "/events?after=x", { "Last-Event-ID": "0" });
   assert.equal(sse.status, 200);
+});
+
+test("a stream pings as it opens, so a client with nothing to catch up on gets a byte at once", async (t) => {
+  const { socket } = await start(t, { heartbeatMs: 60_000 });
+  const sse = await open(t, socket);
+  await until("the opening ping", () => sse.text() === ": ping\n\n");
 });
 
 test("a ping goes out on the heartbeat interval, which is 30 s by default", async (t) => {

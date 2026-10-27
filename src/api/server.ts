@@ -23,6 +23,7 @@ import type { DocumentResult, DocumentRevise, DocumentUndo, Event, LiveEvent, Re
 
 /** How often an event stream gets a `: ping` comment. */
 export const HEARTBEAT_MS = 30_000;
+const PING = ": ping\n\n";
 /** Events per page when a stream sends its backlog. */
 const BACKLOG_PAGE = 200;
 /** A client that lets this much pile up unread is dropped; it resumes by id when it reconnects. */
@@ -352,6 +353,9 @@ export async function startApi(opts: ApiOptions): Promise<() => Promise<void>> {
   async function stream(res: http.ServerResponse, after: number): Promise<void> {
     res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-store" });
     res.flushHeaders();
+    // A ping as the stream opens. A proxy in front, Cloudflare's, holds the response headers until the first body byte,
+    // so a client that resumes with nothing to catch up on would wait a whole heartbeat to learn it is connected.
+    res.write(PING);
     streams.add(res);
 
     let sent = after;
@@ -385,7 +389,7 @@ export async function startApi(opts: ApiOptions): Promise<() => Promise<void>> {
       } else if (live) send(event);
       else buffered.push(event);
     });
-    const timer = setInterval(() => write(": ping\n\n"), heartbeatMs);
+    const timer = setInterval(() => write(PING), heartbeatMs);
     res.on("drain", wake);
     res.once("close", () => {
       done = true;
