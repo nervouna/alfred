@@ -715,7 +715,7 @@ export const DocumentUndoSchema = z.strictObject({
 
 /**
  * Accepts an idea as a task. `title`, `brief`, `model` and `budgetUsd` are the task's, as the owner confirmed them in
- * the app's task form. A schedule makes the task recurring; without one it is a one-time task that runs at once.
+ * the app's task form. With a schedule the task runs on it; without one it is a one-time task that runs at once.
  */
 export const IdeaAcceptSchema = z.strictObject({
   type: z.literal("idea.accept"),
