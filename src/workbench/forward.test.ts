@@ -12,7 +12,7 @@ const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "alf-")));
 process.env.ALFRED_STATE_DIR = path.join(tmp, "state");
 process.env.ALFRED_WORKSPACE = path.join(tmp, "workspace");
 
-const { ErrorResponseSchema, MAX_COMMAND_BYTES, MAX_UPLOAD_BYTES, TaskResultSchema, UploadResultSchema, parseCommand } = await import("../api/schema.ts");
+const { ErrorResponseSchema, IdeaAcceptedSchema, IdeaGenerationAcceptedSchema, MAX_COMMAND_BYTES, MAX_UPLOAD_BYTES, TaskResultSchema, UploadResultSchema, parseCommand } = await import("../api/schema.ts");
 const { DeviceStore } = await import("./devices.ts");
 const { createHandler } = await import("./server.ts");
 
@@ -38,6 +38,9 @@ let eventsMode: "hold" | "end" | "break" = "hold";
 
 /** The TaskResult the fake answers a task.create with, as the commands fixture's task would come back. */
 const taskResultBody: unknown = JSON.parse(fs.readFileSync(new URL("../../fixtures/api/responses/task-result.json", import.meta.url), "utf8"));
+/** The IdeaAccepted and IdeaGenerationAccepted the fake answers an idea.accept and an idea.generate with. */
+const ideaAcceptedBody: unknown = JSON.parse(fs.readFileSync(new URL("../../fixtures/api/responses/idea-accepted.json", import.meta.url), "utf8"));
+const ideaGenerationBody: unknown = JSON.parse(fs.readFileSync(new URL("../../fixtures/api/responses/idea-generation-accepted.json", import.meta.url), "utf8"));
 
 /** The frames the fake sends on /events: one with an id, a ping, and a live event without one. */
 const FRAMES =
@@ -61,6 +64,9 @@ const upstream = http.createServer((req, res) => {
       const command = JSON.parse(body.toString("utf8")) as { type: string; runId?: string };
       if (command.type === "run.stop") return sendJson(res, 404, { error: `no live or queued run ${command.runId}` });
       if (command.type === "task.create") return sendJson(res, 201, taskResultBody);
+      if (command.type === "idea.accept") return sendJson(res, 200, ideaAcceptedBody);
+      if (command.type === "idea.reject") return sendJson(res, 409, { error: "the idea is accepted" });
+      if (command.type === "idea.generate") return sendJson(res, 202, ideaGenerationBody);
       return sendJson(res, 202, { accepted: true });
     }
     if (req.method === "POST" && url.pathname === "/uploads") {
@@ -199,6 +205,34 @@ test("a task.create is forwarded, and Alfred's 201 comes back with its task as i
   assert.deepEqual(await res.json(), taskResultBody);
   const sent = upstreamSeen.at(-1);
   assert.deepEqual(JSON.parse(sent?.body.toString("utf8") ?? ""), command);
+});
+
+test("an idea.accept is forwarded, and Alfred's 200 comes back with the idea and its task as they are", async () => {
+  assert.ok(IdeaAcceptedSchema.safeParse(ideaAcceptedBody).success, "the fake answers an IdeaAccepted");
+  const command = { type: "idea.accept", ideaId: "k4p9rx", title: "盯住供应商状态页", brief: "只报告新出现的故障。", model: "sonnet", budgetUsd: 1 };
+  const res = await fetch(`${open}/api/commands`, { method: "POST", headers: { ...bearer, "Content-Type": "application/json" }, body: JSON.stringify(command) });
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), ideaAcceptedBody);
+  const sent = upstreamSeen.at(-1);
+  assert.deepEqual(JSON.parse(sent?.body.toString("utf8") ?? ""), command);
+});
+
+test("an idea.reject is forwarded, and Alfred's 409 for an idea that is not open comes back", async () => {
+  const command = { type: "idea.reject", ideaId: "k4p9rx", reason: "not-now", note: "下周再说" };
+  const res = await fetch(`${open}/api/commands`, { method: "POST", headers: { ...bearer, "Content-Type": "application/json" }, body: JSON.stringify(command) });
+  assert.equal(res.status, 409);
+  assert.deepEqual(await res.json(), { error: "the idea is accepted" });
+  const sent = upstreamSeen.at(-1);
+  assert.deepEqual(JSON.parse(sent?.body.toString("utf8") ?? ""), command);
+});
+
+test("an idea.generate is forwarded, and Alfred's 202 comes back with the generation run", async () => {
+  assert.ok(IdeaGenerationAcceptedSchema.safeParse(ideaGenerationBody).success, "the fake answers an IdeaGenerationAccepted");
+  const res = await fetch(`${open}/api/commands`, { method: "POST", headers: { ...bearer, "Content-Type": "application/json" }, body: JSON.stringify({ type: "idea.generate" }) });
+  assert.equal(res.status, 202);
+  assert.deepEqual(await res.json(), ideaGenerationBody);
+  const sent = upstreamSeen.at(-1);
+  assert.deepEqual(JSON.parse(sent?.body.toString("utf8") ?? ""), { type: "idea.generate" });
 });
 
 test("an invalid command gets 400 with the parser's error line and never reaches Alfred", async () => {
