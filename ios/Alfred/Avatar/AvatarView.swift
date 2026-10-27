@@ -8,7 +8,8 @@ enum AvatarMetrics {
 }
 
 /// Alfred, the butler, in a round frame: a still at rest, short clips now and then while he stands by, and typing while
-/// he works on a chat run. Without the clips it shows the still, and without the still a navy circle with a person.
+/// he works on a chat run. Under the clips is the picture of the pose each one starts on (the still, or the typing pose);
+/// without the clips that picture is what shows, and without it a navy circle with a person.
 struct AvatarView: View {
     let state: AvatarState
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -21,8 +22,8 @@ struct AvatarView: View {
 
     var body: some View {
         ZStack {
-            resting
-            AvatarPlayerSurface(player: conductor.player.player)
+            underlay
+            AvatarPlayerSurface(layers: conductor.player.layers)
         }
         .frame(width: AvatarMetrics.diameter, height: AvatarMetrics.diameter)
         .clipShape(.circle)
@@ -44,8 +45,8 @@ struct AvatarView: View {
     }
 
     @ViewBuilder
-    private var resting: some View {
-        switch conductor.player.resting {
+    private var underlay: some View {
+        switch conductor.player.underlay {
         case let .still(image):
             Image(uiImage: image)
                 .resizable()
@@ -143,8 +144,8 @@ final class AvatarConductor {
             player.rest()
             return
         }
-        // Clips that follow one another keep the last frame of the one before until the next one draws; a pause shows
-        // the still, which is the pose every clip before a pause ends on.
+        // Clips that follow one another keep the last frame of the one before until the next one has drawn its first; a
+        // pause shows the still, which is the pose every clip before a pause ends on.
         if cue.at > clock.now { player.rest() }
         schedule(cue)
     }

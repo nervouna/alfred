@@ -2,16 +2,17 @@ import AVFoundation
 import SwiftUI
 import UIKit
 
-/// What the avatar shows. A clip that plays is `clip`; without one it falls back to the still, and without that to a navy
-/// circle with a person in it.
+/// What the avatar shows. A clip that plays is `clip`; without one it falls back to the picture of the pose the clip
+/// starts on (`still`, an image: the still or the typing pose), and without that to a navy circle with a person in it.
 enum AvatarPicture: Equatable {
     case clip(URL)
     case still(UIImage)
     case placeholder
 }
 
-/// Where the avatar's files are: `<name>.mp4` for each clip (`AvatarClip.resourceName`) and `still.png`, the resting
-/// picture. In the app they are bundle resources (`Alfred/Avatar/Clips/`); a file that is not there is not an error.
+/// Where the avatar's files are: `<name>.mp4` for each clip (`AvatarClip.resourceName`), `still.png`, the resting
+/// picture, and `typing.png`, the typing pose. In the app they are bundle resources (`Alfred/Avatar/Clips/`); a file that
+/// is not there is not an error.
 struct AvatarResources {
     private let folders: [URL]
 
@@ -34,18 +35,29 @@ struct AvatarResources {
 
     /// The still, or the placeholder when the file is missing or is not an image.
     func restingPicture() -> AvatarPicture {
-        if let url = find("still.png"), let image = UIImage(contentsOfFile: url.path) {
-            return .still(image)
-        }
-        return .placeholder
+        picture(of: .standing)
     }
 
-    /// What to show for a clip: the clip when its file is there and AVFoundation can play it, else the resting picture.
+    /// The picture of a pose: `still.png` for standing and `typing.png` for typing. A typing picture that is missing or
+    /// is not an image is the still, and a still that is missing or is not an image is the placeholder.
+    func picture(of pose: AvatarPose) -> AvatarPicture {
+        switch pose {
+        case .standing: image(named: "still.png").map(AvatarPicture.still) ?? .placeholder
+        case .typing: image(named: "typing.png").map(AvatarPicture.still) ?? picture(of: .standing)
+        }
+    }
+
+    /// What to show for a clip: the clip when its file is there and AVFoundation can play it, else the picture of the
+    /// pose it starts on.
     func picture(for clip: AvatarClip) async -> AvatarPicture {
         if let url = clipURL(for: clip), await Self.plays(url) {
             return .clip(url)
         }
-        return restingPicture()
+        return picture(of: clip.startPose)
+    }
+
+    private func image(named name: String) -> UIImage? {
+        find(name).flatMap { UIImage(contentsOfFile: $0.path) }
     }
 
     private func find(_ name: String) -> URL? {
@@ -62,68 +74,126 @@ struct AvatarResources {
     }
 }
 
-/// Plays one clip at a time on an `AVPlayer`, muted. The clips have no audio track, and nothing here touches the audio
-/// session, so music or a podcast from another app plays on undisturbed. The picture is the player's layer, which
-/// `AvatarPlayerSurface` shows over the resting picture.
+/// One of the two players the clips take turns on. A player that is given a new item draws nothing until the item's first
+/// frame is ready, so a clip that follows another one plays on the other player, and the first one keeps its last frame
+/// on screen until then.
 @MainActor
-final class AvatarPlayer {
-    /// How long a clip that cannot play is stood in for: the director waits this long before it goes on.
-    static let standIn = Duration.seconds(2)
+final class AvatarLane {
+    let player = AVPlayer()
+    let layer: AVPlayerLayer
 
-    private let resources: AvatarResources
-    private let standIn: Duration
-    private var task: Task<Void, Never>?
-    private var pictures: [AvatarClip: AvatarPicture] = [:]
-
-    /// Made when the first view asks for it, so that a view built and dropped makes none.
-    lazy var player: AVPlayer = {
-        let player = AVPlayer()
+    init() {
         player.isMuted = true
         player.actionAtItemEnd = .pause
         player.allowsExternalPlayback = false
         player.preventsDisplaySleepDuringVideoPlayback = false
-        return player
-    }()
+        layer = AVPlayerLayer(player: player)
+        layer.videoGravity = .resizeAspectFill
+    }
 
-    /// The picture at rest, under the video.
-    private(set) lazy var resting = resources.restingPicture()
+    /// Takes the clip away: the layer draws nothing.
+    func clear() {
+        player.pause()
+        player.replaceCurrentItem(with: nil)
+    }
+}
 
-    init(resources: AvatarResources = .bundled, standIn: Duration = AvatarPlayer.standIn) {
+/// Plays one clip at a time, muted, and keeps what is under it. The clips have no audio track, and nothing here touches
+/// the audio session, so music or a podcast from another app plays on undisturbed.
+///
+/// - **The video** is drawn by two players' layers, one over the other (`AvatarPlayerSurface` puts them in the view). A
+///   clip plays on the player that is not on screen, and its layer goes on top. The layer draws nothing until the clip's
+///   first frame is ready, so the clip before it stays visible, and only once `isReadyForDisplay` says that the first
+///   frame is there is the old clip taken away. At no moment is there no frame.
+/// - **The picture under the video** is the pose the clip starts on while it plays (`still.png`, or `typing.png`), the
+///   pose it ended on when it has ended, and the still at rest. It shows only where the video does not: before the first
+///   clip, after a rest, and for a clip that cannot play. `AvatarClip.startPose` and `endPose` say which pose is which.
+@MainActor
+@Observable
+final class AvatarPlayer {
+    /// How long a clip that cannot play is stood in for: the director waits this long before it goes on.
+    static let standIn = Duration.seconds(2)
+    /// How long a clip is given to draw its first frame. A layer that is not on a screen never does, and the clip then
+    /// takes the screen without having drawn.
+    static let firstFrameTimeout = Duration.seconds(1)
+
+    /// The pose of the picture under the video.
+    private(set) var pose = AvatarPose.standing
+
+    @ObservationIgnored private let resources: AvatarResources
+    @ObservationIgnored private let standIn: Duration
+    @ObservationIgnored private let firstFrameTimeout: Duration
+    @ObservationIgnored private var task: Task<Void, Never>?
+    @ObservationIgnored private var pictures: [AvatarClip: AvatarPicture] = [:]
+    @ObservationIgnored private var posePictures: [AvatarPose: AvatarPicture] = [:]
+    /// The index in `lanes` of the player whose clip is on screen.
+    @ObservationIgnored private var onScreen = 0
+
+    /// Made when the first view asks for them, so that a view built and dropped makes none.
+    @ObservationIgnored private(set) lazy var lanes = [AvatarLane(), AvatarLane()]
+
+    init(
+        resources: AvatarResources = .bundled,
+        standIn: Duration = AvatarPlayer.standIn,
+        firstFrameTimeout: Duration = AvatarPlayer.firstFrameTimeout
+    ) {
         self.resources = resources
         self.standIn = standIn
+        self.firstFrameTimeout = firstFrameTimeout
+    }
+
+    /// The two layers the video is drawn on, for `AvatarPlayerSurface`.
+    var layers: [AVPlayerLayer] {
+        lanes.map(\.layer)
+    }
+
+    /// The picture under the video.
+    var underlay: AvatarPicture {
+        let pose = self.pose
+        if let known = posePictures[pose] { return known }
+        let picture = resources.picture(of: pose)
+        posePictures[pose] = picture
+        return picture
     }
 
     /// Plays `clip` and calls `finished` when it ends. A clip whose file is missing or unreadable plays nothing: the
-    /// resting picture shows, and `finished` comes after the stand-in. Starting a clip ends the one in progress without
-    /// calling its `finished`.
+    /// picture of the pose it starts on shows, and `finished` comes after the stand-in. Starting a clip ends the one in
+    /// progress without calling its `finished`.
     func play(_ clip: AvatarClip, finished: @escaping @MainActor () -> Void) {
         task?.cancel()
+        // Under the clip is the pose it starts on, whatever is drawn over it by now.
+        pose = clip.startPose
         task = Task {
             let picture = await self.picture(for: clip)
             guard !Task.isCancelled else { return }
             if case let .clip(url) = picture {
                 await run(url)
             } else {
-                player.replaceCurrentItem(with: nil)
+                clearLanes()
                 try? await Task.sleep(for: standIn)
             }
             guard !Task.isCancelled else { return }
+            pose = clip.endPose
             finished()
         }
     }
 
-    /// Takes the video away so that the resting picture shows. The last frame of a clip that is not followed by another
-    /// at once is the resting pose, so the change cannot be seen.
+    /// Takes the video away and shows the still. A clip that ends on the resting pose and is not followed by another at
+    /// once leaves the last frame, the same pose, so the change cannot be seen.
     func rest() {
-        player.replaceCurrentItem(with: nil)
+        clearLanes()
+        pose = .standing
     }
 
-    /// Stops what plays, without calling its `finished`.
+    /// Stops what plays, without calling its `finished`, and shows the still.
     func stop() {
         task?.cancel()
         task = nil
-        player.pause()
         rest()
+    }
+
+    private func clearLanes() {
+        lanes.forEach { $0.clear() }
     }
 
     private func picture(for clip: AvatarClip) async -> AvatarPicture {
@@ -133,15 +203,32 @@ final class AvatarPlayer {
         return found
     }
 
-    /// Plays the file from the start and returns when it has played to its end or has failed to.
+    /// Plays the file from the start on the player that is not on screen, puts it on screen once it has drawn its first
+    /// frame, and returns when it has played to its end or has failed to.
     private func run(_ url: URL) async {
+        let incoming = lanes[1 - onScreen]
+        let outgoing = lanes[onScreen]
         let item = AVPlayerItem(url: url)
         let center = NotificationCenter.default
         // Made before the clip starts, so that an end that comes at once is not missed.
         let ends = center.notifications(named: AVPlayerItem.didPlayToEndTimeNotification, object: item)
         let failures = center.notifications(named: AVPlayerItem.failedToPlayToEndTimeNotification, object: item)
-        player.replaceCurrentItem(with: item)
-        player.play()
+
+        // The new clip's layer goes over the old one. It draws nothing until its first frame is ready, so the old
+        // clip's last frame shows through until then.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        incoming.layer.zPosition = 1
+        outgoing.layer.zPosition = 0
+        CATransaction.commit()
+        incoming.player.replaceCurrentItem(with: item)
+        incoming.player.play()
+        await firstFrame(of: incoming.layer)
+        guard !Task.isCancelled else { return }
+        // The new clip covers the old one now, and the old one can go.
+        outgoing.clear()
+        onScreen = 1 - onScreen
+
         await withTaskGroup(of: Void.self) { group in
             group.addTask { for await _ in ends { return } }
             group.addTask { for await _ in failures { return } }
@@ -149,30 +236,63 @@ final class AvatarPlayer {
             group.cancelAll()
         }
     }
+
+    /// Returns once the layer has a frame to show, or when `firstFrameTimeout` has passed.
+    private func firstFrame(of layer: AVPlayerLayer) async {
+        let frames = AsyncStream<Void> { continuation in
+            let observation = FrameObservation(layer) { continuation.yield() }
+            continuation.onTermination = { _ in observation.stop() }
+        }
+        let timeout = firstFrameTimeout
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { for await _ in frames { return } }
+            group.addTask { try? await Task.sleep(for: timeout) }
+            _ = await group.next()
+            group.cancelAll()
+        }
+    }
 }
 
-/// The player's layer, as a view: the video fills the square and the avatar's circle clips it.
-struct AvatarPlayerSurface: UIViewRepresentable {
-    let player: AVPlayer
+/// Calls `ready` when a layer's `isReadyForDisplay` is true: at once if it is already.
+private final class FrameObservation: @unchecked Sendable {
+    private var observation: NSKeyValueObservation?
 
-    func makeUIView(context: Context) -> PlayerLayerView {
-        let view = PlayerLayerView()
+    @MainActor
+    init(_ layer: AVPlayerLayer, ready: @escaping @Sendable () -> Void) {
+        observation = layer.observe(\.isReadyForDisplay, options: [.initial, .new]) { _, change in
+            if change.newValue == true { ready() }
+        }
+    }
+
+    func stop() {
+        observation?.invalidate()
+        observation = nil
+    }
+}
+
+/// The player's two layers, as a view: the video fills the square and the avatar's circle clips it.
+struct AvatarPlayerSurface: UIViewRepresentable {
+    let layers: [AVPlayerLayer]
+
+    func makeUIView(context: Context) -> LayerHostView {
+        let view = LayerHostView()
         view.backgroundColor = .clear
         view.isUserInteractionEnabled = false
         view.isAccessibilityElement = false
-        view.playerLayer.videoGravity = .resizeAspectFill
-        view.playerLayer.player = player
+        layers.forEach { view.layer.addSublayer($0) }
         return view
     }
 
-    func updateUIView(_ view: PlayerLayerView, context: Context) {}
+    func updateUIView(_ view: LayerHostView, context: Context) {}
 
-    final class PlayerLayerView: UIView {
-        override class var layerClass: AnyClass { AVPlayerLayer.self }
-
-        var playerLayer: AVPlayerLayer {
-            guard let layer = layer as? AVPlayerLayer else { preconditionFailure("layerClass is AVPlayerLayer") }
-            return layer
+    final class LayerHostView: UIView {
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            // The layers follow the view's size at once, not by an animation.
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            layer.sublayers?.forEach { $0.frame = bounds }
+            CATransaction.commit()
         }
     }
 }

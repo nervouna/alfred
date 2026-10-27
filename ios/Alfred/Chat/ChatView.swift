@@ -8,19 +8,17 @@ struct ChatView: View {
 
     var body: some View {
         NavigationStack {
-            // The avatar hangs below the header: the list starts under it, or under the banner that sits there.
-            MessageList(model: model, topMargin: model.isConnected ? AvatarMetrics.hang : 0)
+            // The avatar hangs below the bar: the list starts under it.
+            MessageList(model: model, topMargin: AvatarMetrics.hang)
+                // The bar holds only the two buttons and is as tall as the system's own, so its edge effect ends there.
                 .safeAreaBar(edge: .top, spacing: 0) {
-                    VStack(spacing: 0) {
-                        ChatHeader(state: AvatarState(isWorking: model.runningChatRun != nil)) {
-                            confirmsUnpairing = true
-                        }
-                        // Above the banner, so that the avatar is not drawn under it.
-                        .zIndex(1)
-                        if !model.isConnected {
-                            ConnectingBanner(clearance: AvatarMetrics.hang)
-                        }
+                    ChatHeader {
+                        confirmsUnpairing = true
                     }
+                }
+                // Over the bar and the list, and not in the bar's content: the bar's edge effect would cover it.
+                .overlay(alignment: .top) {
+                    ChatHeaderOverlay(state: AvatarState(isWorking: model.runningChatRun != nil), isConnected: model.isConnected)
                 }
                 .safeAreaInset(edge: .bottom, spacing: 0) {
                     Composer(model: model)
@@ -32,24 +30,6 @@ struct ChatView: View {
                     Button("取消配对", role: .destructive) { model.unpair() }
                 }
         }
-    }
-}
-
-/// Says the stream is not connected, under the header. `clearance` keeps its text below the avatar that hangs over the top.
-private struct ConnectingBanner: View {
-    let clearance: CGFloat
-
-    var body: some View {
-        HStack(spacing: 8) {
-            ProgressView()
-                .controlSize(.small)
-            Text("连接中…")
-                .font(.footnote)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.top, clearance + 6)
-        .padding(.bottom, 6)
-        .background(.bar)
     }
 }
 

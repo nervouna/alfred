@@ -29,6 +29,30 @@ enum AvatarClip: CaseIterable, Equatable {
     }
 }
 
+/// The two poses the clips start and end on. Each has a picture (`still.png` for `standing`, `typing.png` for `typing`)
+/// that is shown under the video, so that whatever the video does not cover is the pose it is on or going to.
+enum AvatarPose: Hashable {
+    case standing, typing
+}
+
+extension AvatarClip {
+    /// The pose of the clip's first frame, and so the picture under the clip.
+    var startPose: AvatarPose {
+        switch self {
+        case .blink, .smile, .yawn, .workStart: .standing
+        case .workLoop, .workEnd: .typing
+        }
+    }
+
+    /// The pose of the clip's last frame, which stays on screen until the next clip's first frame is there.
+    var endPose: AvatarPose {
+        switch self {
+        case .blink, .smile, .yawn, .workEnd: .standing
+        case .workStart, .workLoop: .typing
+        }
+    }
+}
+
 /// Seconds on a steady scale. The director only compares readings of it and adds pauses to them.
 protocol AvatarClock {
     var now: TimeInterval { get }
