@@ -142,14 +142,15 @@ final class IdeasUITests: XCTestCase {
         XCTAssertLessThan(now.frame.minX, app.buttons["每天"].frame.minX, "立即 does not lead the kinds")
         snapshot("4a-accept-once")
 
-        // Edit the brief to a two-line note, and take haiku with a cap of $0.30.
-        let brief = element("task.form.brief", in: app)
-        replaceText(in: brief, with: note, app: app, tappingAt: CGVector(dx: 0.9, dy: 0.9))
-        app.buttons["haiku"].tap()
+        // Take haiku and set the cap before the brief is edited, while no keyboard is up: a keyboard covers the model
+        // picker and the cap, and a tap on a field under it does not focus it. The brief sits above the keyboard, so it
+        // goes last.
+        tapWhenSettled(app.buttons["haiku"], in: app)
         replaceText(in: element("task.form.budget", in: app), with: "0.3", app: app)
+        replaceText(in: element("task.form.brief", in: app), with: note, app: app, tappingAt: CGVector(dx: 0.9, dy: 0.9))
         XCTAssertTrue(now.isSelected, "the kind changed while the form was edited")
         snapshot("4b-edited")
-        element("task.form.save", in: app).tap()
+        tapWhenSettled(element("task.form.save", in: app), in: app)
 
         // The task is in 任务 with what was typed, and runs once, a minute from now.
         XCTAssertTrue(element("task.brief", in: app).waitForExistence(timeout: patience), "the task's detail did not open\n\(app.debugDescription)")
@@ -192,7 +193,7 @@ final class IdeasUITests: XCTestCase {
         noteField.tap()
         noteField.typeText("先放着")
         snapshot("5b-note-sheet")
-        app.buttons["取消"].tap()
+        tapWhenSettled(app.buttons["取消"], in: app)
         XCTAssertTrue(send.waitForNonExistence(timeout: patience), "the sheet stayed open")
         XCTAssertTrue(cardExists(titled: dailyTitle, in: app), "cancelling the sheet closed the idea")
 
@@ -362,6 +363,52 @@ final class IdeasUITests: XCTestCase {
         }, "the element did not come to rest between the bars\n\(app.debugDescription)")
     }
 
+    /// Taps `target` once it is hittable and has kept the same frame over three looks in a row. A sheet that is still
+    /// moving when the tap is computed puts its buttons somewhere else: the 补充一句… sheet grows from medium to large
+    /// when the keyboard comes up, and a tap computed mid-move lands off 取消.
+    @MainActor
+    private func tapWhenSettled(_ target: XCUIElement, in app: XCUIApplication) {
+        XCTAssertTrue(target.waitForExistence(timeout: patience), "the element to tap is not there\n\(app.debugDescription)")
+        var previous: CGRect?
+        var steady = 0
+        let settled = wait(timeout: patience) {
+            let frame = target.frame
+            steady = (target.isHittable && frame == previous) ? steady + 1 : 0
+            previous = frame
+            return steady >= 3
+        }
+        XCTAssertTrue(settled, "the element did not come to rest and become hittable\n\(app.debugDescription)")
+        target.tap()
+    }
+
+    /// Scrolls the sheet's form until `field` lies between its navigation bar and the keyboard (or the bottom of the
+    /// screen when no keyboard is up), and waits for the scroll to stop. XCUITest counts a field under the keyboard as
+    /// hittable, so the frames decide: a tap there would land on the keyboard.
+    @MainActor
+    private func scrollClearOfKeyboard(_ field: XCUIElement, in app: XCUIApplication) {
+        let bar = app.navigationBars["采纳想法"]
+        XCTAssertTrue(bar.waitForExistence(timeout: patience), "the form has no navigation bar\n\(app.debugDescription)")
+        var previous: CGRect?
+        var steady = 0
+        let clear = wait(timeout: patience) {
+            let frame = field.frame
+            let keyboard = app.keyboards.firstMatch
+            let bottom = keyboard.exists ? keyboard.frame.minY : app.frame.maxY
+            if frame.minY < bar.frame.maxY {
+                app.swipeDown()
+                steady = 0
+            } else if frame.maxY > bottom {
+                app.swipeUp()
+                steady = 0
+            } else {
+                steady = frame == previous ? steady + 1 : 0
+            }
+            previous = frame
+            return steady >= 2
+        }
+        XCTAssertTrue(clear, "the field did not scroll clear of the keyboard\n\(app.debugDescription)")
+    }
+
     /// Puts `text` in a field in place of what it holds. A field the keyboard covers (the one from the field typed in
     /// before) is scrolled clear of it first: a tap on the keyboard focuses nothing. The tap lands at `offset` in the
     /// field, past the end of the text for the brief, so the cursor does too.
@@ -372,11 +419,7 @@ final class IdeasUITests: XCTestCase {
         app: XCUIApplication,
         tappingAt offset: CGVector = CGVector(dx: 0.5, dy: 0.5)
     ) {
-        var swipes = 0
-        while !field.isHittable, swipes < 6 {
-            app.swipeUp()
-            swipes += 1
-        }
+        scrollClearOfKeyboard(field, in: app)
         field.coordinate(withNormalizedOffset: offset).tap()
         let held = (field.value as? String)?.count ?? 0
         field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: held) + text)
