@@ -266,7 +266,9 @@ final class AvatarPlayerTests: XCTestCase {
         await fulfillment(of: [first], timeout: 10)
         XCTAssertTrue(player.layers.contains { $0.isReadyForDisplay }, "the first clip never drew a frame, so the seam cannot be checked")
 
-        // From the end of the first clip until after the last one has started, a frame is always on screen.
+        // From the end of the first clip until after the last one has started, a frame is always on screen, and no lane
+        // is on screen without one.
+        let screen = ScreenWatch(player)
         var gaps = 0
         var samples = 0
         let watch = Task { @MainActor in
@@ -283,9 +285,13 @@ final class AvatarPlayerTests: XCTestCase {
         player.play(.workEnd) { third.fulfill() }
         await fulfillment(of: [third], timeout: 10)
         watch.cancel()
+        let seen = screen.stop()
 
         XCTAssertGreaterThan(samples, 100, "the watch ran")
         XCTAssertEqual(gaps, 0, "a frame was missing in \(gaps) of \(samples) samples across the seams")
+        XCTAssertEqual(seen.loading, 0, "a lane was on screen before it had its first frame (\(seen))")
+        XCTAssertEqual(seen.cleared, 0, "an empty lane was on screen (\(seen))")
+        XCTAssertEqual(seen.blank, 0, "neither the picture nor a frame was there (\(seen))")
         XCTAssertTrue(player.layers.contains { $0.isReadyForDisplay }, "the last frame of the last clip stays")
     }
 
@@ -315,6 +321,70 @@ final class AvatarPlayerTests: XCTestCase {
         await fulfillment(of: [second], timeout: 10)
         watch.cancel()
         XCTAssertEqual(takenAway, true, "the first clip left its player before the second one had drawn (nil: it never left)")
+    }
+
+    // MARK: Starting and ending a clip at rest
+
+    /// A clip that starts from rest: the circle shows the picture under the video until the clip's first frame is drawn,
+    /// and from then on that frame. A lane is on screen only once it has a frame, so at no sample is there a lane on
+    /// screen that has none (it would cover the picture with nothing), and at no sample is there neither the picture nor a
+    /// frame. The real clips and pictures, played through the avatar's own surface in a window.
+    func testRestToEachIdleClipShowsThePictureThenTheFirstFrameNeverAnEmptyLane() async throws {
+        let player = AvatarPlayer()
+        let window = try showWindow(AvatarPlayerSurface(layers: player.layers).frame(width: 180, height: 180))
+        defer { window.isHidden = true }
+
+        for clip in [AvatarClip.blink, .smile, .yawn, .workStart] {
+            player.rest()
+            XCTAssertTrue(player.lanes.allSatisfy { !$0.isOnScreen }, "\(clip): at rest no lane is on screen")
+            try await Task.sleep(for: .milliseconds(200))
+
+            let watch = ScreenWatch(player)
+            let ended = expectation(description: "\(clip) ended")
+            player.play(clip) { ended.fulfill() }
+            await fulfillment(of: [ended], timeout: 15)
+            let seen = watch.stop()
+
+            XCTAssertGreaterThan(seen.samples, 100, "\(clip): the watch ran")
+            XCTAssertGreaterThan(seen.drawn, 0, "\(clip): the clip never drew a frame, so the start cannot be checked")
+            XCTAssertGreaterThan(seen.pictureOnly, 0, "\(clip): the picture was never on its own, so the start was not sampled")
+            XCTAssertEqual(seen.loading, 0, "\(clip): a lane was on screen before it had its first frame (\(seen))")
+            XCTAssertEqual(seen.cleared, 0, "\(clip): an empty lane was on screen (\(seen))")
+            XCTAssertEqual(seen.blank, 0, "\(clip): neither the picture nor a frame was there (\(seen))")
+        }
+    }
+
+    /// A clip that ends and the avatar goes back to rest (the conductor's `rest()` when a pause follows): the last frame
+    /// gives way to the picture, and at no sample is there an empty lane on screen or neither the picture nor a frame.
+    func testEachIdleClipBackToRestShowsAFrameThenThePictureNeverAnEmptyLane() async throws {
+        let player = AvatarPlayer()
+        let window = try showWindow(AvatarPlayerSurface(layers: player.layers).frame(width: 180, height: 180))
+        defer { window.isHidden = true }
+
+        for clip in [AvatarClip.blink, .smile, .yawn, .workStart] {
+            player.rest()
+            try await Task.sleep(for: .milliseconds(200))
+
+            let watch = ScreenWatch(player)
+            let ended = expectation(description: "\(clip) ended")
+            player.play(clip) {
+                // From here on the clip is over: count what is on screen as the avatar goes back to rest.
+                watch.reset()
+                player.rest()
+                ended.fulfill()
+            }
+            await fulfillment(of: [ended], timeout: 15)
+            try await Task.sleep(for: .milliseconds(300))
+            let seen = watch.stop()
+
+            XCTAssertGreaterThan(seen.samples, 50, "\(clip): the watch ran")
+            XCTAssertGreaterThan(seen.pictureOnly, 50, "\(clip): the picture shows after the rest (\(seen))")
+            XCTAssertEqual(seen.drawn, 0, "\(clip): no frame stays on screen after the rest (\(seen))")
+            XCTAssertEqual(seen.loading, 0, "\(clip): a lane with a clip was on screen without a frame (\(seen))")
+            XCTAssertEqual(seen.cleared, 0, "\(clip): an empty lane was on screen (\(seen))")
+            XCTAssertEqual(seen.blank, 0, "\(clip): neither the picture nor a frame was there (\(seen))")
+            XCTAssertTrue(player.lanes.allSatisfy { !$0.isOnScreen }, "\(clip): at rest no lane is on screen")
+        }
     }
 
     // MARK: Files
@@ -392,5 +462,78 @@ final class AvatarPlayerTests: XCTestCase {
         input.markAsFinished()
         await writer.finishWriting()
         XCTAssertEqual(writer.status, .completed, "\(String(describing: writer.error))")
+    }
+}
+
+private extension AvatarLane {
+    /// Whether the lane's layer is on screen: in the layer tree, not hidden and not transparent. Whatever is on it, a video
+    /// frame or nothing, covers what is under it.
+    var isOnScreen: Bool {
+        layer.superlayer != nil && !layer.isHidden && layer.opacity > 0
+    }
+}
+
+/// Looks at what the avatar's circle shows every millisecond or so, from the layers of a player in a window: whether a
+/// video frame is on screen (a lane that is on screen and has drawn its first frame), whether only the picture under the
+/// video is, and whether a lane is on screen that has no frame, which covers the picture with nothing.
+@MainActor
+private final class ScreenWatch {
+    struct Counts: CustomStringConvertible {
+        var samples = 0
+        /// A video frame is on screen.
+        var drawn = 0
+        /// No frame is, and the picture under the video is.
+        var pictureOnly = 0
+        /// A lane that has a clip is on screen without its first frame.
+        var loading = 0
+        /// A lane that has no clip is on screen.
+        var cleared = 0
+        /// Neither a frame nor the picture.
+        var blank = 0
+
+        var description: String {
+            "\(samples) samples: \(drawn) with a frame, \(pictureOnly) with the picture alone, \(loading) with a lane on screen before its first frame, \(cleared) with an empty lane on screen, \(blank) with nothing"
+        }
+    }
+
+    private(set) var counts = Counts()
+    private var task: Task<Void, Never>?
+
+    init(_ player: AvatarPlayer) {
+        task = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                self?.sample(player)
+                try? await Task.sleep(for: .milliseconds(1))
+            }
+        }
+    }
+
+    /// Starts the counts again from here.
+    func reset() {
+        counts = Counts()
+    }
+
+    /// Stops looking and returns what was seen.
+    func stop() -> Counts {
+        task?.cancel()
+        task = nil
+        return counts
+    }
+
+    private func sample(_ player: AvatarPlayer) {
+        let shown = player.lanes.filter(\.isOnScreen)
+        let hasFrame = shown.contains { $0.layer.isReadyForDisplay }
+        var hasPicture = false
+        if case .still = player.underlay { hasPicture = true }
+        counts.samples += 1
+        if hasFrame {
+            counts.drawn += 1
+        } else if hasPicture {
+            counts.pictureOnly += 1
+        } else {
+            counts.blank += 1
+        }
+        if shown.contains(where: { !$0.layer.isReadyForDisplay && $0.player.currentItem != nil }) { counts.loading += 1 }
+        if shown.contains(where: { !$0.layer.isReadyForDisplay && $0.player.currentItem == nil }) { counts.cleared += 1 }
     }
 }
