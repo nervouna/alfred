@@ -144,9 +144,9 @@ final class IdeasUITests: XCTestCase {
 
         // Edit the brief to a two-line note, and take haiku with a cap of $0.30.
         let brief = element("task.form.brief", in: app)
-        replaceText(in: brief, with: note, tappingAt: CGVector(dx: 0.9, dy: 0.9))
+        replaceText(in: brief, with: note, app: app, tappingAt: CGVector(dx: 0.9, dy: 0.9))
         app.buttons["haiku"].tap()
-        replaceText(in: element("task.form.budget", in: app), with: "0.3")
+        replaceText(in: element("task.form.budget", in: app), with: "0.3", app: app)
         XCTAssertTrue(now.isSelected, "the kind changed while the form was edited")
         snapshot("4b-edited")
         element("task.form.save", in: app).tap()
@@ -362,9 +362,21 @@ final class IdeasUITests: XCTestCase {
         }, "the element did not come to rest between the bars\n\(app.debugDescription)")
     }
 
-    /// Puts `text` in a field in place of what it holds. The tap lands past the end of the text, so the cursor does too.
+    /// Puts `text` in a field in place of what it holds. A field the keyboard covers (the one from the field typed in
+    /// before) is scrolled clear of it first: a tap on the keyboard focuses nothing. The tap lands at `offset` in the
+    /// field, past the end of the text for the brief, so the cursor does too.
     @MainActor
-    private func replaceText(in field: XCUIElement, with text: String, tappingAt offset: CGVector = CGVector(dx: 0.5, dy: 0.5)) {
+    private func replaceText(
+        in field: XCUIElement,
+        with text: String,
+        app: XCUIApplication,
+        tappingAt offset: CGVector = CGVector(dx: 0.5, dy: 0.5)
+    ) {
+        var swipes = 0
+        while !field.isHittable, swipes < 6 {
+            app.swipeUp()
+            swipes += 1
+        }
         field.coordinate(withNormalizedOffset: offset).tap()
         let held = (field.value as? String)?.count ?? 0
         field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: held) + text)
