@@ -1,0 +1,16 @@
+{
+  "idea": {
+    "id": "h3v8ct",
+    "title": "对比三家 VPS 的带宽配额",
+    "why": "上一份价格报告没有写带宽，你在对话里问过这件事。",
+    "brief": "查 Hetzner、Vultr 和 DigitalOcean 官网的带宽与流量政策，整理成一张表，附上来源链接。",
+    "kind": "once",
+    "model": "sonnet",
+    "estimateUsd": 0.35,
+    "state": "open",
+    "taskId": "n2c7bq",
+    "runId": "v7c2mb",
+    "createdAt": "2026-10-27T01:12:04.000Z",
+    "updatedAt": "2026-10-27T01:12:04.000Z"
+  }
+}

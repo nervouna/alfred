@@ -1,0 +1,13 @@
+{
+  "type": "idea.accept",
+  "ideaId": "d6n2gs",
+  "title": "每日追踪 VPS 价格变化",
+  "brief": "每天 09:00 看一次 Hetzner、Vultr 和 DigitalOcean 的定价页。",
+  "schedule": {
+    "kind": "daily",
+    "time": "09:00",
+    "day": 1
+  },
+  "model": "sonnet",
+  "budgetUsd": 0.5
+}

@@ -7,8 +7,23 @@ import path from "node:path";
 import { after, test } from "node:test";
 import type { TestContext } from "node:test";
 
-import type { DocumentResult, DocumentRevise, DocumentUndo, Run, RevisionAccepted, TaskCreate, TaskResult, TaskUpdate } from "./schema.ts";
-import type { DocumentCommands, DocumentReply, TaskCommands, TaskReply } from "./server.ts";
+import type {
+  DocumentResult,
+  DocumentRevise,
+  DocumentUndo,
+  IdeaAccept,
+  IdeaAccepted,
+  IdeaGenerate,
+  IdeaGenerationAccepted,
+  IdeaReject,
+  IdeaResult,
+  Run,
+  RevisionAccepted,
+  TaskCreate,
+  TaskResult,
+  TaskUpdate,
+} from "./schema.ts";
+import type { DocumentCommands, DocumentReply, IdeaCommands, IdeaReply, TaskCommands, TaskReply } from "./server.ts";
 import type { Inbound } from "../channels.ts";
 import type { EventLog as EventLogType } from "../events.ts";
 
@@ -96,7 +111,7 @@ let fixtures = 0;
 /** An API on a socket of its own, with a stub handler and an event log of its own. */
 async function start(
   t: TestContext,
-  opts: { heartbeatMs?: number; pageSize?: number; tasks?: TaskCommands; documents?: DocumentCommands } = {},
+  opts: { heartbeatMs?: number; pageSize?: number; tasks?: TaskCommands; documents?: DocumentCommands; ideas?: IdeaCommands } = {},
 ) {
   const dir = path.join(tmp, `t${fixtures++}`);
   const socket = path.join(dir, "api", "a.sock");
@@ -634,6 +649,104 @@ test("a document command that does not fit the schema gets 400 and never reaches
   }
   assert.deepEqual(documents.revised, []);
   assert.deepEqual(documents.undone, []);
+});
+
+// --- Idea commands ------------------------------------------------------------
+
+const ideaAccepted = JSON.parse(fixture("responses", "idea-accepted.json")) as IdeaAccepted;
+const ideaResult = JSON.parse(fixture("responses", "idea-result.json")) as IdeaResult;
+const ideaGenerationAccepted = JSON.parse(fixture("responses", "idea-generation-accepted.json")) as IdeaGenerationAccepted;
+const IDEA_COMMANDS = ["idea-accept-once.json", "idea-accept-recurring.json", "idea-reject.json", "idea-reject-no-note.json", "idea-generate.json"];
+
+/** Stands in for the ideas service: records the commands it is given, and refuses with `refuse` when it is set. */
+function stubIdeas() {
+  const ideas = {
+    accepted: [] as IdeaAccept[],
+    rejected: [] as IdeaReject[],
+    generated: [] as IdeaGenerate[],
+    refuse: undefined as Extract<IdeaReply<unknown>, { ok: false }> | undefined,
+    async accept(command: IdeaAccept): Promise<IdeaReply<IdeaAccepted>> {
+      ideas.accepted.push(command);
+      return ideas.refuse ?? { ok: true, body: ideaAccepted };
+    },
+    async reject(command: IdeaReject): Promise<IdeaReply<IdeaResult>> {
+      ideas.rejected.push(command);
+      return ideas.refuse ?? { ok: true, body: ideaResult };
+    },
+    async generate(command: IdeaGenerate): Promise<IdeaReply<IdeaGenerationAccepted>> {
+      ideas.generated.push(command);
+      return ideas.refuse ?? { ok: true, body: ideaGenerationAccepted };
+    },
+  };
+  return ideas;
+}
+
+test("each idea command fixture gets 503 until ideas are wired in, and never reaches the handler", async (t) => {
+  const { socket, handler } = await start(t);
+  for (const name of IDEA_COMMANDS) {
+    const reply = await post(socket, fixture("commands", name));
+    assert.equal(reply.status, 503, name);
+    assert.deepEqual(reply.json(), { error: "ideas are not available" }, name);
+  }
+  assert.equal(handler.submitted.length, 0, "an idea command never reaches the message path");
+  assert.deepEqual(handler.stopped, []);
+  assert.deepEqual(handler.answered, []);
+});
+
+test("idea.accept, idea.reject and idea.generate reach the ideas service as parsed commands, and answer 200, 200 and 202", async (t) => {
+  const ideas = stubIdeas();
+  const { socket, handler } = await start(t, { ideas });
+  const accepted = await post(socket, fixture("commands", "idea-accept-once.json"));
+  assert.equal(accepted.status, 200);
+  assert.deepEqual(accepted.json(), ideaAccepted);
+  const recurring = await post(socket, fixture("commands", "idea-accept-recurring.json"));
+  assert.equal(recurring.status, 200);
+  const rejected = await post(socket, fixture("commands", "idea-reject.json"));
+  assert.equal(rejected.status, 200);
+  assert.deepEqual(rejected.json(), ideaResult);
+  const generated = await post(socket, fixture("commands", "idea-generate.json"));
+  assert.equal(generated.status, 202);
+  assert.deepEqual(generated.json(), ideaGenerationAccepted);
+
+  assert.deepEqual(ideas.accepted, [parsedCommand("idea-accept-once.json"), parsedCommand("idea-accept-recurring.json")]);
+  assert.deepEqual(ideas.rejected, [parsedCommand("idea-reject.json")]);
+  assert.deepEqual(ideas.generated, [parsedCommand("idea-generate.json")]);
+  assert.equal(handler.submitted.length, 0, "an idea command never reaches the message path");
+});
+
+test("an idea reply that is not ok answers its status and its error", async (t) => {
+  const ideas = stubIdeas();
+  const { socket } = await start(t, { ideas });
+  ideas.refuse = { ok: false, status: 404, error: "no idea h3v8ct" };
+  const accepted = await post(socket, fixture("commands", "idea-accept-once.json"));
+  assert.equal(accepted.status, 404);
+  assert.deepEqual(accepted.json(), { error: "no idea h3v8ct" });
+
+  ideas.refuse = { ok: false, status: 409, error: "idea m7x2zd is not open" };
+  const rejected = await post(socket, fixture("commands", "idea-reject.json"));
+  assert.equal(rejected.status, 409);
+  assert.deepEqual(rejected.json(), { error: "idea m7x2zd is not open" });
+
+  ideas.refuse = { ok: false, status: 409, error: "a generation is already queued or running" };
+  const generated = await post(socket, fixture("commands", "idea-generate.json"));
+  assert.equal(generated.status, 409);
+  assert.deepEqual(generated.json(), { error: "a generation is already queued or running" });
+});
+
+test("an idea command that does not fit the schema gets 400 and never reaches the ideas service", async (t) => {
+  const ideas = stubIdeas();
+  const { socket } = await start(t, { ideas });
+  for (const bad of [
+    { type: "idea.accept", ideaId: "h3v8ct", title: "对比三家 VPS 的带宽配额", brief: "查带宽。", model: "sonnet" },
+    { type: "idea.reject", ideaId: "m7x2zd", reason: "bored" },
+    { type: "idea.reject", ideaId: "m7x2zd", reason: "not-now", note: "   " },
+    { type: "idea.generate", ideaId: "h3v8ct" },
+  ]) {
+    assert.equal((await post(socket, bad)).status, 400, JSON.stringify(bad));
+  }
+  assert.deepEqual(ideas.accepted, []);
+  assert.deepEqual(ideas.rejected, []);
+  assert.deepEqual(ideas.generated, []);
 });
 
 test("GET /events streams the backlog, then live events, as server-sent events", async (t) => {

@@ -1,0 +1,22 @@
+{
+  "id": 34,
+  "at": "2026-10-26T06:20:00.000Z",
+  "type": "idea.updated",
+  "data": {
+    "id": "m7x2zd",
+    "title": "把报告译成英文",
+    "why": "你的报告大多是中文，英文版可能对合作方有用。",
+    "brief": "把 VPS 价格报告译成英文，保留表格和来源链接。",
+    "kind": "once",
+    "model": "haiku",
+    "estimateUsd": 0.12,
+    "state": "rejected",
+    "rejection": {
+      "reason": "not-interested",
+      "note": "我自己会翻。"
+    },
+    "runId": "b5r8wn",
+    "createdAt": "2026-10-26T01:10:14.000Z",
+    "updatedAt": "2026-10-26T06:20:00.000Z"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "id": 35,
+  "at": "2026-10-26T01:10:20.000Z",
+  "type": "idea.updated",
+  "data": {
+    "id": "t5w6pf",
+    "title": "查一下 Hetzner 的快照价格",
+    "why": "你之前问过快照价格，但没有下文。",
+    "brief": "查 Hetzner 官网的快照与备份价格，列出每 GB 的月价。",
+    "kind": "once",
+    "model": "haiku",
+    "estimateUsd": 0.08,
+    "state": "archived",
+    "runId": "b5r8wn",
+    "createdAt": "2026-10-19T01:10:20.000Z",
+    "updatedAt": "2026-10-26T01:10:20.000Z"
+  }
+}

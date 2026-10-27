@@ -2,14 +2,14 @@
 
 JSON examples of the client API defined in `src/api/schema.ts`. Alfred's tests (`src/api/schema.test.ts`) and the iOS client's Swift package tests (`ios/AlfredKit`) both read these files.
 
-- `events/`: events Alfred stores and emits, one file per shape the client decodes, `question.asked` and `question.answered` (answered and cancelled), `task.updated`, `document.updated` and `annotation.updated` among them. Each file is a whole `Event`.
+- `events/`: events Alfred stores and emits, one file per shape the client decodes, `question.asked` and `question.answered` (answered and cancelled), `task.updated`, `document.updated`, `annotation.updated` and `idea.updated` among them. Each file is a whole `Event`.
 - `live/`: live events, streamed as they happen and never stored. Each file is a whole `LiveEvent`.
-- `commands/`: one valid command per command shape, including a `message.send` with files, a `question.answer`, the three task commands and the two document commands.
-- `responses/`: bodies of the app API: `UploadResult`, `RunList`, `RunDetail`, `TaskResult`, `TaskList`, `TaskDetail`, `DocumentResult`, `DocumentList`, `DocumentDetail`, `RevisionAccepted` and `ErrorResponse`. Each file is named after the schema it parses with.
+- `commands/`: one valid command per command shape, including a `message.send` with files, a `question.answer`, the three task commands, the two document commands and the three idea commands.
+- `responses/`: bodies of the app API: `UploadResult`, `RunList`, `RunDetail`, `TaskResult`, `TaskList`, `TaskDetail`, `DocumentResult`, `DocumentList`, `DocumentDetail`, `RevisionAccepted`, `IdeaResult`, `IdeaAccepted`, `IdeaGenerationAccepted`, `IdeaList` and `ErrorResponse`. Each file is named after the schema it parses with.
 - `requests/`: bodies the client sends outside the command API: `PushRegistration`.
 - `pairing/`: the payload of the pairing QR code, a `Pairing`. Its values are made up.
 - `invalid-commands/`: commands that `parseCommand` must reject.
-- `invalid/`: off-schema files that the schema their name starts with must reject. Each is named `<schema>-<case>.json`, where `<schema>` is `pairing`, `push-registration`, `upload-result`, `run-list`, `run-detail`, `task-result`, `task-list`, `task-detail`, `document-result`, `document-list`, `document-detail`, `revision-accepted` or `error`.
+- `invalid/`: off-schema files that the schema their name starts with must reject. Each is named `<schema>-<case>.json`, where `<schema>` is `pairing`, `push-registration`, `upload-result`, `run-list`, `run-detail`, `task-result`, `task-list`, `task-detail`, `document-result`, `document-list`, `document-detail`, `revision-accepted`, `idea-result`, `idea-accepted` or `error`.
 - `future/`: events a newer Alfred might send: one with an unknown `type`, one known event with an extra field, and one live event with an unknown `type`.
 
 Every file is pretty-printed JSON with a 2-space indent and a trailing newline. The files in `events/`, `live/`, `commands/`, `responses/`, `requests/` and `pairing/` contain only fields the schema defines, in the schema's key order; `invalid-commands/`, `invalid/` and `future/` are off-schema on purpose.
@@ -54,6 +54,18 @@ A document is a file Alfred delivered, known by its workspace path. Delivering t
 - A file a delivery registered carries the `documentId` and the `version` it delivered: both or neither.
 
 The `commands/` document fixtures target the story of `document-detail.json`: the owner annotates `reports/vps.md` at its current version, and the run `s2d8kp` answers the batch.
+
+## Ideas
+
+An idea is a suggestion Alfred generates from memory and recent conversations, once a day or when the owner asks. The owner accepts it, which creates a task with origin `idea`, rejects it with a reason, or leaves it until it is archived after 7 days. A generation is a run of kind `ideas`. Provenance is not part of the contract.
+
+- `kind` is `once` or `recurring`. A recurring idea proposes a `schedule`, never a once one; a once idea has none. `why` is one line of 1 to 300 characters on why Alfred suggests it, and `estimateUsd` is the estimated cost of one run, from 0 to 20.
+- `state` is `open`, `accepted` (with the `taskId` of the task it made), `rejected` (with a `rejection`) or `archived`. A `rejection` has a `reason` (`not-interested`, `already-doing`, `not-now`, `too-expensive` or `wrong-direction`) and an optional `note` of 1 to 500 characters.
+- `idea.updated` carries the whole idea on every change of state, and a generation that adds an idea emits it too.
+- `idea.accept` takes the task as the owner confirmed it in the app's task form: `title`, `brief`, `model` and `budgetUsd` as `task.create` takes them, and an optional `schedule`. Without a schedule the task is one-time and runs at once. Alfred answers 200 with an `IdeaAccepted`: the idea and the task it made.
+- `idea.reject` takes a `reason` and an optional `note`, and is answered 200 with an `IdeaResult`. `idea.generate` starts a generation run, answered 202 with an `IdeaGenerationAccepted`.
+- `GET /api/ideas` is an `IdeaList`: every idea, newest created first, and the `generatingRunId` while a generation is queued or running.
+- The errors of the idea commands are `ErrorResponse`: 404 for an unknown idea, and 409 for an idea that is not open, a generation while one is queued or running, and a day's spend cap that is reached.
 
 ## Compatibility rules
 

@@ -1,0 +1,25 @@
+{
+  "id": 32,
+  "at": "2026-10-27T01:12:02.000Z",
+  "type": "idea.updated",
+  "data": {
+    "id": "d6n2gs",
+    "title": "每周追踪 VPS 价格变化",
+    "why": "这周你两次问到价格，每周看一次能及时发现调价。",
+    "brief": "每周一看一次 Hetzner、Vultr 和 DigitalOcean 的定价页，只报告和上周相比的变化。",
+    "kind": "recurring",
+    "schedule": {
+      "kind": "weekly",
+      "days": [
+        1
+      ],
+      "time": "09:00"
+    },
+    "model": "sonnet",
+    "estimateUsd": 0.2,
+    "state": "open",
+    "runId": "v7c2mb",
+    "createdAt": "2026-10-27T01:12:02.000Z",
+    "updatedAt": "2026-10-27T01:12:02.000Z"
+  }
+}

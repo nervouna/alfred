@@ -1,0 +1,16 @@
+{
+  "id": 30,
+  "at": "2026-10-27T01:12:04.500Z",
+  "type": "run.updated",
+  "data": {
+    "id": "v7c2mb",
+    "kind": "ideas",
+    "title": "生成想法",
+    "status": "done",
+    "model": "claude-sonnet-5-5",
+    "startedAt": "2026-10-27T01:00:00.000Z",
+    "endedAt": "2026-10-27T01:12:04.500Z",
+    "costUsd": 0.1804,
+    "files": []
+  }
+}

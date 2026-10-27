@@ -14,13 +14,22 @@ import {
   ErrorResponseSchema,
   EventSchema,
   FileRefSchema,
+  IdeaAcceptedSchema,
+  IdeaGenerationAcceptedSchema,
+  IdeaListSchema,
+  IdeaResultSchema,
+  IdeaSchema,
   LiveEventSchema,
+  MAX_IDEA_NOTE_CHARS,
+  MAX_IDEA_WHY_CHARS,
   MAX_MESSAGE_FILES,
+  MAX_TASK_BUDGET_USD,
   MessageSchema,
   PairingSchema,
   PushRegistrationSchema,
   RevisionAcceptedSchema,
   RunDetailSchema,
+  RunKindSchema,
   RunListSchema,
   RunSchema,
   TaskDetailSchema,
@@ -59,6 +68,10 @@ const SCHEMAS_BY_NAME: Record<string, ZodType> = {
   "task-list": TaskListSchema,
   "task-result": TaskResultSchema,
   "upload-result": UploadResultSchema,
+  "idea-result": IdeaResultSchema,
+  "idea-accepted": IdeaAcceptedSchema,
+  "idea-generation-accepted": IdeaGenerationAcceptedSchema,
+  "idea-list": IdeaListSchema,
 };
 
 function schemaNamed(name: string): ZodType {
@@ -484,4 +497,105 @@ test("a revision run names its document, and a document's versions have their re
   assert.equal(RunSchema.safeParse(run).success, true);
   assert.equal(RunSchema.parse(run).documentId, "r4f7ma");
   assert.equal(RunSchema.safeParse({ ...run, documentId: "R4F7MA" }).success, false, "a malformed document id");
+});
+
+// --- Ideas --------------------------------------------------------------------
+
+/** The data of an event fixture: the idea of an idea.updated one, the run of a run.updated one. */
+const eventData = (name: string): Record<string, unknown> => (JSON.parse(readFixture("events", name)) as { data: Record<string, unknown> }).data;
+
+test("an idea's schedule is present exactly when it is recurring, and a recurring idea's is never a once schedule", () => {
+  const open = eventData("idea-updated-open-once.json");
+  const recurring = eventData("idea-updated-open-recurring.json");
+  assert.equal(IdeaSchema.safeParse(open).success, true, "a once idea has no schedule");
+  assert.equal(IdeaSchema.safeParse(recurring).success, true, "a recurring idea has one");
+  const { schedule: _schedule, ...noSchedule } = recurring;
+  assert.equal(IdeaSchema.safeParse(noSchedule).success, false, "a recurring idea without a schedule");
+  assert.equal(IdeaSchema.safeParse({ ...open, schedule: { kind: "daily", time: "09:00" } }).success, false, "a once idea with a schedule");
+  assert.equal(IdeaSchema.safeParse({ ...recurring, schedule: { kind: "once", at: "2026-10-28T01:00:00.000Z" } }).success, false, "a once schedule");
+});
+
+test("an idea has a task exactly when accepted, and a rejection exactly when rejected", () => {
+  const accepted = eventData("idea-updated-accepted.json");
+  const rejected = eventData("idea-updated-rejected.json");
+  const archived = eventData("idea-updated-archived.json");
+  const open = eventData("idea-updated-open-once.json");
+  const { taskId: _taskId, ...noTask } = accepted;
+  assert.equal(IdeaSchema.safeParse(accepted).success, true);
+  assert.equal(IdeaSchema.safeParse(noTask).success, false, "accepted without a task");
+  assert.equal(IdeaSchema.safeParse({ ...rejected, taskId: "n2c7bq" }).success, false, "rejected with a task");
+  assert.equal(IdeaSchema.safeParse({ ...archived, taskId: "n2c7bq" }).success, false, "archived with a task");
+  assert.equal(IdeaSchema.safeParse({ ...open, taskId: "n2c7bq" }).success, false, "open with a task");
+  const { rejection: _rejection, ...noRejection } = rejected;
+  assert.equal(IdeaSchema.safeParse(rejected).success, true);
+  assert.equal(IdeaSchema.safeParse(noRejection).success, false, "rejected without a rejection");
+  assert.equal(IdeaSchema.safeParse({ ...archived, rejection: { reason: "not-now" } }).success, false, "archived with a rejection");
+  assert.equal(IdeaSchema.safeParse({ ...accepted, rejection: { reason: "not-now" } }).success, false, "accepted with a rejection");
+});
+
+test("an idea's kind, state and rejection reason are each one of the listed values", () => {
+  const rejected = eventData("idea-updated-rejected.json");
+  const open = eventData("idea-updated-open-once.json");
+  for (const reason of ["not-interested", "already-doing", "not-now", "too-expensive", "wrong-direction"]) {
+    assert.equal(IdeaSchema.safeParse({ ...rejected, rejection: { reason } }).success, true, reason);
+  }
+  assert.equal(IdeaSchema.safeParse({ ...rejected, rejection: { reason: "bored" } }).success, false, "a reason outside the five");
+  assert.equal(IdeaSchema.safeParse({ ...open, state: "snoozed" }).success, false, "a state outside the four");
+  assert.equal(IdeaSchema.safeParse({ ...open, kind: "daily" }).success, false, "a kind outside the two");
+});
+
+test("an idea's estimate is a finite number from 0 to 20 USD", () => {
+  const open = eventData("idea-updated-open-once.json");
+  const estimate = (estimateUsd: number) => IdeaSchema.safeParse({ ...open, estimateUsd }).success;
+  assert.equal(estimate(0), true, "0");
+  assert.equal(estimate(MAX_TASK_BUDGET_USD), true, "20");
+  for (const bad of [-0.01, MAX_TASK_BUDGET_USD + 0.01, Infinity, -Infinity, NaN]) {
+    assert.equal(estimate(bad), false, String(bad));
+  }
+});
+
+test("an idea's why is 1 to 300 characters, and a rejection's note 1 to 500, neither blank", () => {
+  const open = eventData("idea-updated-open-once.json");
+  const why = (text: string) => IdeaSchema.safeParse({ ...open, why: text }).success;
+  assert.equal(why("x".repeat(MAX_IDEA_WHY_CHARS)), true, "300 characters");
+  assert.equal(why("x".repeat(MAX_IDEA_WHY_CHARS + 1)), false, "301 characters");
+  assert.equal(why("😀".repeat(MAX_IDEA_WHY_CHARS)), true, "a character is a code point");
+  assert.equal(why(""), false, "empty");
+  assert.equal(why("  "), false, "blank");
+
+  const rejected = eventData("idea-updated-rejected.json");
+  const note = (text: string) => IdeaSchema.safeParse({ ...rejected, rejection: { reason: "not-now", note: text } }).success;
+  assert.equal(note("x".repeat(MAX_IDEA_NOTE_CHARS)), true, "500 characters");
+  assert.equal(note("x".repeat(MAX_IDEA_NOTE_CHARS + 1)), false, "501 characters");
+  assert.equal(note("  "), false, "blank");
+  assert.equal(IdeaSchema.safeParse({ ...rejected, rejection: { reason: "not-now" } }).success, true, "no note");
+});
+
+test("idea.accept takes the task's fields and an optional schedule, idea.reject a reason and an optional note, idea.generate nothing", () => {
+  const accept = (over: Record<string, unknown>) =>
+    parseCommand({ type: "idea.accept", ideaId: "h3v8ct", title: "对比三家 VPS 的带宽配额", brief: "查带宽。", model: "sonnet", budgetUsd: 1, ...over });
+  assert.equal(accept({}).ok, true, "a one-time task");
+  assert.equal(accept({ schedule: { kind: "daily", time: "09:00" } }).ok, true, "a recurring task");
+  assert.equal(accept({ schedule: { kind: "daily", time: "09:00", day: 1 } }).ok, false, "a schedule with an extra key");
+  assert.equal(accept({ ideaId: "h3v8c" }).ok, false, "a malformed idea id");
+  assert.equal(accept({ title: "x".repeat(81) }).ok, false, "a title of 81 characters");
+  assert.equal(accept({ brief: " " }).ok, false, "a blank brief");
+  assert.equal(accept({ budgetUsd: 25 }).ok, false, "a budget over 20");
+  assert.equal(accept({ model: "gpt" }).ok, false, "a model Alfred does not run");
+
+  const reject = (over: Record<string, unknown>) => parseCommand({ type: "idea.reject", ideaId: "m7x2zd", reason: "not-interested", ...over });
+  assert.equal(reject({}).ok, true, "no note");
+  assert.equal(reject({ note: "我自己会翻。" }).ok, true, "a note");
+  assert.equal(reject({ note: "" }).ok, false, "an empty note");
+  assert.equal(reject({ note: "x".repeat(MAX_IDEA_NOTE_CHARS + 1) }).ok, false, "a note over 500 characters");
+  assert.equal(reject({ reason: "bored" }).ok, false, "a reason outside the five");
+
+  assert.equal(parseCommand({ type: "idea.generate" }).ok, true);
+  assert.equal(parseCommand({ type: "idea.generate", ideaId: "h3v8ct" }).ok, false, "an extra key");
+});
+
+test("a generation of ideas is a run of its own kind", () => {
+  const run = eventData("run-updated-ideas.json");
+  assert.equal(RunKindSchema.safeParse("ideas").success, true);
+  assert.equal(RunSchema.parse(run).kind, "ideas");
 });

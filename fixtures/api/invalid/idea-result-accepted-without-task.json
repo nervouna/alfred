@@ -1,0 +1,19 @@
+{
+  "idea": {
+    "id": "k4p9rx",
+    "title": "盯住供应商状态页",
+    "why": "供应商的维护公告常在报告之后才出现，你之前因此漏掉过一次变化。",
+    "brief": "打开三家供应商的状态页，只报告新出现的故障或维护公告。",
+    "kind": "recurring",
+    "schedule": {
+      "kind": "interval",
+      "hours": 6
+    },
+    "model": "sonnet",
+    "estimateUsd": 0.4,
+    "state": "accepted",
+    "runId": "q2e7gx",
+    "createdAt": "2026-10-21T01:10:12.000Z",
+    "updatedAt": "2026-10-22T09:00:00.000Z"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "type": "idea.accept",
+  "ideaId": "H3V8CT",
+  "title": "对比三家 VPS 的带宽配额",
+  "brief": "查 Hetzner、Vultr 和 DigitalOcean 官网的带宽与流量政策。",
+  "model": "sonnet",
+  "budgetUsd": 1
+}

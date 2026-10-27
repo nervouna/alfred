@@ -38,6 +38,10 @@ export const MAX_ANNOTATION_QUOTE_CHARS = 2000;
 export const MAX_ANNOTATION_CONTEXT_CHARS = 200;
 /** The most annotations one revision run takes. */
 export const MAX_ANNOTATIONS_PER_REVISION = 50;
+/** The most characters an idea's why holds. */
+export const MAX_IDEA_WHY_CHARS = 300;
+/** The most characters an idea's rejection note holds. */
+export const MAX_IDEA_NOTE_CHARS = 500;
 const MAX_ANNOTATION_REPLY_CHARS = 4000;
 const MAX_TEXT_CHARS = 20_000;
 const MAX_ANSWER_CHARS = 2000;
@@ -98,7 +102,7 @@ export const MessageSchema = z
   })
   .refine((message) => message.text !== "" || message.files.length > 0, "text or files must not both be empty");
 
-export const RunKindSchema = z.enum(["task", "scan", "subagent", "revision"]);
+export const RunKindSchema = z.enum(["task", "scan", "subagent", "revision", "ideas"]);
 export const RunStatusSchema = z.enum(["queued", "running", "done", "stopped", "failed", "lost"]);
 
 // Compile-time check that the enums above are exactly RunKind and RunStatus in src/runs.ts.
@@ -372,6 +376,73 @@ const AnnotationDraftSchema = z.strictObject({
   comment: AnnotationCommentSchema,
 });
 
+// An idea id has the run id's alphabet and length.
+const IdeaIdSchema = z.string().regex(/^[2-9a-hjkmnp-z]{6}$/, "must be a six-character idea id");
+
+const IdeaWhySchema = z
+  .string()
+  .refine((why) => why.trim() !== "", "must not be blank")
+  .refine((why) => [...why].length <= MAX_IDEA_WHY_CHARS, `must be at most ${MAX_IDEA_WHY_CHARS} characters`);
+
+const IdeaNoteSchema = z
+  .string()
+  .refine((note) => note.trim() !== "", "must not be blank")
+  .refine((note) => [...note].length <= MAX_IDEA_NOTE_CHARS, `must be at most ${MAX_IDEA_NOTE_CHARS} characters`);
+
+/** Why the owner rejected an idea. */
+export const RejectionReasonSchema = z.enum(["not-interested", "already-doing", "not-now", "too-expensive", "wrong-direction"]);
+
+/** What an idea proposes: a task to run once, or a recurring one. */
+export const IdeaKindSchema = z.enum(["once", "recurring"]);
+
+/** Where an idea stands: open, accepted as a task, rejected, or archived after 7 days unanswered. */
+export const IdeaStateSchema = z.enum(["open", "accepted", "rejected", "archived"]);
+
+/** The owner's rejection of an idea: a reason, and a note if they gave one. */
+export const RejectionSchema = z.object({
+  reason: RejectionReasonSchema,
+  note: IdeaNoteSchema.optional(),
+});
+
+/**
+ * An idea: a suggestion Alfred made from memory and recent conversations. A recurring idea proposes a schedule, and
+ * one that is not a once schedule; the schedule is absent for a once idea. `taskId` is set exactly when the idea is
+ * accepted, and `rejection` exactly when it is rejected.
+ */
+export const IdeaSchema = z
+  .object({
+    id: IdeaIdSchema,
+    title: TaskTitleSchema,
+    why: IdeaWhySchema,
+    brief: TaskBriefSchema,
+    kind: IdeaKindSchema,
+    schedule: ScheduleSchema.optional(),
+    model: ModelSchema,
+    estimateUsd: z.number().min(0, "must be at least 0").max(MAX_TASK_BUDGET_USD, `must be at most ${MAX_TASK_BUDGET_USD}`),
+    state: IdeaStateSchema,
+    taskId: TaskIdSchema.optional(),
+    rejection: RejectionSchema.optional(),
+    runId: RunIdSchema,
+    createdAt: IsoTimestampSchema,
+    updatedAt: IsoTimestampSchema,
+  })
+  .refine((idea) => (idea.kind === "recurring") === (idea.schedule !== undefined), {
+    path: ["schedule"],
+    message: "must be set exactly when the idea is recurring",
+  })
+  .refine((idea) => idea.schedule?.kind !== "once", {
+    path: ["schedule"],
+    message: "must not be a once schedule",
+  })
+  .refine((idea) => (idea.state === "accepted") === (idea.taskId !== undefined), {
+    path: ["taskId"],
+    message: "must be set exactly when the idea is accepted",
+  })
+  .refine((idea) => (idea.state === "rejected") === (idea.rejection !== undefined), {
+    path: ["rejection"],
+    message: "must be set exactly when the idea is rejected",
+  });
+
 const EventEnvelope = { id: z.int().positive(), at: IsoTimestampSchema };
 
 export const EventSchema = z.discriminatedUnion("type", [
@@ -382,6 +453,7 @@ export const EventSchema = z.discriminatedUnion("type", [
   z.object({ ...EventEnvelope, type: z.literal("task.updated"), data: TaskSchema }),
   z.object({ ...EventEnvelope, type: z.literal("document.updated"), data: DocumentSchema }),
   z.object({ ...EventEnvelope, type: z.literal("annotation.updated"), data: AnnotationSchema }),
+  z.object({ ...EventEnvelope, type: z.literal("idea.updated"), data: IdeaSchema }),
 ]);
 
 const StreamIdSchema = z.string().regex(/^[A-Za-z0-9_.:-]{1,64}$/, "must be 1-64 letters, digits, _, ., : or -");
@@ -475,6 +547,36 @@ export const RevisionAcceptedSchema = z
     path: ["annotations"],
     message: "must all be submitted to the revision run",
   });
+
+/** The body of a successful idea.reject: the idea as Alfred now holds it. */
+export const IdeaResultSchema = z.object({ idea: IdeaSchema });
+
+/**
+ * The body of a successful idea.accept: the idea, now accepted, and the task it made. The task is an idea's: its
+ * origin is idea, and its id is the idea's taskId.
+ */
+export const IdeaAcceptedSchema = z
+  .object({ idea: IdeaSchema, task: TaskSchema })
+  .refine((accepted) => accepted.idea.taskId === accepted.task.id, {
+    path: ["idea", "taskId"],
+    message: "must be the id of the task",
+  })
+  .refine((accepted) => accepted.task.origin === "idea", {
+    path: ["task", "origin"],
+    message: "must be idea",
+  });
+
+/** The body of a successful idea.generate: the generation run, queued or running. */
+export const IdeaGenerationAcceptedSchema = z.object({ runId: RunIdSchema });
+
+/**
+ * The body of GET /api/ideas: every idea Alfred keeps, newest created first, and the generation run while one is
+ * queued or running.
+ */
+export const IdeaListSchema = z.object({
+  ideas: z.array(IdeaSchema),
+  generatingRunId: RunIdSchema.optional(),
+});
 
 /** The body of POST /api/uploads: the file Alfred saved under inbox/. */
 export const UploadResultSchema = z.object({
@@ -611,6 +713,31 @@ export const DocumentUndoSchema = z.strictObject({
   runId: RunIdSchema,
 });
 
+/**
+ * Accepts an idea as a task. `title`, `brief`, `model` and `budgetUsd` are the task's, as the owner confirmed them in
+ * the app's task form. A schedule makes the task recurring; without one it is a one-time task that runs at once.
+ */
+export const IdeaAcceptSchema = z.strictObject({
+  type: z.literal("idea.accept"),
+  ideaId: IdeaIdSchema,
+  title: TaskTitleSchema,
+  brief: TaskBriefSchema,
+  schedule: ScheduleCommandSchema.optional(),
+  model: ModelSchema,
+  budgetUsd: TaskBudgetSchema,
+});
+
+/** Rejects an idea with a reason, and a note of 1 to 500 characters if the owner gives one. */
+export const IdeaRejectSchema = z.strictObject({
+  type: z.literal("idea.reject"),
+  ideaId: IdeaIdSchema,
+  reason: RejectionReasonSchema,
+  note: IdeaNoteSchema.optional(),
+});
+
+/** Asks Alfred to generate ideas now. */
+export const IdeaGenerateSchema = z.strictObject({ type: z.literal("idea.generate") });
+
 export const CommandSchema = z.discriminatedUnion("type", [
   MessageSendSchema,
   RunStopSchema,
@@ -620,6 +747,9 @@ export const CommandSchema = z.discriminatedUnion("type", [
   TaskRunSchema,
   DocumentReviseSchema,
   DocumentUndoSchema,
+  IdeaAcceptSchema,
+  IdeaRejectSchema,
+  IdeaGenerateSchema,
 ]);
 
 export type Channel = z.infer<typeof ChannelSchema>;
@@ -652,6 +782,18 @@ export type DocumentDetail = z.infer<typeof DocumentDetailSchema>;
 export type RevisionAccepted = z.infer<typeof RevisionAcceptedSchema>;
 export type DocumentRevise = z.infer<typeof DocumentReviseSchema>;
 export type DocumentUndo = z.infer<typeof DocumentUndoSchema>;
+export type Idea = z.infer<typeof IdeaSchema>;
+export type IdeaKind = z.infer<typeof IdeaKindSchema>;
+export type IdeaState = z.infer<typeof IdeaStateSchema>;
+export type RejectionReason = z.infer<typeof RejectionReasonSchema>;
+export type Rejection = z.infer<typeof RejectionSchema>;
+export type IdeaResult = z.infer<typeof IdeaResultSchema>;
+export type IdeaAccepted = z.infer<typeof IdeaAcceptedSchema>;
+export type IdeaGenerationAccepted = z.infer<typeof IdeaGenerationAcceptedSchema>;
+export type IdeaList = z.infer<typeof IdeaListSchema>;
+export type IdeaAccept = z.infer<typeof IdeaAcceptSchema>;
+export type IdeaReject = z.infer<typeof IdeaRejectSchema>;
+export type IdeaGenerate = z.infer<typeof IdeaGenerateSchema>;
 export type ErrorResponse = z.infer<typeof ErrorResponseSchema>;
 export type Pairing = z.infer<typeof PairingSchema>;
 export type PushRegistration = z.infer<typeof PushRegistrationSchema>;
