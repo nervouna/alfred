@@ -81,8 +81,8 @@ struct RunDetailView: View {
                     .font(.headline)
                 HStack(spacing: 8) {
                     StatusBadge(status: run.status)
-                    if run.kind == .subagent {
-                        Text("子任务")
+                    if let label = RunPresentation.kindLabel(run.kind) {
+                        Text(label)
                     }
                     if let name = RunPresentation.modelName(run.model) {
                         Text(name)

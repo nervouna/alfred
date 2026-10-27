@@ -11,8 +11,8 @@ struct RunRow: View {
                 .lineLimit(2)
             HStack(spacing: 6) {
                 StatusBadge(status: run.status)
-                if run.kind == .subagent {
-                    Text("子任务")
+                if let label = RunPresentation.kindLabel(run.kind) {
+                    Text(label)
                         .font(.caption2)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 1)

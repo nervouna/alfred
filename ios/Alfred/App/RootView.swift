@@ -38,6 +38,10 @@ struct RootView: View {
                 Tab("文档", systemImage: "doc.text", value: AppTab.documents) {
                     DocumentsView()
                 }
+                Tab("想法", systemImage: "lightbulb", value: AppTab.ideas) {
+                    IdeasView()
+                }
+                .badge(model.unseenIdeaCount)
             }
             .environment(model)
         }

@@ -3,12 +3,14 @@ import SwiftUI
 
 /// The 任务 tab: the owner's tasks, with the ones that have ended collapsed below, and the recent runs under them. The
 /// tasks come from the model, which keeps them current from the stream; the runs are fetched when the tab appears and
-/// on pull to refresh, and a run the stream knows takes its status from there.
+/// on pull to refresh, and a run the stream knows takes its status from there. When the model asks for a task
+/// (`openTask`, for an accepted idea) the tab opens its detail.
 struct TasksView: View {
     @Environment(AppModel.self) private var model
     @State private var loaded = LoadedRuns()
     @State private var showsEnded = false
     @State private var creating = false
+    @State private var requested: TaskRoute?
 
     private var runs: [Run] {
         RunPresentation.merged(loaded: loaded.runs, timeline: model.timeline)
@@ -66,6 +68,14 @@ struct TasksView: View {
             .overlay { placeholder(empty: open.isEmpty && ended.isEmpty && runs.isEmpty) }
             .refreshable { await Task { await reload() }.value }
             .task { await reload() }
+            .task(id: model.taskOpenRequest) {
+                guard let request = model.taskOpenRequest else { return }
+                requested = TaskRoute(taskId: request.taskId)
+                model.taskOpenHandled(request)
+            }
+            .navigationDestination(item: $requested) { route in
+                TaskDetailView(taskId: route.taskId)
+            }
             .navigationTitle("任务")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -117,6 +127,11 @@ struct TasksView: View {
         await loaded.load(using: model.client)
         await tasks
     }
+}
+
+/// A task's detail, as the model asked the tab to open it.
+private struct TaskRoute: Hashable {
+    let taskId: String
 }
 
 /// The row that opens and closes the ended tasks.

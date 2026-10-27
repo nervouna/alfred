@@ -18,6 +18,15 @@ enum RunPresentation {
         }
     }
 
+    /// The label of a run that is not an ordinary task run: `子任务` for a subagent and `想法` for a generation of ideas.
+    static func kindLabel(_ kind: RunKind) -> String? {
+        switch kind {
+        case .subagent: "子任务"
+        case .ideas: "想法"
+        default: nil
+        }
+    }
+
     /// The model without its vendor prefix, as the workbench shows it: `claude-haiku-5-5` is `haiku-5-5`.
     static func modelName(_ model: String?) -> String? {
         guard let model, !model.isEmpty else { return nil }

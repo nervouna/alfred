@@ -4,12 +4,16 @@ import Foundation
 /// What the create and edit form holds, and what it makes of it: the problems that stop a save, the task to create, or
 /// the fields of a task that changed. The form keeps what each schedule kind needs side by side, so switching the kind
 /// back and forth loses nothing; only the one in `kind` makes the schedule.
+///
+/// A form can also accept an idea: it is filled in from the idea, and a one-off idea has a choice of its own among the
+/// kinds, `立即`, which sends no schedule (Alfred then runs the task a minute after it is accepted).
 struct TaskForm: Equatable {
-    enum Kind: CaseIterable, Hashable {
-        case daily, weekly, interval, once
+    enum Kind: Hashable {
+        case now, daily, weekly, interval, once
 
         var title: String {
             switch self {
+            case .now: "立即"
             case .daily: "每天"
             case .weekly: "每周"
             case .interval: "每隔"
@@ -41,6 +45,10 @@ struct TaskForm: Equatable {
     static let maxBudgetUsd = 20.0
     /// The range of hours between runs (the contract's).
     static let hoursRange = 1...168
+    /// The cap a form starts with, in USD.
+    static let defaultBudgetUsd = 2.0
+    /// The kinds every form offers.
+    static let ordinaryKinds: [Kind] = [.daily, .weekly, .interval, .once]
 
     var title = ""
     var brief = ""
@@ -56,11 +64,33 @@ struct TaskForm: Equatable {
     var budgetText = "2"
     /// The task being edited; `nil` when the form makes a new one.
     private let original: AlfredTask?
+    /// Whether the form accepts an idea.
+    private(set) var isAccepting = false
+    /// Whether a task can start `立即`: a one-off idea has no schedule of its own.
+    private var offersNow = false
 
     /// A form for a new task.
     init(now: Date = Date()) {
         original = nil
         onceAt = Self.defaultOnce(after: now)
+    }
+
+    /// A form that accepts `idea`: its title, brief and model, a recurring idea's schedule, and a cap of two dollars, or
+    /// twice the estimate rounded up to a whole dollar when that is more, at most twenty. A one-off idea starts on `立即`.
+    init(accepting idea: AlfredIdea, now: Date = Date()) {
+        original = nil
+        isAccepting = true
+        onceAt = Self.defaultOnce(after: now)
+        title = idea.title
+        brief = idea.brief
+        model = idea.model
+        budgetText = String(format: "%g", Self.cap(forEstimate: idea.estimateUsd))
+        if let schedule = idea.schedule {
+            show(schedule)
+        } else {
+            offersNow = true
+            kind = .now
+        }
     }
 
     /// A form showing a task, to change.
@@ -71,7 +101,12 @@ struct TaskForm: Equatable {
         brief = task.brief
         model = task.model
         budgetText = String(format: "%g", task.budgetUsd)
-        switch task.schedule {
+        show(task.schedule)
+    }
+
+    /// Sets the schedule fields to `schedule`.
+    private mutating func show(_ schedule: Schedule) {
+        switch schedule {
         case let .daily(time):
             kind = .daily
             self.time = time
@@ -88,8 +123,18 @@ struct TaskForm: Equatable {
         }
     }
 
+    /// The cap an accepted idea starts with, in USD.
+    static func cap(forEstimate estimate: Double) -> Double {
+        min(maxBudgetUsd, max(defaultBudgetUsd, (2 * estimate).rounded(.up)))
+    }
+
     var isEditing: Bool {
         original != nil
+    }
+
+    /// The kinds to choose from: `立即` leads for a one-off idea.
+    var kinds: [Kind] {
+        offersNow ? [.now] + Self.ordinaryKinds : Self.ordinaryKinds
     }
 
     /// The models to choose from: Alfred's three, and the task's own when it has another.
@@ -101,13 +146,13 @@ struct TaskForm: Equatable {
         return models
     }
 
-    /// The schedule the form is set to.
+    /// The schedule the form's fields describe. For `立即` that is the one-time fields', which are not sent.
     var schedule: Schedule {
         switch kind {
         case .daily: .daily(time: time)
         case .weekly: .weekly(days: days.sorted(), time: time)
         case .interval: .interval(hours: hours)
-        case .once: .once(at: onceAt)
+        case .once, .now: .once(at: onceAt)
         }
     }
 
@@ -137,6 +182,17 @@ struct TaskForm: Equatable {
     /// The task to create. The form is checked first.
     func draft() -> TaskDraft {
         TaskDraft(title: Self.trimmed(title), brief: Self.trimmed(brief), schedule: schedule, model: model, budgetUsd: budget)
+    }
+
+    /// The task an accepted idea becomes, as the owner confirmed it. The form is checked first. `立即` has no schedule.
+    func acceptance() -> IdeaAcceptance {
+        IdeaAcceptance(
+            title: Self.trimmed(title),
+            brief: Self.trimmed(brief),
+            schedule: kind == .now ? nil : schedule,
+            model: model,
+            budgetUsd: budget ?? Self.defaultBudgetUsd
+        )
     }
 
     /// The fields of the edited task that changed, or `nil` when none did. The status is never among them: pausing,
@@ -183,4 +239,14 @@ struct TaskForm: Equatable {
     private static func trimmed(_ text: String) -> String {
         text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
+}
+
+/// What `idea.accept` takes: the task as the owner confirmed it in the form. A `nil` schedule makes a one-time task that
+/// runs at once.
+struct IdeaAcceptance: Equatable {
+    let title: String
+    let brief: String
+    let schedule: Schedule?
+    let model: TaskModel
+    let budgetUsd: Double
 }

@@ -30,6 +30,15 @@ final class RunPresentationTests: XCTestCase {
         XCTAssertEqual(RunPresentation.cost(12.345), "$12.35")
     }
 
+    func testAGenerationOfIdeasHasItsOwnLabelAndSoDoesASubagent() {
+        XCTAssertEqual(RunPresentation.kindLabel(.ideas), "想法")
+        XCTAssertEqual(RunPresentation.kindLabel(.subagent), "子任务")
+        XCTAssertNil(RunPresentation.kindLabel(.task))
+        XCTAssertNil(RunPresentation.kindLabel(.scan))
+        XCTAssertNil(RunPresentation.kindLabel(.revision))
+        XCTAssertNil(RunPresentation.kindLabel(RunKind(rawValue: "other")))
+    }
+
     func testStartTimeIsRelative() {
         XCTAssertEqual(RunPresentation.relative(Date(timeIntervalSinceNow: -300)), "5分钟前")
         XCTAssertEqual(RunPresentation.relative(Date(timeIntervalSinceNow: -3 * 3600)), "3小时前")
