@@ -11,15 +11,19 @@ enum SystemBar {
 
 /// The chat's own bar, in place of the system navigation bar: a round glass button on each side, and nothing else. It is
 /// exactly as tall as the system's inline bar (`SystemBar.inlineHeight`), and that is all the height its background, its
-/// scroll edge effect and its hit area have.
+/// scrim and its hit area have.
 ///
-/// Alfred's avatar is not part of it. The avatar is taller than the bar and hangs over what is below it, and a bar's
-/// edge effect covers everything the bar draws, overflow included, so the avatar is drawn by `ChatHeaderOverlay`, over
-/// the chat, and the view under the bar keeps `AvatarMetrics.hang` clear at its top for it.
+/// Alfred's avatar is not part of it. The avatar is taller than the bar and hangs over what is below it, so it is drawn by
+/// `ChatHeaderOverlay`, over the chat, and the view under the bar keeps `AvatarMetrics.hang` clear at its top for it.
 struct ChatHeader: View {
     /// The height of the bar.
     static var barHeight: CGFloat { SystemBar.inlineHeight }
     static let buttonSize: CGFloat = 44
+
+    /// The opacity of the scrim at the top edge of the screen, and at the bar's bottom edge. Between them it is linear, so
+    /// messages scrolling under the bar stay visible through it.
+    static let scrimTopOpacity: Double = 0.5
+    static let scrimBottomOpacity: Double = 0
 
     /// How far the avatar's top edge is below the bar's top edge, which is the top of the safe area (the bar sits under
     /// the status bar and the Dynamic Island): the bar's height less what the avatar has above the bar's bottom edge, its
@@ -58,6 +62,32 @@ struct ChatHeader: View {
                 .accessibilityElement()
                 .accessibilityIdentifier("chat.header.bar")
         }
+        .background {
+            ChatHeaderScrim()
+        }
+    }
+}
+
+/// The gradient behind the bar, from the top edge of the screen down to the bar's bottom edge, in the system background
+/// colour: `ChatHeader.scrimTopOpacity` at the top and `ChatHeader.scrimBottomOpacity` at the bottom, linear between. The
+/// bar sits below the status bar, so the scrim is laid out past the top safe area, up to the screen's edge. It takes no
+/// touches, and the buttons, the avatar and the capsule are drawn above it.
+private struct ChatHeaderScrim: View {
+    var body: some View {
+        Rectangle()
+            .fill(
+                LinearGradient(
+                    stops: [
+                        .init(color: Color(.systemBackground).opacity(ChatHeader.scrimTopOpacity), location: 0),
+                        .init(color: Color(.systemBackground).opacity(ChatHeader.scrimBottomOpacity), location: 1),
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+            .ignoresSafeArea(edges: .top)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
     }
 }
 
