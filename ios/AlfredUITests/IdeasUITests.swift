@@ -1,7 +1,7 @@
 import XCTest
 
-/// Pairs the app with a running `node scripts/app-dev.ts --seed-ideas` and works the 想法 tab: the badge of unseen ideas,
-/// 讨论, accepting the weekly idea as it is and the one-off idea with 立即 after editing its brief, and rejecting the daily
+/// Pairs the app with a running `node scripts/app-dev.ts --seed-ideas` and works the 想法 tab: the badge of unseen ideas
+/// and the seeded last generation's note above them, 讨论, accepting the weekly idea as it is and the one-off idea with 立即 after editing its brief, and rejecting the daily
 /// idea. The pairing comes from the environment variable `ALFRED_PAIRING` (pass `TEST_RUNNER_ALFRED_PAIRING` to
 /// xcodebuild); without it the tests skip themselves.
 ///
@@ -25,6 +25,8 @@ final class IdeasUITests: XCTestCase {
     private let rejectedTitle = "把报告译成英文"
     private let weeklyBrief = "每周一看一次三家供应商的定价页，只报告和上周相比的变化。"
     private let note = "写两行关于咖啡的笔记。不要上网搜索，也不要用任何工具，直接回复这两行笔记。"
+    /// The note of the seeded last generation, which added none.
+    private let generationNote = "最近的对话多是在测试功能，暂时没有值得提的。"
 
     @MainActor
     func test1TheBadgeCountsTheOpenIdeasUntilTheTabIsOpened() throws {
@@ -39,9 +41,19 @@ final class IdeasUITests: XCTestCase {
 
         snapshot("1a-badge")
         tab.tap()
+
+        // The seeded last generation added no ideas, so its note is the first row of the list, above the cards.
+        let line = element("ideas.generationLine", in: app)
+        XCTAssertTrue(line.waitForExistence(timeout: patience), "the 想法 tab does not say why the last generation added nothing\n\(app.debugDescription)")
+        XCTAssertEqual(line.label, generationNote)
+        let firstCard = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'idea.card.'")).firstMatch
+        XCTAssertTrue(firstCard.waitForExistence(timeout: patience), "the 想法 tab shows no idea\n\(app.debugDescription)")
+        XCTAssertLessThanOrEqual(line.frame.maxY, firstCard.frame.minY, "the note is not above the first idea")
+        snapshot("1b-note")
+
         _ = try openCard(titled: weeklyTitle, in: app)
         XCTAssertTrue(wait(timeout: patience) { badge(of: tab) == nil }, "the badge stayed after the tab was opened: \(badge(of: tab) ?? "")")
-        snapshot("1b-ideas")
+        snapshot("1c-ideas")
 
         // Once seen, an idea stays seen when the tab is left.
         openTab("对话", in: app)
@@ -223,6 +235,7 @@ final class IdeasUITests: XCTestCase {
             "ideas are still open: this check needs the tests before it to have closed them"
         )
         XCTAssertTrue(element("ideas.empty.generate", in: app).waitForExistence(timeout: patience), "the empty state does not offer 现在想想\n\(app.debugDescription)")
+        XCTAssertEqual(element("ideas.generationLine", in: app).label, generationNote, "the note is gone from the empty tab")
         snapshot("6-empty")
     }
 

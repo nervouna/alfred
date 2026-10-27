@@ -7,7 +7,7 @@
 import path from "node:path";
 
 import { parseIdeasAt } from "../agent/config.ts";
-import type { IdeaGenerationAccepted } from "../api/schema.ts";
+import type { IdeaGenerationAccepted, IdeaTrigger } from "../api/schema.ts";
 import type { IdeaReply } from "../api/server.ts";
 import { humanAge, localDate } from "../files.ts";
 import { describeError, log } from "../log.ts";
@@ -24,8 +24,8 @@ export interface DailyIdeasOptions {
   /** The time of day, HH:MM in the process's time zone, which is the owner's. Undefined turns the daily generation off. */
   at: string | undefined;
   ideas: Pick<IdeaStore, "list">;
-  /** Starts a generation: the handler's generateIdeas. */
-  generate: () => IdeaReply<IdeaGenerationAccepted>;
+  /** Starts a generation, told what started it (always the daily schedule): the handler's generateIdeas. */
+  generate: (trigger: IdeaTrigger) => IdeaReply<IdeaGenerationAccepted>;
   /** The file that records the last day done; ideas-schedule.json in the state directory by default. */
   file?: string;
   now?: () => Date;
@@ -94,7 +94,7 @@ export function startDailyIdeas({ at, ideas, generate, file = IDEAS_SCHEDULE_FIL
         finishDay(day);
         return;
       }
-      const reply = generate();
+      const reply = generate("daily");
       if (!reply.ok) {
         say(day, `not started (${reply.error}), trying again on the next check`);
         return;

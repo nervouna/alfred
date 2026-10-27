@@ -57,15 +57,42 @@ extension TestData {
         ["id": eventId, "at": at, "type": "idea.updated", "data": idea]
     }
 
+    /// The last generation of a list as the server sends it. A failed one has no `note`.
+    static func generationObject(
+        _ runId: String = "w4k8ns",
+        status: String = "done",
+        trigger: String = "requested",
+        added: Int = 0,
+        note: String? = "最近的对话多是在测试功能，暂时没有值得提的。",
+        endedAt: String = "2026-10-28T01:15:32.000Z"
+    ) -> [String: Any] {
+        var object: [String: Any] = ["runId": runId, "endedAt": endedAt, "status": status, "trigger": trigger, "added": added]
+        object["note"] = note
+        return object
+    }
+
+    static func generation(
+        _ runId: String = "w4k8ns",
+        status: String = "done",
+        trigger: String = "requested",
+        added: Int = 0,
+        note: String? = "最近的对话多是在测试功能，暂时没有值得提的。",
+        endedAt: String = "2026-10-28T01:15:32.000Z"
+    ) throws -> IdeaGeneration {
+        let object = generationObject(runId, status: status, trigger: trigger, added: added, note: note, endedAt: endedAt)
+        return try JSONDecoder().decode(IdeaGeneration.self, from: JSONSerialization.data(withJSONObject: object))
+    }
+
     /// The body of `GET /api/ideas`.
-    static func ideaList(_ ideas: [[String: Any]], generatingRunId: String? = nil) throws -> Data {
+    static func ideaList(_ ideas: [[String: Any]], generatingRunId: String? = nil, lastGeneration: [String: Any]? = nil) throws -> Data {
         var object: [String: Any] = ["ideas": ideas]
         object["generatingRunId"] = generatingRunId
+        object["lastGeneration"] = lastGeneration
         return try JSONSerialization.data(withJSONObject: object)
     }
 
-    static func decodedIdeaList(_ ideas: [[String: Any]], generatingRunId: String? = nil) throws -> IdeaList {
-        try JSONDecoder().decode(IdeaList.self, from: ideaList(ideas, generatingRunId: generatingRunId))
+    static func decodedIdeaList(_ ideas: [[String: Any]], generatingRunId: String? = nil, lastGeneration: [String: Any]? = nil) throws -> IdeaList {
+        try JSONDecoder().decode(IdeaList.self, from: ideaList(ideas, generatingRunId: generatingRunId, lastGeneration: lastGeneration))
     }
 
     /// A stored `run.updated` event for a run of kind `ideas`, a generation.

@@ -97,7 +97,7 @@ async function cmdRun(args: string[]): Promise<void> {
       handler: agent,
       events: sharedEventLog(),
       tasks: taskCommands(tasks, agent),
-      ideas: ideaCommands(ideas, tasks, { generate: () => agent.generateIdeas() }),
+      ideas: ideaCommands(ideas, tasks, { generate: (trigger) => agent.generateIdeas(trigger) }),
       ...(documents ? { documents: documentCommands(agent, documents) } : {}),
     });
   } catch (err) {
@@ -107,7 +107,7 @@ async function cmdRun(args: string[]): Promise<void> {
   const stopHeartbeat = startHeartbeat(startedAt);
   const stopArchiving = startArchiving(ideas);
   log.info(dailyIdeasAt ? `daily ideas at ${dailyIdeasAt}` : "daily ideas are off");
-  const stopDailyIdeas = startDailyIdeas({ at: dailyIdeasAt, ideas, generate: () => agent.generateIdeas() });
+  const stopDailyIdeas = startDailyIdeas({ at: dailyIdeasAt, ideas, generate: (trigger) => agent.generateIdeas(trigger) });
   log.info(`Alfred running: workspace=${WORKSPACE_DIR} api=${socket}`);
 
   await untilSignal();

@@ -8,6 +8,10 @@ import Foundation
 /// The catalog also knows whether a generation is under way. The list says so with `generatingRunId`; after that the
 /// `run.updated` events of runs of kind `ideas` do: queued or running is under way, anything else is not. A run the
 /// events saw end stays ended, so a list that was read before the end cannot start it again.
+///
+/// How the last generation that ended went is in the list (`lastGeneration`), not in the events. When one added no
+/// ideas the tab says why (`generationLine`), from the moment no generation is under way until a generation starts. A
+/// run the events saw end leaves the line out until a list has been read, which holds the outcome of that run.
 struct IdeaCatalog: Hashable {
     /// Whether a list has been read.
     private(set) var hasLoaded = false
@@ -16,14 +20,24 @@ struct IdeaCatalog: Hashable {
     private var generating: Set<String> = []
     /// The generation runs the events saw end.
     private var ended: Set<String> = []
+    /// The latest generation that ended, as the lists read tell it.
+    private(set) var lastGeneration: IdeaGeneration?
+    /// A generation ended in the events and no list has been read since, so `lastGeneration` may be the one before it.
+    private var awaitingList = false
 
-    /// Merges a list the server returned. The generation it names is under way, and when it names none, none is.
+    /// Merges a list the server returned. The generation it names is under way, and when it names none, none is. Its
+    /// last generation is kept unless the catalog holds a later one: a list read before a generation ended may arrive
+    /// after the list that tells how it ended.
     mutating func load(_ list: IdeaList) {
         hasLoaded = true
         for idea in list.ideas {
             apply(idea)
         }
         generating = list.generatingRunId.flatMap { ended.contains($0) ? nil : [$0] } ?? []
+        if let incoming = list.lastGeneration, incoming.endedAt >= (lastGeneration?.endedAt ?? .distantPast) {
+            lastGeneration = incoming
+        }
+        awaitingList = false
     }
 
     /// A stored `idea.updated` event changes its idea, and a `run.updated` event of a generation its state; any other
@@ -39,10 +53,18 @@ struct IdeaCatalog: Hashable {
             } else {
                 generating.remove(run.id)
                 ended.insert(run.id)
+                awaitingList = true
             }
         default:
             break
         }
+    }
+
+    /// Whether the event is a generation's run leaving queued and running, whatever it left for: how it ended is in the
+    /// list, which the app reads again.
+    static func endsGeneration(_ event: StreamEvent) -> Bool {
+        guard case let .event(stored) = event, case let .runUpdated(run) = stored.payload else { return false }
+        return run.kind == .ideas && run.status != .queued && run.status != .running
     }
 
     /// Takes an idea unless the catalog already holds a newer version of it.
@@ -84,5 +106,12 @@ struct IdeaCatalog: Hashable {
     /// Whether Alfred is generating ideas right now.
     var isGenerating: Bool {
         !generating.isEmpty
+    }
+
+    /// The line for the top of the list when the last generation added no ideas (see `IdeaPresentation.generationLine`).
+    /// None while a generation is under way, or while the list that tells how the last one ended has not been read.
+    var generationLine: String? {
+        guard !isGenerating, !awaitingList, let lastGeneration else { return nil }
+        return IdeaPresentation.generationLine(lastGeneration)
     }
 }

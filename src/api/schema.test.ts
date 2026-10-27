@@ -16,6 +16,7 @@ import {
   FileRefSchema,
   IdeaAcceptedSchema,
   IdeaGenerationAcceptedSchema,
+  IdeaGenerationSchema,
   IdeaListSchema,
   IdeaResultSchema,
   IdeaSchema,
@@ -23,6 +24,7 @@ import {
   MAX_IDEA_NOTE_CHARS,
   MAX_IDEA_WHY_CHARS,
   MAX_MESSAGE_FILES,
+  MAX_NEW_IDEAS,
   MAX_TASK_BUDGET_USD,
   MessageSchema,
   PairingSchema,
@@ -569,6 +571,63 @@ test("an idea's why is 1 to 300 characters, and a rejection's note 1 to 500, nei
   assert.equal(note("x".repeat(MAX_IDEA_NOTE_CHARS + 1)), false, "501 characters");
   assert.equal(note("  "), false, "blank");
   assert.equal(IdeaSchema.safeParse({ ...rejected, rejection: { reason: "not-now" } }).success, true, "no note");
+});
+
+/** The last generation of a response fixture. */
+const lastGeneration = (name: string): Record<string, unknown> => (JSON.parse(readFixture("responses", name)) as { lastGeneration: Record<string, unknown> }).lastGeneration;
+
+test("an idea list may name the last generation that ended: the run, when, how it ended, what started it and how many ideas it added", () => {
+  const nothingNew = lastGeneration("idea-list-nothing-new.json");
+  const list = IdeaListSchema.parse(JSON.parse(readFixture("responses", "idea-list-nothing-new.json")));
+  assert.deepEqual(list.lastGeneration, nothingNew);
+  assert.deepEqual(Object.keys(nothingNew), ["runId", "endedAt", "status", "trigger", "added", "note"]);
+  assert.equal(IdeaListSchema.parse(JSON.parse(readFixture("responses", "idea-list.json"))).lastGeneration, undefined, "it is optional");
+  assert.equal(IdeaListSchema.safeParse({ ideas: [], lastGeneration: { ...nothingNew, runId: "k7m2q" } }).success, false, "a malformed run id");
+  assert.equal(IdeaListSchema.safeParse({ ideas: [], lastGeneration: { ...nothingNew, endedAt: "yesterday" } }).success, false, "a timestamp that is not one");
+  const { runId: _runId, ...withoutRun } = nothingNew;
+  assert.equal(IdeaListSchema.safeParse({ ideas: [], lastGeneration: withoutRun }).success, false, "no run");
+});
+
+test("a generation's status is done or failed, its trigger requested or daily", () => {
+  const done = lastGeneration("idea-list-nothing-new.json");
+  const failed = lastGeneration("idea-list-failed.json");
+  assert.equal(IdeaGenerationSchema.safeParse(done).success, true);
+  assert.equal(done.trigger, "requested");
+  assert.equal(IdeaGenerationSchema.safeParse(failed).success, true);
+  assert.equal(failed.status, "failed");
+  assert.equal(failed.trigger, "daily");
+  for (const status of ["done", "failed"]) assert.equal(IdeaGenerationSchema.safeParse({ ...done, status }).success, true, status);
+  for (const trigger of ["requested", "daily"]) assert.equal(IdeaGenerationSchema.safeParse({ ...done, trigger }).success, true, trigger);
+  assert.equal(IdeaGenerationSchema.safeParse({ ...done, status: "lost" }).success, false, "a status outside the two");
+  assert.equal(IdeaGenerationSchema.safeParse({ ...done, status: "running" }).success, false, "a run that has not ended");
+  assert.equal(IdeaGenerationSchema.safeParse({ ...done, trigger: "weekly" }).success, false, "a trigger outside the two");
+  assert.equal(IdeaGenerationSchema.safeParse({ ...done, trigger: undefined }).success, false, "no trigger");
+});
+
+test("a generation adds an integer number of ideas from 0 to 3", () => {
+  const done = lastGeneration("idea-list-nothing-new.json");
+  const added = (count: unknown) => IdeaGenerationSchema.safeParse({ ...done, added: count }).success;
+  assert.equal(MAX_NEW_IDEAS, 3);
+  for (const count of [0, 1, 2, 3]) assert.equal(added(count), true, String(count));
+  assert.equal(added(4), false, "4");
+  assert.equal(added(-1), false, "-1");
+  assert.equal(added(1.5), false, "1.5");
+  assert.equal(added("1"), false, "a string");
+  assert.equal(added(undefined), false, "none");
+});
+
+test("a generation's note is optional, 1 to 300 characters and not blank", () => {
+  const done = lastGeneration("idea-list-nothing-new.json");
+  const note = (text: unknown) => IdeaGenerationSchema.safeParse({ ...done, note: text }).success;
+  assert.equal(note("x".repeat(MAX_IDEA_WHY_CHARS)), true, "300 characters");
+  assert.equal(note("x".repeat(MAX_IDEA_WHY_CHARS + 1)), false, "301 characters");
+  assert.equal(note("😀".repeat(MAX_IDEA_WHY_CHARS)), true, "a character is a code point");
+  assert.equal(note(""), false, "empty");
+  assert.equal(note("  \n"), false, "blank");
+  assert.equal(note(7), false, "not a string");
+  const { note: _note, ...withoutNote } = done;
+  assert.equal(IdeaGenerationSchema.safeParse(withoutNote).success, true, "no note");
+  assert.equal("note" in lastGeneration("idea-list-failed.json"), false, "the failed fixture has none");
 });
 
 test("idea.accept takes the task's fields and an optional schedule, idea.reject a reason and an optional note, idea.generate nothing", () => {

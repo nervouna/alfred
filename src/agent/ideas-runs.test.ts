@@ -10,7 +10,7 @@ import { after, afterEach, mock, test } from "node:test";
 import type { Options, query } from "@anthropic-ai/claude-agent-sdk";
 import type { SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 
-import type { Message, Run } from "../api/schema.ts";
+import type { IdeaTrigger, Message, Run } from "../api/schema.ts";
 import type { Outbound } from "../channels.ts";
 
 // Dates are local: pin the zone before any date is made, so the result does not depend on the machine.
@@ -201,8 +201,13 @@ const idea = (extra: Record<string, unknown> = {}) => ({
   ...extra,
 });
 const onceIdea = (extra: Record<string, unknown> = {}) => idea({ title: "对比带宽", kind: "once", schedule: null, model: "sonnet", estimateUsd: 0.4, provenance: "文档「价格报告」", ...extra });
-/** A successful answer of the fake model: these ideas, and this cost. */
-const answers = (ideas: unknown[], cost = 0.083): Ended => ({ structured_output: { ideas }, total_cost_usd: cost, modelUsage: { [MODELS.sonnet]: { costUSD: cost } } });
+const NOTE = "这次想到的都在这里了。";
+/** A successful answer of the fake model: these ideas, this cost and this note. */
+const answers = (ideas: unknown[], cost = 0.083, note: unknown = NOTE): Ended => ({
+  structured_output: { ideas, note },
+  total_cost_usd: cost,
+  modelUsage: { [MODELS.sonnet]: { costUSD: cost } },
+});
 
 /** A handler on the stack, a fake channel and a fake model. */
 function start(s: Stack, options: { turn?: IdeasTurn; ideas?: boolean; stateFile?: string } = {}) {
@@ -234,13 +239,22 @@ function start(s: Stack, options: { turn?: IdeasTurn; ideas?: boolean; stateFile
       return {};
     }
   };
-  /** Starts a generation and returns its run id; fails the test when it is refused. */
-  const generate = () => {
-    const reply = handler.generateIdeas();
+  /** Starts a generation, one the owner requested unless the test says otherwise, and returns its run id; fails the test when it is refused. */
+  const generate = (trigger: IdeaTrigger = "requested") => {
+    const reply = handler.generateIdeas(trigger);
     assert.ok(reply.ok, reply.ok ? "" : `${reply.status} ${reply.error}`);
     return reply.body.runId;
   };
   return { handler, app, agent, messages, runs, lastRuns, ideasRuns, run, ended, state, generate };
+}
+
+/** How the store recorded the end of the run (its last generation without the run and the time), or undefined when the last one is another run's. */
+function outcomeOf(s: Stack, runId: string) {
+  const last = s.ideas.lastGeneration();
+  if (last?.runId !== runId) return undefined;
+  const { runId: _runId, endedAt, ...outcome } = last;
+  assert.ok(Math.abs(Date.parse(endedAt) - Date.now()) < 60_000, `it ended just now, not ${endedAt}`);
+  return outcome;
 }
 
 /** The lines the log wrote while a test ran. */
@@ -258,7 +272,7 @@ test("generating answers 202 with the run's id, records a run of kind ideas, and
   const hold = held();
   const t = start(s, { turn: hold.turn });
 
-  const reply = t.handler.generateIdeas();
+  const reply = t.handler.generateIdeas("requested");
 
   assert.ok(reply.ok);
   assert.deepEqual(IdeaGenerationAcceptedSchema.parse(reply.body), { runId: reply.body.runId });
@@ -366,7 +380,7 @@ test("the call is given the inputs: the conversation of the event log, memory, a
   );
 });
 
-test("the log has the inputs line, one line per idea added with its id, title and provenance, and the end line with the cost and how many were added", async () => {
+test("the log has the inputs line, one line per idea added with its id, title and provenance, and the end line with the cost, how many were added and the note", async () => {
   const s = stack();
   const lines = logged();
   const t = start(s, { turn: () => answers([idea(), onceIdea(), idea({ title: "t".repeat(81) })], 0.0831) });
@@ -381,7 +395,7 @@ test("the log has the inputs line, one line per idea added with its id, title an
   assert.ok(mine.some((line) => line.startsWith(`ideas inputs run=${runId} memories=`)));
   assert.ok(mine.includes(`ideas added run=${runId} idea=${added1.id} title="每周追踪 VPS 价格" provenance="记忆「VPS 项目」；10-25 的对话"`), mine.join("\n"));
   assert.ok(mine.includes(`ideas added run=${runId} idea=${added2.id} title="对比带宽" provenance="文档「价格报告」"`));
-  assert.ok(mine.includes(`ideas done run=${runId} cost=$0.083 added=2`), mine.join("\n"));
+  assert.ok(mine.includes(`ideas done run=${runId} cost=$0.083 added=2 note="${NOTE}"`), mine.join("\n"));
   assert.ok(mine.some((line) => /dropping idea 3/.test(line)), "the idea that was left out is logged");
 });
 
@@ -404,17 +418,24 @@ test("a result that is not a success ends the run failed, charges the cost so fa
   assert.ok(lines().some((line) => line.includes(`ideas failed run=${runId} cost=$0.210`)));
   await sleep(50);
   assert.deepEqual(t.messages(), [], "a failure posts nothing either");
+  assert.deepEqual(outcomeOf(s, runId), { status: "failed", trigger: "requested", added: 0 }, "and records that it failed, with no note");
 });
 
 test("an answer that is not an answer, a call without a result and a call that throws all end the run failed", async () => {
   const s = stack();
-  const turns: IdeasTurn[] = [() => ({ structured_output: { items: [] }, total_cost_usd: 0.05 }), () => undefined, () => Promise.reject(new Error("socket hang up"))];
+  const turns: IdeasTurn[] = [
+    () => ({ structured_output: { items: [] }, total_cost_usd: 0.05 }),
+    () => undefined,
+    () => Promise.reject(new Error("socket hang up")),
+    () => answers([onceIdea()], 0.07, "  "),
+  ];
   let n = 0;
   const t = start(s, { turn: (...args) => (turns[n++] ?? turns[0] ?? (() => undefined))(...args) });
   const expected = [
     [0.05, /malformed/],
     [0, /without a result/],
     [0, /socket hang up/],
+    [0.07, /malformed answer: note /],
   ] as const;
   for (const [cost, pattern] of expected) {
     const runId = t.generate();
@@ -423,24 +444,120 @@ test("an answer that is not an answer, a call without a result and a call that t
     assert.equal(t.run(runId)?.costUsd, cost);
     assert.match(t.run(runId)?.error ?? "", pattern);
     assert.equal(s.ideas.generatingRunId(), undefined, "cleared, so the next can start");
+    assert.deepEqual(outcomeOf(s, runId), { status: "failed", trigger: "requested", added: 0 }, "each records that it failed, with no note");
   }
   assert.deepEqual(s.ideas.list(), []);
-  assert.equal(t.state().spendDayUsd, 0.05);
+  assert.equal(t.state().spendDayUsd, 0.05 + 0.07, "a malformed answer is charged what it cost, the idea in it is not added");
 });
 
-test("the generation is cleared in the store before the run is recorded as ended", async () => {
+test("the generation is cleared and its outcome recorded in the store before the run is recorded as ended", async () => {
   const s = stack();
   const t = start(s, { turn: () => answers([onceIdea()]) });
-  const seen: (string | undefined)[] = [];
+  const seen: [string | undefined, string | undefined][] = [];
   const stop = s.events.subscribe((event) => {
-    if (event.type === "run.updated" && event.data.kind === "ideas" && event.data.status === "done") seen.push(s.ideas.generatingRunId());
+    if (event.type === "run.updated" && event.data.kind === "ideas" && event.data.status === "done") seen.push([s.ideas.generatingRunId(), s.ideas.lastGeneration()?.runId]);
   });
   cleanups.push(async () => stop());
 
   const runId = t.generate();
   await until("the run to end", () => t.ended(runId));
 
-  assert.deepEqual(seen, [undefined], "a client told the run is done finds no generation");
+  assert.deepEqual(seen, [[undefined, runId]], "a client told the run is done finds no generation, and reads the outcome of this one");
+});
+
+test("a done run records its outcome: how many ideas the store added, the note, what started it and when, with no event", async () => {
+  const s = stack();
+  const t = start(s, { turn: () => answers([idea(), onceIdea(), idea({ title: "t".repeat(81) })], 0.083, "  这次想到两个，\n还有一个没成形。 ") });
+  const before = s.events.readSince(0).length;
+
+  const runId = t.generate("requested");
+  await until("the run to end", () => t.ended(runId));
+
+  assert.equal(s.ideas.list().length, 2, "the third was dropped");
+  assert.deepEqual(outcomeOf(s, runId), { status: "done", trigger: "requested", added: 2, note: "这次想到两个， 还有一个没成形。" }, "added counts the ideas in the store, not the proposals");
+  const saved = IdeaListSchema.parse(JSON.parse(fs.readFileSync(path.join(s.dir, "ideas.json"), "utf8")));
+  assert.deepEqual(saved.lastGeneration, s.ideas.lastGeneration());
+  assert.equal(saved.generatingRunId, undefined);
+  const types = s.events.readSince(before).map((event) => event.type);
+  assert.equal(types.filter((type) => type !== "run.updated" && type !== "idea.updated").length, 0, "nothing but the run and the ideas");
+  assert.equal(types.filter((type) => type === "idea.updated").length, 2, "and the outcome is no event of its own");
+});
+
+test("a generation that adds none is done, and records added 0 with the model's reason", async () => {
+  const s = stack();
+  const t = start(s, { turn: () => answers([], 0.04, "最近的对话多是在测试功能，暂时没有值得提的。") });
+
+  const runId = t.generate("daily");
+  await until("the run to end", () => t.ended(runId));
+
+  assert.equal(t.run(runId)?.status, "done");
+  assert.deepEqual(outcomeOf(s, runId), { status: "done", trigger: "daily", added: 0, note: "最近的对话多是在测试功能，暂时没有值得提的。" });
+});
+
+test("a long note is cut to the contract's length, so the outcome is still recorded", async () => {
+  const s = stack();
+  const t = start(s, { turn: () => answers([onceIdea()], 0.05, "理".repeat(400)) });
+
+  const runId = t.generate();
+  await until("the run to end", () => t.ended(runId));
+
+  assert.equal(t.run(runId)?.status, "done");
+  assert.equal(s.ideas.generatingRunId(), undefined);
+  assert.equal(Array.from(s.ideas.lastGeneration()?.note ?? "").length, 300);
+});
+
+test("each end replaces the last outcome: the latest generation that ended is the one recorded", async () => {
+  const s = stack();
+  const turns: IdeasTurn[] = [() => answers([], 0.01, "第一次没有。"), () => ({ subtype: "error_max_budget_usd", is_error: true, total_cost_usd: 0.2, errors: [] }), () => answers([onceIdea()], 0.05, "第三次有一个。")];
+  let n = 0;
+  const t = start(s, { turn: (...args) => (turns[n++] ?? (() => undefined))(...args) });
+
+  const first = t.generate("daily");
+  await until("the first run to end", () => t.ended(first));
+  assert.deepEqual(outcomeOf(s, first), { status: "done", trigger: "daily", added: 0, note: "第一次没有。" });
+  const second = t.generate("requested");
+  await until("the second run to end", () => t.ended(second));
+  assert.deepEqual(outcomeOf(s, second), { status: "failed", trigger: "requested", added: 0 });
+  const third = t.generate("requested");
+  await until("the third run to end", () => t.ended(third));
+  assert.deepEqual(outcomeOf(s, third), { status: "done", trigger: "requested", added: 1, note: "第三次有一个。" });
+});
+
+test("a generation that is refused records nothing", async () => {
+  const s = stack();
+  const hold = held();
+  const t = start(s, { turn: hold.turn });
+  const first = t.generate();
+  await until("the call", () => hold.waiting === 1);
+
+  assert.equal(t.handler.generateIdeas("daily").ok, false, "refused while one runs");
+  hold.release(answers([]));
+  await until("the run to end", () => t.ended(first));
+
+  assert.equal(s.ideas.lastGeneration()?.runId, first);
+  assert.equal(s.ideas.lastGeneration()?.trigger, "requested");
+});
+
+test("the trigger reaches the call: a requested generation is asked for at least one idea, a daily one may give none", async () => {
+  const s = stack();
+  const t = start(s, { turn: () => answers([onceIdea()]) });
+
+  const requested = t.generate("requested");
+  await until("the requested run to end", () => t.ended(requested));
+  const daily = t.generate("daily");
+  await until("the daily run to end", () => t.ended(daily));
+
+  const [first, second] = t.agent.ideasCalls;
+  assert.ok(first && second);
+  const minItems = (options: Options) => (options.outputFormat?.schema as { properties: { ideas: { minItems?: number } } }).properties.ideas.minItems;
+  assert.match(first.prompt, /The owner asked for ideas just now\. Suggest one to three ideas/);
+  assert.match(String(first.options.systemPrompt), /at least one/);
+  assert.equal(minItems(first.options), 1);
+  assert.match(second.prompt, /Suggest up to three ideas, or none\.$/);
+  assert.match(String(second.options.systemPrompt), /Zero ideas is a good answer/);
+  assert.equal(minItems(second.options), undefined);
+  assert.equal(outcomeOf(s, requested), undefined, "the daily one replaced the requested one");
+  assert.equal(s.ideas.lastGeneration()?.trigger, "daily");
 });
 
 test("a second generation is refused with 409 while one is running, and a new one starts once it is over", async () => {
@@ -449,9 +566,9 @@ test("a second generation is refused with 409 while one is running, and a new on
   const t = start(s, { turn: hold.turn });
   const first = t.generate();
 
-  assert.deepEqual(t.handler.generateIdeas(), { ok: false, status: 409, error: "ideas are being generated" });
+  assert.deepEqual(t.handler.generateIdeas("requested"), { ok: false, status: 409, error: "ideas are being generated" });
   await until("the call", () => hold.waiting === 1);
-  assert.deepEqual(t.handler.generateIdeas(), { ok: false, status: 409, error: "ideas are being generated" });
+  assert.deepEqual(t.handler.generateIdeas("requested"), { ok: false, status: 409, error: "ideas are being generated" });
   assert.equal(t.ideasRuns().length, 1, "a refusal leaves no run behind");
 
   hold.release(answers([]));
@@ -469,7 +586,7 @@ test("over the daily cap a generation is refused with 409, and nothing is record
   fs.writeFileSync(s.stateFile, JSON.stringify({ owner: { model: "sonnet", sessionCostUsd: 0, totalCostUsd: 5, spendDay: localDate(), spendDayUsd: 5 } }));
   const t = start(s);
 
-  assert.deepEqual(t.handler.generateIdeas(), { ok: false, status: 409, error: "today's spend cap is reached" });
+  assert.deepEqual(t.handler.generateIdeas("requested"), { ok: false, status: 409, error: "today's spend cap is reached" });
   assert.deepEqual(t.ideasRuns(), []);
   assert.equal(s.ideas.generatingRunId(), undefined);
   await sleep(50);
@@ -481,13 +598,13 @@ test("a generation's own cost counts toward the cap: once it has spent the day's
   const t = start(s, { turn: () => answers([], 5) });
   const runId = t.generate();
   await until("the run to end", () => t.ended(runId));
-  assert.deepEqual(t.handler.generateIdeas(), { ok: false, status: 409, error: "today's spend cap is reached" });
+  assert.deepEqual(t.handler.generateIdeas("requested"), { ok: false, status: 409, error: "today's spend cap is reached" });
 });
 
 test("without an idea store a generation is refused with 503", () => {
   const s = stack();
   const t = start(s, { ideas: false });
-  assert.deepEqual(t.handler.generateIdeas(), { ok: false, status: 503, error: "idea generation is not available" });
+  assert.deepEqual(t.handler.generateIdeas("requested"), { ok: false, status: 503, error: "idea generation is not available" });
   assert.deepEqual(t.ideasRuns(), []);
 });
 
@@ -495,7 +612,7 @@ test("once Alfred is shutting down a generation is refused with 409", async () =
   const s = stack();
   const t = start(s);
   await t.handler.shutdown();
-  assert.deepEqual(t.handler.generateIdeas(), { ok: false, status: 409, error: "Alfred is shutting down" });
+  assert.deepEqual(t.handler.generateIdeas("requested"), { ok: false, status: 409, error: "Alfred is shutting down" });
   assert.deepEqual(t.ideasRuns(), []);
 });
 
@@ -520,6 +637,28 @@ test("a shutdown aborts a live generation: it ends lost, the generation is clear
   assert.equal(t.state().lostRuns, undefined, "a lost generation is not named, as a memory scan is not");
   assert.deepEqual(t.messages(), []);
   assert.ok(lines().some((line) => line.includes(`ideas lost run=${runId}`)));
+  assert.equal(s.ideas.lastGeneration(), undefined, "a lost run records no outcome");
+});
+
+test("a lost run leaves the outcome of the generation before it as it was", async () => {
+  const s = stack();
+  const hold = held();
+  const turns: IdeasTurn[] = [() => answers([], 0.01, "上一次没有。"), hold.turn];
+  let n = 0;
+  const t = start(s, { turn: (...args) => (turns[n++] ?? (() => undefined))(...args) });
+  const first = t.generate("daily");
+  await until("the first run to end", () => t.ended(first));
+  const before = s.ideas.lastGeneration();
+  assert.ok(before);
+  const second = t.generate("requested");
+  await until("the call", () => hold.waiting === 1);
+
+  await t.handler.shutdown();
+
+  await until("the second run to end", () => t.ended(second));
+  assert.equal(t.run(second)?.status, "lost");
+  assert.equal(s.ideas.generatingRunId(), undefined);
+  assert.deepEqual(s.ideas.lastGeneration(), before);
 });
 
 test("a generation whose call answers anyway after the shutdown began adds nothing and is lost", async () => {
@@ -541,6 +680,7 @@ test("a generation whose call answers anyway after the shutdown began adds nothi
   assert.equal(t.run(runId)?.status, "lost");
   assert.deepEqual(s.ideas.list(), []);
   assert.equal(s.ideas.generatingRunId(), undefined);
+  assert.equal(s.ideas.lastGeneration(), undefined, "its answer is not recorded either");
 });
 
 test("a start finds a generation a crash left running: it is marked lost, and the owner is not told", async () => {
@@ -622,7 +762,7 @@ test("the idea commands hand idea.generate to the handler, and the answers are t
   const s = stack();
   const hold = held();
   const t = start(s, { turn: hold.turn });
-  const commands = ideaCommands(s.ideas, s.tasks, { generate: () => t.handler.generateIdeas() });
+  const commands = ideaCommands(s.ideas, s.tasks, { generate: (trigger) => t.handler.generateIdeas(trigger) });
 
   const first = await commands.generate({ type: "idea.generate" });
   assert.ok(first.ok);

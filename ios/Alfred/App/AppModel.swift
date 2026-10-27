@@ -127,6 +127,10 @@ final class AppModel {
     /// Where the chat should scroll to. It stays until the chat has seen the row on screen (`revealHandled`).
     private(set) var revealRequest: RevealRequest?
 
+    /// The read of the idea list that follows a generation's end, while it runs, and whether another end came meanwhile.
+    @ObservationIgnored private var ideaRefreshAfterGeneration: Task<Void, Never>?
+    @ObservationIgnored private var ideaRefreshAgain = false
+
     @ObservationIgnored private let store: any CredentialStore
     @ObservationIgnored private let session: URLSession
     @ObservationIgnored private let makeClientId: () -> String
@@ -253,6 +257,7 @@ final class AppModel {
         documentFailure = nil
         ideaCatalog = IdeaCatalog()
         ideaFailure = nil
+        ideaRefreshAgain = false
         seenIdeas.clear()
         composerText = ""
         taskOpenRequest = nil
@@ -347,6 +352,8 @@ final class AppModel {
             documentCatalog.apply(event)
             ideaCatalog.apply(event)
             noteIdeasSeen()
+            // How a generation went is in the list, not in its run: read it again now that the run has ended.
+            if IdeaCatalog.endsGeneration(event) { refreshIdeasAfterGeneration() }
             trackItem(of: event)
             if case let .event(stored) = event, case let .messageCreated(message) = stored.payload, let clientId = message.clientId {
                 failedClientIds.remove(clientId)
@@ -535,6 +542,23 @@ final class AppModel {
         } catch {
             guard self.credentials == credentials else { return }
             ideaFailure = LoadFailure.message(for: error)
+        }
+    }
+
+    /// Reads the idea list again because a generation's run ended, which is when its outcome (`lastGeneration`) is
+    /// there. Ends that arrive while a read is out, as a replay of the event log brings many, are covered by one more
+    /// read after it, not one each.
+    private func refreshIdeasAfterGeneration() {
+        guard ideaRefreshAfterGeneration == nil else {
+            ideaRefreshAgain = true
+            return
+        }
+        ideaRefreshAfterGeneration = Task {
+            repeat {
+                ideaRefreshAgain = false
+                await refreshIdeas()
+            } while ideaRefreshAgain
+            ideaRefreshAfterGeneration = nil
         }
     }
 

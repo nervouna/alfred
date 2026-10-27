@@ -46,7 +46,9 @@
 // session and no workspace access, so it needs neither the side runs' lane nor the memory lock and runs beside the
 // chat and beside a task or revision run. It is started by the owner's request or the daily schedule (ideas/schedule.ts),
 // charges its cost to the owner's day as a task run does, says nothing to the owner and ends in the idea store: the app
-// learns of it from idea.updated and run.updated. A shutdown aborts it, and it ends lost.
+// learns of it from idea.updated and run.updated. What started it (the owner's request or the daily schedule) goes to
+// the prompt, and how it ended (the ideas added and the model's note, or that it failed) is recorded in the store
+// before the run ends, for the app to read with the list. A shutdown aborts it, and it ends lost, recording nothing.
 //
 // While a run works it also publishes live events (see events.ts): the main
 // agent's reply text as it is written, and every step the run records.
@@ -59,7 +61,7 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { HookCallbackMatcher, Options, Query, SDKPartialAssistantMessage, SDKResultMessage } from "@anthropic-ai/claude-agent-sdk";
 
 import type { DocumentReply, IdeaReply } from "../api/server.ts";
-import type { Annotation, DocumentRevise, IdeaGenerationAccepted, Question, RevisionAccepted, Task } from "../api/schema.ts";
+import type { Annotation, DocumentRevise, IdeaGenerationAccepted, IdeaTrigger, Question, RevisionAccepted, Task } from "../api/schema.ts";
 import { InvalidAnswer, SerialQueue, outboundKind, recordInbound, recorded, workspaceRelative } from "../channels.ts";
 import type { Inbound, Intake, Outbound } from "../channels.ts";
 import type { Documents } from "../documents/register.ts";
@@ -313,10 +315,11 @@ export interface AgentHandler extends Intake {
   reviseDocument(command: DocumentRevise): DocumentReply<RevisionAccepted>;
   /**
    * Records a run of kind ideas, marks it in the idea store and generates ideas beside everything else, without
-   * waiting for it. Refused with 503 without an idea store, 409 while Alfred is shutting down, when the day's spend cap
-   * is reached, and while a generation is running. A refusal leaves nothing behind.
+   * waiting for it. The trigger says what started it: a requested generation (the owner's) is asked for at least one
+   * idea, a daily one may give none. Refused with 503 without an idea store, 409 while Alfred is shutting down, when
+   * the day's spend cap is reached, and while a generation is running. A refusal leaves nothing behind.
    */
-  generateIdeas(): IdeaReply<IdeaGenerationAccepted>;
+  generateIdeas(trigger: IdeaTrigger): IdeaReply<IdeaGenerationAccepted>;
   /** Stop the work the handler started, before the process exits. */
   shutdown(): Promise<void>;
 }
@@ -1590,7 +1593,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
     store.update(owner, { totalCostUsd: user.totalCostUsd + costUsd, spendDay: localDate(), spendDayUsd: spentToday(user) + costUsd });
   }
 
-  function generateIdeas(): IdeaReply<IdeaGenerationAccepted> {
+  function generateIdeas(trigger: IdeaTrigger): IdeaReply<IdeaGenerationAccepted> {
     if (!ideas) return { ok: false, status: 503, error: "idea generation is not available" };
     if (closing) return { ok: false, status: 409, error: "Alfred is shutting down" };
     if (overBudget(owner)) return { ok: false, status: 409, error: "today's spend cap is reached" };
@@ -1604,7 +1607,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
     }
     const run = { recorder, abort: new AbortController(), shutdown: false };
     ideasRun = run;
-    const generation = runIdeas(run, ideas);
+    const generation = runIdeas(run, ideas, trigger);
     inFlight.add(generation);
     void generation.finally(() => inFlight.delete(generation));
     return { ok: true, body: { runId: recorder.id } };
@@ -1612,20 +1615,24 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
 
   /**
    * Generates the ideas of one run: reads the inputs, asks the model, adds the ideas to the store, charges the cost
-   * and ends the run, done or failed, or lost when a shutdown aborted it. The store's generation is cleared before the
-   * run is recorded as ended, so a client told it ended finds no generation. It says nothing to the owner and never throws.
+   * and ends the run, done or failed, or lost when a shutdown aborted it. The store's generation is cleared, and how
+   * it ended recorded (done with the ideas added and the model's note, failed with neither; nothing for a lost run),
+   * before the run is recorded as ended, so a client told it ended finds no generation and reads the outcome. It says
+   * nothing to the owner and never throws.
    */
-  async function runIdeas(run: NonNullable<typeof ideasRun>, ideaStore: IdeaStore): Promise<void> {
+  async function runIdeas(run: NonNullable<typeof ideasRun>, ideaStore: IdeaStore, trigger: IdeaTrigger): Promise<void> {
     const { recorder } = run;
     let status: SideEnd["status"] = "done";
     let failure: string | undefined;
     let cost = 0;
     let added = 0;
+    let note: string | undefined;
     try {
       const inputs = collectInputs({ workspace: WORKSPACE_DIR, ideas: ideaStore, tasks, documents: documents?.store, events });
       log.info(inputsLine(recorder.id, inputs));
-      const generation = await askForIdeas(inputs, { runId: recorder.id, abortController: run.abort, runQuery });
+      const generation = await askForIdeas(inputs, { runId: recorder.id, trigger, abortController: run.abort, runQuery });
       cost = generation.costUsd;
+      note = generation.note;
       // A call that answers after the shutdown began adds nothing: the run is lost.
       if (!run.shutdown) {
         const proposed = generation.ideas;
@@ -1658,13 +1665,15 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
       }
       recorder.update({ costUsd: cost });
       try {
-        ideaStore.finishGeneration(recorder.id);
+        // A lost run records no outcome, only the end of its generation.
+        const outcome = status === "done" ? { status, trigger, added, note } : status === "failed" ? { status, trigger, added: 0 } : undefined;
+        ideaStore.finishGeneration(recorder.id, outcome);
       } catch (err) {
         log.error(`clearing the generation of run ${recorder.id} failed: ${describeError(err)}`);
       }
       recorder.finish(status, failure);
       ideasRun = undefined;
-      if (status === "done") log.info(`ideas done run=${recorder.id} cost=${usd(cost)} added=${added}`);
+      if (status === "done") log.info(`ideas done run=${recorder.id} cost=${usd(cost)} added=${added} note=${JSON.stringify(note ?? "")}`);
       else if (status === "lost") log.warn(`ideas lost run=${recorder.id} cost=${usd(cost)}: ${failure}`);
       else log.error(`ideas failed run=${recorder.id} cost=${usd(cost)}: ${failure}`);
     }

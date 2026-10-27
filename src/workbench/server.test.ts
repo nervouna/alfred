@@ -676,6 +676,22 @@ test("GET /api/ideas gives the ideas of the file in every state, with the genera
   fs.rmSync(IDEAS_FILE, { force: true });
 });
 
+test("GET /api/ideas gives the last generation the store wrote, a done one with its note and a failed one without", async () => {
+  fs.mkdirSync(path.dirname(IDEAS_FILE), { recursive: true });
+  try {
+    for (const name of ["idea-list-nothing-new.json", "idea-list-failed.json"]) {
+      const list = JSON.parse(fs.readFileSync(new URL(`../../fixtures/api/responses/${name}`, import.meta.url), "utf8")) as IdeaList;
+      fs.writeFileSync(IDEAS_FILE, JSON.stringify(list));
+      const res = await fetch(`${open}/api/ideas`, { headers: bearer(paired.token) });
+      assert.equal(res.status, 200, name);
+      assert.deepEqual(IdeaListSchema.parse(await res.json()), list, name);
+      assert.ok(list.lastGeneration, name);
+    }
+  } finally {
+    fs.rmSync(IDEAS_FILE, { force: true });
+  }
+});
+
 test("GET /api/ideas needs a device token, and refuses other methods with 405", async () => {
   await assertApiError(await fetch(`${open}/api/ideas`), 401, "without a token");
   await assertApiError(await fetch(`${guarded}/api/ideas`), 403, "on the tunnel without Access");

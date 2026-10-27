@@ -11,8 +11,9 @@
 //   --seed-documents  before Alfred starts, write two documents for the app's 文档 tab and register them: a Markdown
 //                     report with three versions and an HTML report with one. A document that is already there is
 //                     left alone, so a stack that is started again keeps what it has.
-//   --seed-ideas      before Alfred starts, write three open ideas (one once, two recurring) and one rejected idea into
-//                     ideas.json, for the app's ideas. An ideas file that already exists is left alone.
+//   --seed-ideas      before Alfred starts, write three open ideas (one once, two recurring), one rejected idea and a last
+//                     generation that added none, with a note, into ideas.json, for the app's ideas. An ideas file that
+//                     already exists is left alone.
 //   --ideas-at        start the daily generation of ideas at this local time (HH:MM). Without it the stack never generates
 //                     ideas on its own, so it spends nothing on them; the app's button (idea.generate) works either way and
 //                     calls the model (Sonnet, at most $0.20 a generation).
@@ -299,9 +300,13 @@ const SEED_IDEAS: IdeaDraft[] = [
   },
 ];
 
+/** What the seed's last generation says it found: nothing, which the 想法 tab shows above the list. */
+const SEED_GENERATION_NOTE = "最近的对话多是在测试功能，暂时没有值得提的。";
+
 /**
  * Writes the seed ideas through the idea store, all of one made-up generation run: the last one is rejected as "not
- * now", with a note. Only when there is no ideas file yet, as seedDocuments leaves the documents that exist.
+ * now", with a note. A later made-up generation then ended done, having added none, with a note on why. Only when
+ * there is no ideas file yet, as seedDocuments leaves the documents that exist.
  */
 function seedIdeas(): void {
   if (fs.existsSync(IDEAS_FILE)) {
@@ -313,7 +318,10 @@ function seedIdeas(): void {
   const declined = added.at(-1);
   if (!declined) throw new Error("the seed ideas were not added");
   store.reject(declined.id, { reason: "not-now", note: "等这周的报告定稿再说。" });
-  log.info(`app-dev: seeded ${added.length} ideas into ${IDEAS_FILE}`);
+  const lastRunId = newRunId();
+  store.startGeneration(lastRunId);
+  store.finishGeneration(lastRunId, { status: "done", trigger: "daily", added: 0, note: SEED_GENERATION_NOTE });
+  log.info(`app-dev: seeded ${added.length} ideas and a last generation that added none into ${IDEAS_FILE}`);
 }
 
 async function main(options: Options): Promise<void> {
@@ -349,7 +357,7 @@ async function main(options: Options): Promise<void> {
     // Pushed before the API's cleanup, so it runs after the API closes, as archiving stops after the API in `run`.
     cleanups.push(startArchiving(ideas));
     // Only with --ideas-at: the stack does not spend on ideas on its own. The app's button works without it.
-    cleanups.push(startDailyIdeas({ at: options.ideasAt, ideas, generate: () => handler.generateIdeas() }));
+    cleanups.push(startDailyIdeas({ at: options.ideasAt, ideas, generate: (trigger) => handler.generateIdeas(trigger) }));
     // Without documents the API answers every document command 503, as in `run`.
     cleanups.push(
       await startApi({
@@ -357,7 +365,7 @@ async function main(options: Options): Promise<void> {
         handler,
         events: sharedEventLog(),
         tasks: taskCommands(tasks, handler),
-        ideas: ideaCommands(ideas, tasks, { generate: () => handler.generateIdeas() }),
+        ideas: ideaCommands(ideas, tasks, { generate: (trigger) => handler.generateIdeas(trigger) }),
         ...(documents ? { documents: documentCommands(handler, documents) } : {}),
       }),
     );

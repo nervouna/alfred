@@ -75,10 +75,12 @@ public struct IdeaGenerationAccepted: Decodable, Hashable, Sendable {
     public let runId: String
 }
 
-/// The body of `GET /api/ideas`: every idea Alfred keeps, newest created first, and the generation run while one is queued or running.
+/// The body of `GET /api/ideas`: every idea Alfred keeps, newest created first, the generation run while one is queued
+/// or running, and the latest generation that ended.
 public struct IdeaList: Decodable, Hashable, Sendable {
     public let ideas: [AlfredIdea]
     public let generatingRunId: String?
+    public let lastGeneration: IdeaGeneration?
 }
 
 /// The body of any error response from the app API.
