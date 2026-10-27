@@ -1,9 +1,17 @@
 import XCTest
 
-/// Pairs the app with a running `scripts/app-dev.ts` and looks at the chat's header: a round button on each side, the
-/// avatar in the middle, taller than the bar and hanging over the messages. It runs no model (`/status` is answered by
-/// Alfred itself). The pairing comes from the environment variable `ALFRED_PAIRING` (pass `TEST_RUNNER_ALFRED_PAIRING` to
-/// xcodebuild); without it the tests skip themselves.
+/// Pairs the app with a running `scripts/app-dev.ts` and looks at the chat's header: a bar as tall as the system's inline
+/// navigation bar with a round button on each side, and the avatar in the middle, outside the bar, with its lower third
+/// below the bar's edge over the messages. It runs no model (`/status` is answered by Alfred itself). The pairing comes
+/// from the environment variable `ALFRED_PAIRING` (pass `TEST_RUNNER_ALFRED_PAIRING` to xcodebuild); without it the tests
+/// skip themselves.
+///
+/// When `ALFRED_SHOTS` names a directory (pass `TEST_RUNNER_ALFRED_SHOTS`), the list test saves screenshots of the chat
+/// there, in the light and in the dark appearance.
+///
+/// Not tested here: that the bar keeps its height while `连接中…` shows. The test cannot make the stream disconnect (the
+/// pairing needs the server up, the stream is `app-dev`'s, and the app connects within a few milliseconds), so the capsule
+/// is only on screen for a moment at launch. `ChatHeaderTests` hosts the chat unconnected and connected and compares.
 final class ChatHeaderUITests: XCTestCase {
     private let patience: TimeInterval = 30
 
@@ -40,6 +48,60 @@ final class ChatHeaderUITests: XCTestCase {
         leading.tap()
         XCTAssertTrue(menu.exists && avatar.exists, "the header changed after a tap on the placeholder\n\(app.debugDescription)")
         XCTAssertEqual(app.sheets.count + app.alerts.count, 0, "the placeholder opened something\n\(app.debugDescription)")
+    }
+
+    /// The bar is as tall as the system's inline navigation bar, holds the two buttons, and the avatar's lower third, 24 pt
+    /// of its 72, is below the bar's bottom edge.
+    ///
+    /// The system's inline bar is read from the 新建任务 sheet, whose bar has an inline title. The 任务 tab's own bar is not
+    /// one: its title is a large title, which makes that bar taller while the list is at its start (a hosted
+    /// `UINavigationBar` is 106 pt with a large title and 54 pt with an inline one on an iPhone 17 in iOS 27), so it is not
+    /// a measure of the inline bar. Its height is in the failure message.
+    @MainActor
+    func testTheBarIsAsTallAsTheSystemsInlineBarAndTheAvatarHangsBelowIt() throws {
+        let app = try launchPaired()
+        let bar = element("chat.header.bar", in: app)
+        let leading = element("chat.header.leading", in: app)
+        let menu = element("chat.header.menu", in: app)
+        let avatar = element("chat.header.avatar", in: app)
+        XCTAssertTrue(bar.waitForExistence(timeout: patience), "no bar\n\(app.debugDescription)")
+        XCTAssertTrue(avatar.waitForExistence(timeout: patience), "no avatar\n\(app.debugDescription)")
+        let barFrame = bar.frame
+        let avatarFrame = avatar.frame
+
+        // The bar spans the screen, holds the two buttons, centred on it, and nothing else of the header.
+        XCTAssertEqual(barFrame.width, app.frame.width, accuracy: 1, "the bar is not as wide as the screen")
+        XCTAssertGreaterThan(barFrame.minY, 44, "the bar is in the status bar")
+        for button in [leading, menu] {
+            XCTAssertTrue(barFrame.insetBy(dx: -1, dy: -1).contains(button.frame), "a button is not inside the bar: \(button.frame) in \(barFrame)")
+            XCTAssertEqual(button.frame.midY, barFrame.midY, accuracy: 1, "a button is not centred on the bar")
+        }
+
+        // The avatar is centred, 72 pt, its top inside the bar and its lower third (24 pt) below the bar's bottom edge.
+        XCTAssertEqual(avatarFrame.height, 72, accuracy: 1)
+        XCTAssertEqual(avatarFrame.maxY - barFrame.maxY, 24, accuracy: 2, "the avatar's lower third is not below the bar: avatar \(avatarFrame), bar \(barFrame)")
+        XCTAssertEqual(barFrame.maxY - avatarFrame.minY, 48, accuracy: 2)
+
+        // The bar is exactly as tall as the system's inline navigation bar, here the one of the new task form.
+        app.tabBars.buttons["任务"].tap()
+        let tasksBar = app.navigationBars.firstMatch
+        XCTAssertTrue(tasksBar.waitForExistence(timeout: patience), "no navigation bar on the tasks tab\n\(app.debugDescription)")
+        let tasksBarHeight = tasksBar.frame.height
+        let add = element("tasks.add", in: app)
+        XCTAssertTrue(add.waitForExistence(timeout: patience), "no add button on the tasks tab\n\(app.debugDescription)")
+        add.tap()
+        let formBar = app.navigationBars["新建任务"]
+        XCTAssertTrue(formBar.waitForExistence(timeout: patience), "the new task form did not open\n\(app.debugDescription)")
+        let inlineHeight = formBar.frame.height
+        XCTAssertEqual(barFrame.height, inlineHeight, accuracy: 1, "the chat's bar (\(barFrame.height) pt) is not as tall as the system's inline bar (\(inlineHeight) pt; the tasks tab's bar with its large title is \(tasksBarHeight) pt)")
+        element("task.form.cancel", in: app).tap()
+
+        // Back on the chat nothing moved.
+        app.tabBars.buttons["对话"].tap()
+        XCTAssertTrue(bar.waitForExistence(timeout: patience), "no bar after coming back\n\(app.debugDescription)")
+        XCTAssertEqual(bar.frame.height, barFrame.height, accuracy: 0.5)
+        XCTAssertEqual(bar.frame.minY, barFrame.minY, accuracy: 0.5)
+        XCTAssertEqual(avatar.frame.maxY, avatarFrame.maxY, accuracy: 0.5)
     }
 
     @MainActor
@@ -82,6 +144,32 @@ final class ChatHeaderUITests: XCTestCase {
         let message = element(first.identifier, in: app)
         XCTAssertGreaterThanOrEqual(message.frame.minY, avatar.frame.maxY, "the avatar covers the first message (\(first.identifier))")
         XCTAssertTrue(message.isHittable, "the first message cannot be hit (\(first.identifier))\n\(app.debugDescription)")
+
+        // The chat at its start, and a little further down, where messages pass under the bar and the avatar.
+        snapshotBothAppearances("chat-start", app)
+        let from = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6))
+        from.press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.42)))
+        usleep(1_000_000)
+        snapshotBothAppearances("chat-under-bar", app)
+    }
+
+    // MARK: Screenshots
+
+    /// Saves a screenshot of the app, in the light and in the dark appearance, when `ALFRED_SHOTS` names a directory:
+    /// `<name>-light.png` and `<name>-dark.png`. The device goes back to the appearance it had.
+    @MainActor
+    private func snapshotBothAppearances(_ name: String, _ app: XCUIApplication) {
+        guard let directory = ProcessInfo.processInfo.environment["ALFRED_SHOTS"], !directory.isEmpty else { return }
+        let folder = URL(fileURLWithPath: directory, isDirectory: true)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let original = XCUIDevice.shared.appearance
+        defer { XCUIDevice.shared.appearance = original }
+        for (suffix, appearance) in [("light", XCUIDevice.Appearance.light), ("dark", .dark)] {
+            XCUIDevice.shared.appearance = appearance
+            // The app restyles itself, and the scroll edge effect settles.
+            usleep(1_500_000)
+            try? XCUIScreen.main.screenshot().pngRepresentation.write(to: folder.appending(path: "\(name)-\(suffix).png"))
+        }
     }
 
     // MARK: The list
