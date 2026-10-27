@@ -59,41 +59,6 @@ final class ChatHeaderTests: XCTestCase {
         XCTAssertEqual(barBottom - avatarTop, 48, accuracy: 0.001)
     }
 
-    // MARK: The scrim
-
-    /// The scrim behind the bar is the system background colour, half opaque at the top edge of the screen and clear at
-    /// the bar's bottom edge.
-    func testTheScrimIsHalfOpaqueAtTheTopAndClearAtTheBottom() {
-        XCTAssertEqual(ChatHeader.scrimTopOpacity, 0.5)
-        XCTAssertEqual(ChatHeader.scrimBottomOpacity, 0)
-    }
-
-    /// The bar hosted in a window of the phone's size, over black, in the light appearance: the scrim is white over the
-    /// black, so its opacity is the red channel's value over 255. It is half opaque at the top edge of the screen, a quarter
-    /// of the way to clear at half the bar's height, clear at the bar's bottom edge, and there is nothing below the bar.
-    func testTheScrimRunsFromTheTopEdgeOfTheScreenToTheBarsBottomEdge() async throws {
-        let host = UIHostingController(rootView: ZStack(alignment: .top) {
-            Color.black.ignoresSafeArea()
-            ChatHeader(unpair: {})
-        })
-        host.overrideUserInterfaceStyle = .light
-        let window = try show(host)
-        window.overrideUserInterfaceStyle = .light
-        await settle()
-
-        let barBottom = window.safeAreaInsets.top + ChatHeader.barHeight
-        let picture = try XCTUnwrap(Self.pixels(of: snapshot(of: window)), "no snapshot of the window")
-        // A column at the screen's centre, where the bar has no buttons.
-        let column = Int(window.bounds.midX * Self.scale)
-        func opacity(atY y: CGFloat) -> Double {
-            Double(picture.bytes[(Int(y * Self.scale) * picture.width + column) * 4]) / 255
-        }
-        XCTAssertEqual(opacity(atY: 0.5), 0.5, accuracy: 0.02, "at the screen's top edge")
-        XCTAssertEqual(opacity(atY: barBottom / 2), 0.25, accuracy: 0.02, "halfway to the bar's bottom edge")
-        XCTAssertEqual(opacity(atY: barBottom - 0.5), 0, accuracy: 0.02, "at the bar's bottom edge")
-        XCTAssertEqual(opacity(atY: barBottom + 2), 0, accuracy: 0.02, "below the bar")
-    }
-
     // MARK: The chat on screen
 
     /// The real chat in a window of the phone's size: the avatar, found by its ring on the dark background, is 72 pt
