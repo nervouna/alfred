@@ -380,4 +380,33 @@ final class AlfredClientTests: XCTestCase {
             _ = try await client.generateIdeas()
         }
     }
+
+    func testSettingsFetchesTheDetailAndDecodesIt() async throws {
+        let (client, log) = try makeClient { _ in StubReply(chunks: [(try? fixture("responses/settings-detail.json")) ?? Data()]) }
+        let detail = try await client.settings()
+        XCTAssertEqual(detail.spentTodayUsd, 4.82)
+        XCTAssertEqual(detail.settings.overridden, [.model, .dailyBudgetUsd, .ideasAt])
+        let entry = try XCTUnwrap(log.entries.first)
+        XCTAssertEqual(entry.request.httpMethod, "GET")
+        XCTAssertEqual(try encodedPath(entry.request), "/api/settings")
+        assertCredentials(entry.request)
+    }
+
+    func testUpdateSettingsPostsTheCommandAndDecodesTheSettings() async throws {
+        let (client, log) = try makeClient { _ in StubReply(chunks: [(try? fixture("responses/settings-result.json")) ?? Data()]) }
+        let settings = try await client.updateSettings(SettingsChanges(model: .opus, dailyBudgetUsd: 30, reset: [.runBudgetUsd]))
+        XCTAssertNil(settings.ideasAt)
+        let entry = try XCTUnwrap(log.entries.first)
+        XCTAssertEqual(entry.request.httpMethod, "POST")
+        XCTAssertEqual(try encodedPath(entry.request), "/api/commands")
+        try assertSameJSON(entry.body, fixture("commands/settings-update.json"))
+        assertCredentials(entry.request)
+    }
+
+    func testUpdateSettingsTurnsTheIdeasTimeOffAsNull() async throws {
+        let (client, log) = try makeClient { _ in StubReply(chunks: [(try? fixture("responses/settings-result.json")) ?? Data()]) }
+        _ = try await client.updateSettings(SettingsChanges(ideasAt: .off))
+        let entry = try XCTUnwrap(log.entries.first)
+        try assertSameJSON(entry.body, fixture("commands/settings-update-ideas-off.json"))
+    }
 }
