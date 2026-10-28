@@ -21,7 +21,8 @@ struct ChatView: View {
                 .overlay(alignment: .top) {
                     ChatHeaderOverlay(state: AvatarState(isWorking: model.runningChatRun != nil), isConnected: model.isConnected)
                 }
-                .safeAreaInset(edge: .bottom, spacing: 0) {
+                // Like the header, a bar: the list's soft edge effect fades the messages out under the composer.
+                .safeAreaBar(edge: .bottom, spacing: 0) {
                     Composer(model: model)
                 }
                 // The header is drawn by hand. The title stays for the back button of the screens this one opens.
@@ -75,8 +76,9 @@ private struct MessageList: View {
             .contentMargins(.top, topMargin, for: .scrollContent)
             .defaultScrollAnchor(.bottom)
             // The system's soft edge effect at the top: messages blur and fade out under the bar's bottom edge, as in
-            // Photos.
+            // Photos. The composer's bar gets the same at the bottom.
             .scrollEdgeEffectStyle(.soft, for: .top)
+            .scrollEdgeEffectStyle(.soft, for: .bottom)
             .scrollDismissesKeyboard(.interactively)
             .onScrollTargetVisibilityChange(idType: String.self, threshold: 0.5) { visibleIds = Set($0) }
             .onChange(of: contentSignature) {
@@ -365,6 +367,7 @@ private struct Composer: View {
     @State private var showsFileImporter = false
     @State private var pickedPhotos: [PhotosPickerItem] = []
     @State private var loadingPhotos = 0
+    @FocusState private var isFocused: Bool
 
     private var isBlank: Bool {
         model.composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -378,57 +381,19 @@ private struct Composer: View {
         (!isBlank || !model.draftAttachments.isEmpty) && !model.isStaging && loadingPhotos == 0
     }
 
+    private var hasStrip: Bool {
+        !model.draftAttachments.isEmpty || model.isStaging || loadingPhotos > 0
+    }
+
     var body: some View {
         VStack(spacing: 8) {
             if !model.taskRunBanners.isEmpty {
                 TaskRunBanners(model: model)
             }
-            if !model.draftAttachments.isEmpty || model.isStaging || loadingPhotos > 0 {
-                AttachmentStrip(model: model, loadingPhotos: loadingPhotos > 0)
-            }
-            HStack(alignment: .bottom, spacing: 8) {
-                Menu {
-                    Button("照片", systemImage: "photo.on.rectangle") { showsPhotoPicker = true }
-                    Button("文件", systemImage: "doc") { showsFileImporter = true }
-                } label: {
-                    Image(systemName: "plus.circle.fill")
-                        .font(.system(size: 32))
-                        .foregroundStyle(.secondary)
-                }
-                .disabled(room <= 0)
-                .accessibilityLabel("添加附件")
-                TextField("消息", text: $model.composerText, axis: .vertical)
-                    .lineLimit(1...6)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 18))
-                    .accessibilityIdentifier("composer")
-                if let run = model.runningChatRun {
-                    Button {
-                        Task { await model.stop(runId: run.id) }
-                    } label: {
-                        Image(systemName: "stop.circle.fill")
-                            .font(.system(size: 32))
-                    }
-                    .tint(.red)
-                    .accessibilityLabel("停止")
-                }
-                Button {
-                    let sent = model.composerText
-                    model.composerText = ""
-                    Task { await model.sendDraft(sent) }
-                } label: {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: 32))
-                }
-                .disabled(!canSend)
-                .accessibilityLabel("发送")
-                .accessibilityIdentifier("send")
-            }
+            field
         }
-        .padding(.horizontal)
+        .padding(.horizontal, 16)
         .padding(.vertical, 8)
-        .background(.bar)
         .photosPicker(
             isPresented: $showsPhotoPicker,
             selection: $pickedPhotos,
@@ -450,6 +415,85 @@ private struct Composer: View {
             pickedPhotos = []
             Task { await attachPhotos(items) }
         }
+    }
+
+    /// The height of a line of the field, which is also the tap target of the buttons in it.
+    private static let rowHeight: CGFloat = 44
+    private static let cornerRadius: CGFloat = 22
+
+    /// One glass shape holding, top to bottom, the chosen files (only while there are some) and a row of the attach
+    /// button, the text and the send button. A single line is as high as the row, which makes the shape a capsule; more
+    /// lines make it a rounded rectangle with the same radius. Nothing inside is glass: the shape alone is.
+    private var field: some View {
+        VStack(spacing: 0) {
+            if hasStrip {
+                AttachmentStrip(model: model, loadingPhotos: loadingPhotos > 0)
+                    .padding(.top, 8)
+            }
+            HStack(alignment: .bottom, spacing: 0) {
+                attachButton
+                TextField("消息", text: $model.composerText, axis: .vertical)
+                    .lineLimit(1...6)
+                    .textFieldStyle(.plain)
+                    .focused($isFocused)
+                    .padding(.vertical, 10)
+                    .frame(minHeight: Self.rowHeight)
+                    // The whole row takes the tap, not only the line of text in it.
+                    .contentShape(.rect)
+                    .onTapGesture { isFocused = true }
+                    .accessibilityIdentifier("composer")
+                sendSlot
+            }
+        }
+        .clipShape(.rect(cornerRadius: Self.cornerRadius))
+        .glassEffect(.regular.interactive(), in: .rect(cornerRadius: Self.cornerRadius))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("composer.field")
+    }
+
+    private var attachButton: some View {
+        Menu {
+            Button("照片", systemImage: "photo.on.rectangle") { showsPhotoPicker = true }
+            Button("文件", systemImage: "doc") { showsFileImporter = true }
+        } label: {
+            Image(systemName: "plus")
+                .font(.system(size: 20, weight: .medium))
+                .foregroundStyle(.secondary)
+                .frame(width: Self.rowHeight, height: Self.rowHeight)
+                .contentShape(.rect)
+        }
+        // A menu draws its label in the tint, which is the accent colour; the plus is secondary.
+        .tint(.secondary)
+        .disabled(room <= 0)
+        .accessibilityLabel("添加附件")
+    }
+
+    /// The send button's place at the trailing edge, as wide as the button so that the text does not reflow when the
+    /// button comes and goes. The button is there only while there is something to send.
+    private var sendSlot: some View {
+        ZStack {
+            if canSend {
+                Button {
+                    let sent = model.composerText
+                    model.composerText = ""
+                    Task { await model.sendDraft(sent) }
+                } label: {
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 32, height: 32)
+                        .background(Color.accentColor, in: .circle)
+                        .frame(width: Self.rowHeight, height: Self.rowHeight)
+                        .contentShape(.rect)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("发送")
+                .accessibilityIdentifier("send")
+                .transition(.scale.combined(with: .opacity))
+            }
+        }
+        .frame(width: Self.rowHeight, height: Self.rowHeight)
+        .animation(.easeOut(duration: 0.15), value: canSend)
     }
 
     /// Reads the photos the picker chose into the app and attaches them.
