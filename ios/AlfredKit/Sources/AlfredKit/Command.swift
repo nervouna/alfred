@@ -25,6 +25,8 @@ public enum Command: Hashable, Sendable, Codable {
     case ideaGenerate
     /// Changes settings. Only the settings `changes` sets are sent, and the ones it resets.
     case settingsUpdate(SettingsChanges)
+    /// Replaces the root ALFRED.md with `text`. `version` is the `version` of the `Rules` the owner edited.
+    case rulesSave(text: String, version: String)
 
     private enum CodingKeys: String, CodingKey {
         case type, clientId, text, runId, files, questionId, answers
@@ -114,6 +116,11 @@ public enum Command: Hashable, Sendable, Codable {
                 ideasAt: try Self.decodeIdeasAt(container),
                 reset: try container.decodeIfPresent([SettingKey].self, forKey: .reset) ?? []
             ))
+        case "rules.save":
+            self = .rulesSave(
+                text: try container.decode(String.self, forKey: .text),
+                version: try container.decode(String.self, forKey: .version)
+            )
         default:
             throw DecodingError.dataCorruptedError(
                 forKey: .type,
@@ -203,6 +210,10 @@ public enum Command: Hashable, Sendable, Codable {
             if !changes.reset.isEmpty {
                 try container.encode(changes.reset, forKey: .reset)
             }
+        case let .rulesSave(text, version):
+            try container.encode("rules.save", forKey: .type)
+            try container.encode(text, forKey: .text)
+            try container.encode(version, forKey: .version)
         }
     }
 
