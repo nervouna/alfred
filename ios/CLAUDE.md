@@ -10,7 +10,9 @@
 - Add `ShareUITests`' photo before the run, not during it (`xcrun simctl addmedia <udid> ios/Alfred/Avatar/Clips/still.png`): an `addmedia` during a run stalled the simulator and hung the suite.
 - `ChatUITests.testPairThenChat` can fail with no `/status` reply when it is the first test against a fresh `app-dev`; it passes on a rerun, so rerun before blaming a change.
 - After `simctl install` of a differently built app, the notification prompt can block the chat until it is answered; pair through a short UI test (for example `ChatHeaderUITests/testTheMenuStillOffersUnpairing`), which answers it, before taking screenshots with `xcrun simctl io <udid> screenshot`.
-- XCUITest calls a control hittable while it sits under the keyboard or in a sheet that is still resizing: tap once its frame holds still, as `tapWhenSettled` in `IdeasUITests` does.
+- XCUITest calls a control hittable while it sits under the keyboard or in a sheet that is still resizing: tap once its frame holds still, as `tapWhenSettled` in `IdeasUITests` does. The other way round, the chat's avatar (a button over the list) can be reported not hittable while a tap on it works: tap it once its frame holds still, and let the page it opens be the check (`ProfileUITests`).
+- A `confirmationDialog` that a toolbar button opens is a popover with no cancel button: tap the `PopoverDismissRegion` element to dismiss it without choosing.
+- `XCUIKeyboardKey.forwardDelete` is typed as a character (U+F728) in a text view; only `.delete` works, so clear a text view by deleting back from the end of its text, where a view that has just taken focus puts the caret.
 - A row under the glass navigation bar or tab bar also counts as hittable, but the tap lands on the bar: scroll it between the bars first (`scrollBetweenBars` in `TasksUITests` and `IdeasUITests`).
 - A build or test run cut short (`BUILD INTERRUPTED`, exit 143) while another session's `xcodebuild` is running is not a failure of the change: check `ps -axo pid,etime,command | grep xcodebuild`, leave the other one alone, and rerun on a simulator of your own.
 

@@ -106,6 +106,17 @@ public struct AlfredClient: Sendable {
         try await get(SettingsDetail.self, "/api/settings")
     }
 
+    /// GET /api/rules: the root ALFRED.md, with the version a save names.
+    public func rules() async throws -> Rules {
+        try await get(Rules.self, "/api/rules")
+    }
+
+    /// POST /api/commands with `rules.save`. Alfred answers 200 with the file as it now holds it. A `version` that is not
+    /// the file's current one is a 409, and a text over `maxBytes` or with a NUL a 400.
+    public func saveRules(text: String, version: String) async throws -> Rules {
+        try JSONDecoder().decode(Rules.self, from: await post(.rulesSave(text: text, version: version)))
+    }
+
     /// GET /api/documents: the documents, newest updated first.
     public func documents() async throws -> DocumentList {
         try await get(DocumentList.self, "/api/documents")

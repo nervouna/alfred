@@ -92,6 +92,10 @@ final class AppModel {
     private(set) var ideaCatalog = IdeaCatalog()
     /// Why the last read of the idea list failed, until a read works.
     private(set) var ideaFailure: String?
+    /// The root ALFRED.md as the server last gave it: read by `refreshRules`, replaced by a save of the owner's.
+    private(set) var rules: Rules?
+    /// How many reads of the rules are out.
+    private var rulesReads = 0
     /// Alfred's settings: what the server says, with the owner's unsaved changes laid over them.
     private(set) var settingsCatalog = SettingsCatalog()
     /// Why the last read of the settings failed, until a read works.
@@ -273,6 +277,7 @@ final class AppModel {
         ideaCatalog = IdeaCatalog()
         ideaFailure = nil
         ideaRefreshAgain = false
+        rules = nil
         settingsCatalog = SettingsCatalog()
         settingsFailure = nil
         settingsTimer?.cancel()
@@ -755,6 +760,52 @@ final class AppModel {
         } catch {
             guard self.credentials == credentials else { return }
             documentFailure = LoadFailure.message(for: error)
+        }
+    }
+
+    // MARK: Rules
+
+    /// Whether a read of the rules is out.
+    var isLoadingRules: Bool {
+        rulesReads > 0
+    }
+
+    /// Reads ALFRED.md (`GET /api/rules`) and keeps it. The profile page asks for it when it appears and on pull to
+    /// refresh, and 载入新内容 asks after a conflict. A failure is shown in the usual alert and leaves what was kept. The
+    /// rules read are handed back, `nil` when the read did not work.
+    @discardableResult
+    func refreshRules() async -> Rules? {
+        guard let client, let credentials else { return nil }
+        rulesReads += 1
+        defer { rulesReads -= 1 }
+        do {
+            let read = try await client.rules()
+            // The pairing may have changed while the request was out.
+            guard self.credentials == credentials else { return nil }
+            rules = read
+            return read
+        } catch where LoadFailure.isCancellation(error) {
+            return nil
+        } catch {
+            guard self.credentials == credentials else { return nil }
+            noteAccess(error)
+            actionFailure = LoadFailure.message(for: error)
+            return nil
+        }
+    }
+
+    /// Replaces ALFRED.md with `text`, against the `version` the owner edited. The rules the server answers with are kept at
+    /// once. A 409, a version that is not the file's current one, is `.conflict` and shows nothing: the editor asks the
+    /// owner what to do. Any other refusal or failure shows in the usual alert, with the server's message when it gave one.
+    func saveRules(text: String, version: String) async -> RulesSaving {
+        do {
+            let saved = try await perform({ try await $0.saveRules(text: text, version: version) }, then: { rules = $0 })
+            return .saved(saved)
+        } catch AlfredError.http(status: 409, message: _) {
+            return .conflict
+        } catch {
+            actionFailure = LoadFailure.commandMessage(for: error)
+            return .failed
         }
     }
 
