@@ -23,7 +23,7 @@ Two listeners share one handler.
 `/api/` takes `GET` and `POST` and answers errors as `{"error": "…"}`. Two checks come first: the Access JWT on the tunnel (403), then on every listener a paired, unrevoked device's bearer token (401). Routes are in `apiRoute` (`server.ts`), shapes in `src/api/schema.ts`.
 
 - **Forwarded** to Alfred's socket by `forward.ts`: `POST /api/commands`, `POST /api/uploads` and `GET /api/events` take what [the command API](api.md) takes. A command is checked with `parseCommand` first, so only what Alfred would accept goes on, and the workbench holds no Alfred secret. While the socket cannot be reached the answer is 503 and the app retries.
-- **Read here:** `GET /api/runs`, `/api/runs/<id>`, `/api/tasks`, `/api/tasks/<id>`, `/api/ideas`, `/api/documents`, `/api/documents/<id>`, and `/api/files/<path>` (a workspace file under `Content-Security-Policy: sandbox`; `?version=<commit>` reads it from the workspace's history).
+- **Read here:** `GET /api/runs`, `/api/runs/<id>`, `/api/tasks`, `/api/tasks/<id>`, `/api/ideas`, `/api/documents`, `/api/documents/<id>`, `/api/rules` (the root `ALFRED.md` with its version; 413 over 64 KB), and `/api/files/<path>` (a workspace file under `Content-Security-Policy: sandbox`; `?version=<commit>` reads it from the workspace's history).
 - **Also:** `GET /api/ping` (204) and `POST /api/push`, which stores the device's APNs registration.
 
 ## Pairing and devices

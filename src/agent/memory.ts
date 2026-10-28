@@ -149,11 +149,16 @@ export function capIndex(lines: string[], maxLines = INDEX_MAX_LINES, maxBytes =
   return { lines: kept, total: lines.length };
 }
 
-/** Write via a temp file and rename, so readers never see a partial file. */
+/** Write via a temp file and rename, so readers never see a partial file. A failure leaves no temp file behind. */
 export function writeFileAtomic(file: string, content: string): void {
   const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, content);
-  fs.renameSync(tmp, file);
+  try {
+    fs.writeFileSync(tmp, content);
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    fs.rmSync(tmp, { force: true });
+    throw err;
+  }
 }
 
 /** Text that looks like a credential. Extraction drops such candidates. */
