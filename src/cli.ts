@@ -8,6 +8,7 @@ import qrcode from "qrcode-terminal";
 import { checkMemoryScanSettings, ideasAt } from "./agent/config.ts";
 import { resolveInside } from "./agent/guard.ts";
 import { createAgentHandler } from "./agent/handler.ts";
+import { memoryCommands } from "./agent/memory-edit.ts";
 import { MEMORY_LOCK_FILE, describeScan, scanTranscripts } from "./agent/memory-scan.ts";
 import { MemoryLock } from "./agent/memory.ts";
 import { rulesCommands } from "./agent/rules.ts";
@@ -92,7 +93,7 @@ async function cmdRun(args: string[]): Promise<void> {
   const agent = createAgentHandler({ out: appOutbound(), tasks, documents, ideas });
   let closeApi: () => Promise<void>;
   try {
-    // Without documents the API answers every document command 503, and a saved ALFRED.md is not committed to the history.
+    // Without documents the API answers every document command 503, and a saved ALFRED.md or an edited memory is not committed to the history.
     closeApi = await startApi({
       socket,
       handler: agent,
@@ -100,6 +101,8 @@ async function cmdRun(args: string[]): Promise<void> {
       tasks: taskCommands(tasks, agent),
       ideas: ideaCommands(ideas, tasks, { generate: (trigger) => agent.generateIdeas(trigger) }),
       rules: rulesCommands({ workspace: WORKSPACE_DIR, versions: documents?.versions }),
+      // The memory commands hold the handler's memory lock: a second lock in this process would not share it.
+      memory: memoryCommands(agent, { workspace: WORKSPACE_DIR, versions: documents?.versions }),
       ...(documents ? { documents: documentCommands(agent, documents) } : {}),
     });
   } catch (err) {

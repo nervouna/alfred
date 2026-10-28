@@ -1,0 +1,9 @@
+{
+  "type": "memory.update",
+  "file": "Prefer Short Answers.md",
+  "version": "1f3c78403c0a8c52064fbc17d0ecb2923f27d40e665ca61f52f72d8e0127e4e0",
+  "name": "回答要简短",
+  "description": "先给结论，再给理由，最多五行。",
+  "kind": "preference",
+  "body": "主人在手机上看回复。第一行给结论，后面最多四行短句说明理由。"
+}

@@ -1,0 +1,7 @@
+{
+  "type": "memory.create",
+  "name": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn",
+  "description": "Use kilometres and kilograms.",
+  "kind": "preference",
+  "body": "The owner thinks in metric units."
+}
