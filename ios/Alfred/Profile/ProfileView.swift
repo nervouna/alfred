@@ -1,8 +1,9 @@
 import AlfredKit
 import SwiftUI
 
-/// Alfred's profile page, pushed from his avatar in the chat: the avatar large with his name, and a segmented control that
-/// pins under them with the page's two parts, 规则 and 记忆.
+/// Alfred's profile page, pushed from his avatar in the chat: a segmented control pinned at the top with the page's two
+/// parts, 规则 and 记忆, over content that scrolls under it. The avatar large with his name is the first thing in that
+/// content, in both parts, so it scrolls away and leaves the room to the text or the list.
 ///
 /// 规则 shows the root ALFRED.md as Markdown. 编辑 replaces it with an editor; the bar then holds 取消 and 保存, the back
 /// button is gone, the control is off and the avatar steps aside, so the owner leaves the editor only by saving or
@@ -28,36 +29,35 @@ struct ProfileView: View {
     @FocusState private var editorFocused: Bool
 
     var body: some View {
-        VStack(spacing: 0) {
-            // The editor needs the room: with the keyboard up, the avatar would leave it a few lines.
-            if draft == nil {
-                Hero(state: AvatarState(isWorking: model.runningChatRun != nil))
+        content
+            // The control is pinned over the content, which scrolls under it with the system's soft edge.
+            .safeAreaBar(edge: .top, spacing: 0) {
+                picker
             }
-            content
-                .safeAreaBar(edge: .top, spacing: 0) {
-                    picker
-                }
-        }
-        .animation(.default, value: draft == nil)
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("profile.page")
-        .navigationTitle(draft == nil ? "" : "编辑规则")
-        .navigationBarTitleDisplayMode(.inline)
-        .navigationBarBackButtonHidden(draft != nil)
-        .toolbar { bar }
-        .task {
-            await model.refreshRules()
-            hasRead = true
-        }
-        .confirmationDialog("放弃修改？", isPresented: $confirmsDiscarding, titleVisibility: .visible) {
-            Button("放弃修改", role: .destructive) { draft = nil }
-        }
-        .alert("ALFRED.md 已被改动", isPresented: conflictShown) {
-            Button("载入新内容") { Task { await reload() } }
-            Button("取消", role: .cancel) {}
-        } message: {
-            Text("载入新内容会放弃你在这里的修改。")
-        }
+            .animation(.default, value: draft == nil)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("profile.page")
+            .navigationTitle(draft == nil ? "" : "编辑规则")
+            .navigationBarTitleDisplayMode(.inline)
+            .navigationBarBackButtonHidden(draft != nil)
+            .toolbar { bar }
+            .task {
+                await model.refreshRules()
+                hasRead = true
+            }
+            .confirmationDialog("放弃修改？", isPresented: $confirmsDiscarding, titleVisibility: .visible) {
+                Button("放弃修改", role: .destructive) { draft = nil }
+            }
+            .alert("ALFRED.md 已被改动", isPresented: conflictShown) {
+                Button("载入新内容") { Task { await reload() } }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("载入新内容会放弃你在这里的修改。")
+            }
+    }
+
+    private var avatarState: AvatarState {
+        AvatarState(isWorking: model.runningChatRun != nil)
     }
 
     // MARK: The page
@@ -85,7 +85,7 @@ struct ProfileView: View {
                 editor
             }
         case .memory:
-            ContentUnavailableView("暂未开放", systemImage: "brain")
+            MemoryListView(avatarState: avatarState)
         }
     }
 
@@ -93,33 +93,41 @@ struct ProfileView: View {
 
     private var reader: some View {
         ScrollView {
-            if let rules = model.rules {
-                if rules.text.isEmpty {
-                    ContentUnavailableView("还没有规则", systemImage: "doc.text")
-                        .frame(maxWidth: .infinity)
-                        .accessibilityIdentifier("profile.rules.empty")
-                } else {
-                    MarkdownBlocksView(blocks: MarkdownDocument.blocks(from: rules.text))
-                        .padding()
-                        .accessibilityElement(children: .contain)
-                        .accessibilityIdentifier("profile.rules.text")
-                }
-            } else if model.isLoadingRules || !hasRead {
-                ProgressView()
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, 48)
-                    .accessibilityIdentifier("profile.rules.loading")
-            } else {
-                ContentUnavailableView {
-                    Label("无法载入规则", systemImage: "exclamationmark.triangle")
-                } actions: {
-                    Button("重试") { Task { await model.refreshRules() } }
-                        .accessibilityIdentifier("profile.rules.retry")
-                }
-                .frame(maxWidth: .infinity)
+            VStack(spacing: 0) {
+                ProfileHero(state: avatarState)
+                rulesText
             }
         }
         .refreshable { await Task { _ = await model.refreshRules() }.value }
+    }
+
+    @ViewBuilder
+    private var rulesText: some View {
+        if let rules = model.rules {
+            if rules.text.isEmpty {
+                ContentUnavailableView("还没有规则", systemImage: "doc.text")
+                    .frame(maxWidth: .infinity)
+                    .accessibilityIdentifier("profile.rules.empty")
+            } else {
+                MarkdownBlocksView(blocks: MarkdownDocument.blocks(from: rules.text))
+                    .padding()
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("profile.rules.text")
+            }
+        } else if model.isLoadingRules || !hasRead {
+            ProgressView()
+                .frame(maxWidth: .infinity)
+                .padding(.top, 48)
+                .accessibilityIdentifier("profile.rules.loading")
+        } else {
+            ContentUnavailableView {
+                Label("无法载入规则", systemImage: "exclamationmark.triangle")
+            } actions: {
+                Button("重试") { Task { await model.refreshRules() } }
+                    .accessibilityIdentifier("profile.rules.retry")
+            }
+            .frame(maxWidth: .infinity)
+        }
     }
 
     // MARK: Editing
@@ -220,8 +228,8 @@ struct ProfileView: View {
     }
 }
 
-/// The avatar large, with his name under it.
-private struct Hero: View {
+/// The avatar large, with his name under it: the first thing in the page's scrolling content, in both parts.
+struct ProfileHero: View {
     let state: AvatarState
 
     var body: some View {

@@ -1,8 +1,8 @@
 import XCTest
 
 /// Pairs the app with a running `node scripts/app-dev.ts` and works Alfred's profile page, which the avatar in the chat's
-/// header opens: the avatar large over his name, the 规则 and 记忆 segments, and ALFRED.md shown as Markdown and edited in
-/// place. The pairing comes from the environment variable `ALFRED_PAIRING` (pass `TEST_RUNNER_ALFRED_PAIRING` to
+/// header opens: the 规则 and 记忆 segments pinned at the top, over content that starts with the avatar large over his name,
+/// and ALFRED.md shown as Markdown and edited in place. The 记忆 part has its own tests (`MemoryUITests`). The pairing comes from the environment variable `ALFRED_PAIRING` (pass `TEST_RUNNER_ALFRED_PAIRING` to
 /// xcodebuild); without it the tests skip themselves. Nothing here runs the model.
 ///
 /// A new stack's workspace holds Alfred's default ALFRED.md, which starts with `# Workspace rules`. The tests that change
@@ -37,8 +37,8 @@ final class ProfileUITests: XCTestCase {
 
         XCTAssertTrue(element("profile.page", in: app).waitForExistence(timeout: patience), "the avatar did not open the profile\n\(app.debugDescription)")
 
-        // The hero: the avatar, 128 pt and centred, over the name, with the segmented control under both. 规则 is the
-        // segment that shows first.
+        // The segmented control is pinned at the top, and the hero, the avatar 128 pt and centred over the name, is the
+        // first thing under it. 规则 is the segment that shows first.
         let avatar = element("profile.avatar", in: app)
         let name = element("profile.name", in: app)
         let parts = element("profile.parts", in: app)
@@ -51,7 +51,7 @@ final class ProfileUITests: XCTestCase {
         XCTAssertEqual(name.frame.midX, app.frame.midX, accuracy: 2)
         XCTAssertGreaterThanOrEqual(name.frame.minY, avatar.frame.maxY - 1, "the name is not under the avatar")
         XCTAssertTrue(parts.exists, "no segmented control\n\(app.debugDescription)")
-        XCTAssertGreaterThanOrEqual(parts.frame.minY, name.frame.maxY - 1, "the segmented control is not under the name")
+        XCTAssertGreaterThanOrEqual(avatar.frame.minY, parts.frame.maxY - 1, "the avatar is not under the segmented control")
         XCTAssertTrue(app.buttons["规则"].exists && app.buttons["记忆"].exists, "the segments are not 规则 and 记忆\n\(app.debugDescription)")
         XCTAssertTrue(app.buttons["规则"].isSelected, "规则 is not the first segment")
         XCTAssertFalse(app.buttons["记忆"].isSelected)
@@ -73,11 +73,15 @@ final class ProfileUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["# \(heading)"].exists, "the Markdown source shows instead of the rendering")
         snapshot("profile")
 
-        // 记忆 is a placeholder for now, and has no 编辑.
+        // 记忆 shows its list, with ＋ and no 编辑, under the same pinned control with the hero as its first row.
+        let partsFrame = parts.frame
         app.buttons["记忆"].tap()
-        XCTAssertTrue(wait(timeout: patience) { app.staticTexts["暂未开放"].exists }, "记忆 shows no placeholder\n\(app.debugDescription)")
+        XCTAssertTrue(element("memory.add", in: app).waitForExistence(timeout: patience), "记忆 shows no list\n\(app.debugDescription)")
+        XCTAssertTrue(app.buttons["记忆"].isSelected, "记忆 is not selected")
         XCTAssertFalse(rulesText.exists, "记忆 still shows the rules")
         XCTAssertFalse(edit.exists, "记忆 has an 编辑 button")
+        XCTAssertTrue(element("profile.avatar", in: app).exists && element("profile.name", in: app).exists, "记忆 has no hero")
+        XCTAssertEqual(parts.frame, partsFrame, "the segmented control moved between the parts")
         app.buttons["规则"].tap()
         XCTAssertTrue(app.staticTexts[heading].waitForExistence(timeout: patience), "规则 does not show the rules again\n\(app.debugDescription)")
 
@@ -225,6 +229,54 @@ final class ProfileUITests: XCTestCase {
         tapWhenSettled(element("profile.cancel", in: app), in: app)
         XCTAssertTrue(app.staticTexts[theirItem].waitForExistence(timeout: patience), "the rules do not show the reloaded text\n\(app.debugDescription)")
         XCTAssertFalse(app.staticTexts["我写的一行"].exists)
+    }
+
+    // MARK: Scrolling
+
+    @MainActor
+    func test5TheHeroScrollsWithTheRulesAndTheControlStaysPinned() throws {
+        let app = try launchPaired()
+        openProfile(in: app)
+        ensureBaseline(in: app)
+
+        // A text longer than the screen, so that there is something to scroll.
+        let items = (1...30).map { "- 第\($0)条规则" }.joined(separator: "\n")
+        let long = "# \(baselineHeading)\n\n\(items)\n"
+        tapWhenSettled(element("profile.edit", in: app), in: app)
+        let editor = element("profile.rules.editor", in: app)
+        XCTAssertTrue(editor.waitForExistence(timeout: patience), "the editor did not open\n\(app.debugDescription)")
+        replaceText(in: editor, with: long)
+        XCTAssertTrue(wait(timeout: patience) { editor.value as? String == long }, "the editor holds \(String(describing: editor.value))")
+        tapWhenSettled(element("profile.save", in: app), in: app)
+        XCTAssertTrue(editor.waitForNonExistence(timeout: patience), "the editor stayed after the save")
+        XCTAssertTrue(app.staticTexts["第30条规则"].waitForExistence(timeout: patience), "the long text does not show\n\(app.debugDescription)")
+
+        // Scrolling moves the avatar and the name out of the way; the control stays where it is, over the text.
+        let avatar = element("profile.avatar", in: app)
+        let parts = element("profile.parts", in: app)
+        let partsFrame = parts.frame
+        let avatarTop = avatar.frame.minY
+        XCTAssertGreaterThanOrEqual(avatarTop, partsFrame.maxY - 1, "the avatar is not under the segmented control")
+        app.swipeUp()
+        app.swipeUp()
+        XCTAssertTrue(wait(timeout: patience) { !avatar.exists || avatar.frame.maxY < partsFrame.maxY + 1 }, "the avatar did not scroll away with the text (at \(avatar.frame))")
+        XCTAssertEqual(parts.frame, partsFrame, "the segmented control moved with the text")
+        snapshot("profile-scrolled")
+        // The control still works where it is: a tap on 记忆 shows the memories, with the hero at the top of its list.
+        app.buttons["记忆"].tap()
+        XCTAssertTrue(element("memory.add", in: app).waitForExistence(timeout: patience), "记忆 shows no list\n\(app.debugDescription)")
+        XCTAssertTrue(app.buttons["记忆"].isSelected, "the tap on 记忆 did not select it")
+        app.buttons["规则"].tap()
+        XCTAssertTrue(app.staticTexts["第30条规则"].waitForExistence(timeout: patience) || app.staticTexts["第1条规则"].waitForExistence(timeout: patience), "规则 does not show the long text again\n\(app.debugDescription)")
+
+        // Scrolling back brings the hero back.
+        app.swipeDown()
+        app.swipeDown()
+        app.swipeDown()
+        XCTAssertTrue(wait(timeout: patience) { avatar.exists && abs(avatar.frame.minY - avatarTop) < 1 }, "the hero did not come back (avatar at \(avatar.frame))")
+
+        // The stack is left with the baseline, as the other tests expect.
+        ensureBaseline(in: app)
     }
 
     // MARK: The screen
