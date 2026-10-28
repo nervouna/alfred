@@ -132,6 +132,54 @@ final class DocumentCatalogTests: XCTestCase {
         XCTAssertEqual(catalog, DocumentCatalog(), "nothing is left of it")
     }
 
+    // MARK: document.updated events at a trashed path
+
+    func testAnUpdateAtATrashedPathLeavesNothingInAnEmptyCatalog() throws {
+        var catalog = DocumentCatalog()
+        catalog.apply(try TestData.streamEvent(TestData.documentEvent(1, document: TestData.documentObject("aaaaaa", path: ".trash/old.md"))))
+        XCTAssertEqual(catalog.documents, [])
+        XCTAssertNil(catalog.document(id: "aaaaaa"))
+    }
+
+    func testAnUpdateAtATrashedPathRemovesTheDocumentWithItsAnnotations() throws {
+        var catalog = try catalog([TestData.documentObject("aaaaaa", path: "notes/old.md"), TestData.documentObject("bbbbbb")])
+        catalog.apply(try TestData.streamEvent(TestData.annotationEvent(1, annotation: TestData.annotationObject("g7e4xr", documentId: "aaaaaa"))))
+        catalog.apply(try TestData.streamEvent(TestData.annotationEvent(2, annotation: TestData.annotationObject("m5t8bq", documentId: "bbbbbb"))))
+        catalog.apply(try TestData.streamEvent(TestData.documentEvent(3, document: TestData.documentObject(
+            "aaaaaa", path: ".trash/old.md", updatedAt: "2026-10-26T11:00:00.000Z"
+        ))))
+        XCTAssertEqual(catalog.documents.map(\.id), ["bbbbbb"])
+        XCTAssertNil(catalog.document(id: "aaaaaa"))
+        XCTAssertEqual(catalog.annotations(of: "aaaaaa"), [])
+        XCTAssertEqual(catalog.annotations(of: "bbbbbb").map(\.id), ["m5t8bq"], "the other documents keep theirs")
+    }
+
+    func testAnUpdateAtANormalPathAfterATrashedOneAddsTheDocumentBack() throws {
+        var catalog = try catalog([TestData.documentObject("aaaaaa", path: "notes/old.md", updatedAt: "2026-10-26T09:00:00.000Z")])
+        catalog.apply(try TestData.streamEvent(TestData.documentEvent(2, document: TestData.documentObject(
+            "aaaaaa", path: ".trash/old.md", updatedAt: "2026-10-26T10:00:00.000Z"
+        ))))
+        XCTAssertEqual(catalog.documents, [])
+
+        catalog.apply(try TestData.streamEvent(TestData.documentEvent(3, document: TestData.documentObject(
+            "aaaaaa", path: "notes/old.md", updatedAt: "2026-10-26T11:00:00.000Z"
+        ))))
+        XCTAssertEqual(catalog.documents.map(\.id), ["aaaaaa"])
+        XCTAssertEqual(catalog.document(id: "aaaaaa")?.path, "notes/old.md")
+    }
+
+    func testReplayingAnUpdateThenItsTrashedUpdateFromAnEmptyCatalogLeavesItEmpty() throws {
+        var catalog = DocumentCatalog()
+        catalog.apply(try TestData.streamEvent(TestData.documentEvent(1, document: TestData.documentObject(
+            "aaaaaa", path: "notes/a.md", updatedAt: "2026-10-26T09:00:00.000Z"
+        ))))
+        catalog.apply(try TestData.streamEvent(TestData.documentEvent(2, document: TestData.documentObject(
+            "aaaaaa", path: ".trash/a.md", updatedAt: "2026-10-26T10:00:00.000Z"
+        ))))
+        XCTAssertEqual(catalog.documents, [])
+        XCTAssertEqual(catalog, DocumentCatalog(), "nothing is left of it")
+    }
+
     // MARK: A task's documents
 
     func testATasksDocumentsAreThoseThatNameItNewestFirst() throws {
