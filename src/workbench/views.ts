@@ -3,7 +3,7 @@
 
 import type { Memory } from "../agent/memory.ts";
 import type { RunFile, RunRecord, RunStatus } from "../runs.ts";
-import { countsForSpend } from "./data.ts";
+import { countsForSpend, spendOnDay } from "./data.ts";
 import type { AlfredStatus, DaySpend, SessionInfo, TranscriptEntry } from "./data.ts";
 import { Html, html, page, query } from "./html.ts";
 
@@ -94,9 +94,8 @@ export function overviewPage(params: { status: AlfredStatus; runs: RunRecord[]; 
   const running = runs.filter((r) => isLive(r.status));
   const today = new Date(now).toLocaleDateString("en-CA");
   const weekAgo = now - 7 * 86_400_000;
-  const spent = runs.filter(countsForSpend);
-  const spendToday = spent.filter((r) => new Date(r.startedAt).toLocaleDateString("en-CA") === today).reduce((a, r) => a + (r.costUsd || 0), 0);
-  const spendWeek = spent.filter((r) => Date.parse(r.startedAt) >= weekAgo).reduce((a, r) => a + (r.costUsd || 0), 0);
+  const spendToday = spendOnDay(runs, today);
+  const spendWeek = runs.filter((r) => countsForSpend(r) && Date.parse(r.startedAt) >= weekAgo).reduce((a, r) => a + (r.costUsd || 0), 0);
 
   const mem = beat?.memory;
   const memory = mem?.cgroupBytes

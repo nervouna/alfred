@@ -13,9 +13,11 @@ struct ChatView: View {
                 // The bar holds only the two buttons and is as tall as the system's own: the list's soft edge
                 // effect ends at its bottom edge.
                 .safeAreaBar(edge: .top, spacing: 0) {
-                    ChatHeader {
-                        confirmsUnpairing = true
-                    }
+                    ChatHeader(
+                        isChatRunning: model.runningChatRun != nil,
+                        send: { command in Task { await ChatView.choose(command, in: model) } },
+                        unpair: { confirmsUnpairing = true }
+                    )
                 }
                 // Over the bar and the list, and not in the bar's content (see ChatHeader).
                 .overlay(alignment: .top) {
@@ -32,6 +34,12 @@ struct ChatView: View {
                     Button("取消配对", role: .destructive) { model.unpair() }
                 }
         }
+    }
+
+    /// Sends a menu command as the owner's message, as typed. The composer is not touched, so a draft being typed stays.
+    @MainActor
+    static func choose(_ command: ChatCommand, in model: AppModel) async {
+        await model.send(command.text)
     }
 }
 

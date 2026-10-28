@@ -8,6 +8,7 @@
 import { z } from "zod";
 
 import type { ModelKey } from "../agent/config.ts";
+import type { MEMORY_TYPES } from "../agent/memory.ts";
 import type { RunKind, RunStatus, RunStep } from "../runs.ts";
 
 /** The command API's request body limit, in bytes. */
@@ -44,6 +45,26 @@ export const MAX_IDEA_WHY_CHARS = 300;
 export const MAX_IDEA_NOTE_CHARS = 500;
 /** A generation adds at most this many ideas. */
 export const MAX_NEW_IDEAS = 3;
+/** The most the owner may set the day's spend to, in USD. */
+export const MAX_DAILY_BUDGET_USD = 100;
+/** The most the owner may set one chat run's spend cap to, in USD: a task's run's cap. */
+export const MAX_RUN_BUDGET_USD = MAX_TASK_BUDGET_USD;
+/** The longest idle time before a new session, in hours: one week. */
+export const MAX_SESSION_IDLE_HOURS = 168;
+/** The smallest context size that triggers compaction the owner may set, in tokens. 0 keeps Claude Code's window. */
+export const MIN_COMPACT_TOKENS = 20_000;
+/** The largest context size that triggers compaction the owner may set, in tokens. */
+export const MAX_COMPACT_TOKENS = 1_000_000;
+/** The longest interval between memory scans, in minutes: one day. */
+export const MAX_MEMORY_SCAN_MINUTES = 1440;
+/** The most one memory scan may spend, in USD. */
+export const MAX_MEMORY_SCAN_BUDGET_USD = 1;
+/** The most characters a memory's name holds. */
+export const MAX_MEMORY_NAME_CHARS = 80;
+/** The most characters a memory's description holds. */
+export const MAX_MEMORY_DESCRIPTION_CHARS = 200;
+/** The most a memory's body holds, in UTF-8 bytes. */
+export const MAX_MEMORY_BODY_BYTES = 8192;
 const MAX_ANNOTATION_REPLY_CHARS = 4000;
 const MAX_TEXT_CHARS = 20_000;
 const MAX_ANSWER_CHARS = 2000;
@@ -305,6 +326,9 @@ export const DocumentSchema = z.object({
   updatedAt: IsoTimestampSchema,
 });
 
+/** The data of document.removed: the document the agent deleted. A restore announces it again as document.updated. */
+export const DocumentRemovedSchema = z.object({ id: DocumentIdSchema });
+
 const AnnotationQuoteSchema = z
   .string()
   .refine((quote) => quote.trim() !== "", "must not be blank")
@@ -445,6 +469,53 @@ export const IdeaSchema = z
     message: "must be set exactly when the idea is rejected",
   });
 
+/** A setting the owner can change: the eight keys of the settings table, in the table's order. */
+export const SettingKeySchema = z.enum([
+  "model",
+  "dailyBudgetUsd",
+  "runBudgetUsd",
+  "sessionIdleHours",
+  "compactTokens",
+  "memoryScanMinutes",
+  "memoryScanBudgetUsd",
+  "ideasAt",
+]);
+const SETTING_KEYS = SettingKeySchema.options;
+
+// `overridden` names each setting once, in the table's order.
+const settingKeysInTableOrder = (keys: z.infer<typeof SettingKeySchema>[]) =>
+  keys.every((key, index) => index === 0 || SETTING_KEYS.indexOf(key) > SETTING_KEYS.indexOf(keys[index - 1] ?? key));
+
+/**
+ * The settings as Alfred holds them: the effective value of each (the built-in default, the environment variable or the
+ * owner's override), `ideasAt` null when the daily generation is off, and `overridden`: the keys the owner has set to
+ * something other than the default, in the table's order. The ranges a command may set are not checked here, since a
+ * deployment's environment may set a value beyond them.
+ */
+export const SettingsSchema = z.object({
+  model: ModelSchema,
+  dailyBudgetUsd: z.number(),
+  runBudgetUsd: z.number(),
+  sessionIdleHours: z.number(),
+  compactTokens: z.int(),
+  memoryScanMinutes: z.number(),
+  memoryScanBudgetUsd: z.number(),
+  ideasAt: TimeOfDaySchema.nullable(),
+  overridden: z.array(SettingKeySchema).refine(settingKeysInTableOrder, "must name each setting once, in the table's order"),
+});
+
+// Compile-time check that Settings has a key for each setting, and overridden besides.
+type SettingsKeysMatch = Expect<Equals<Exclude<keyof z.infer<typeof SettingsSchema>, "overridden">, z.infer<typeof SettingKeySchema>>>;
+
+/** The body of a successful settings.update: the settings as Alfred now holds them. */
+export const SettingsResultSchema = z.object({ settings: SettingsSchema });
+
+/** The body of GET /api/settings: the settings, and what the owner has spent today, in USD. */
+export const SettingsDetailSchema = z.object({
+  settings: SettingsSchema,
+  spentTodayUsd: z.number().min(0, "must be at least 0"),
+});
+
 const EventEnvelope = { id: z.int().positive(), at: IsoTimestampSchema };
 
 export const EventSchema = z.discriminatedUnion("type", [
@@ -454,8 +525,10 @@ export const EventSchema = z.discriminatedUnion("type", [
   z.object({ ...EventEnvelope, type: z.literal("question.answered"), data: QuestionAnsweredSchema }),
   z.object({ ...EventEnvelope, type: z.literal("task.updated"), data: TaskSchema }),
   z.object({ ...EventEnvelope, type: z.literal("document.updated"), data: DocumentSchema }),
+  z.object({ ...EventEnvelope, type: z.literal("document.removed"), data: DocumentRemovedSchema }),
   z.object({ ...EventEnvelope, type: z.literal("annotation.updated"), data: AnnotationSchema }),
   z.object({ ...EventEnvelope, type: z.literal("idea.updated"), data: IdeaSchema }),
+  z.object({ ...EventEnvelope, type: z.literal("settings.updated"), data: SettingsSchema }),
 ]);
 
 const StreamIdSchema = z.string().regex(/^[A-Za-z0-9_.:-]{1,64}$/, "must be 1-64 letters, digits, _, ., : or -");
@@ -600,6 +673,53 @@ export const IdeaListSchema = z.object({
   generatingRunId: RunIdSchema.optional(),
   lastGeneration: IdeaGenerationSchema.optional(),
 });
+
+// The version of a file the owner edits in the app: the lowercase hex sha256 of the file's bytes.
+const Sha256HexSchema = z.string().regex(/^[0-9a-f]{64}$/, "must be a 64-character lowercase hex sha256");
+
+/**
+ * The body of GET /api/rules and of a successful rules.save: the text of the root ALFRED.md, empty when there is none, and
+ * its `version`, the lowercase hex sha256 of the file's bytes (of the empty string when there is no file). `maxBytes` is
+ * the most a save may hold, in UTF-8 bytes: what of the file reaches the agent's system prompt.
+ */
+export const RulesSchema = z.object({
+  text: z.string(),
+  version: Sha256HexSchema,
+  maxBytes: z.int().positive(),
+});
+
+/**
+ * One long-term memory, as its file holds it: `file` is its name in memory/, `kind` the memory's `type` as a plain string
+ * (a file written before the kinds were fixed may hold another, or none, which is ""), `updated` the local date it was last
+ * written as YYYY-MM-DD, or "" when the file has none, and `version` the lowercase hex sha256 of the file's bytes, which an
+ * update or a delete is made against.
+ */
+export const MemorySchema = z.object({
+  file: z.string().min(1, "must not be empty"),
+  name: z.string(),
+  description: z.string(),
+  kind: z.string(),
+  updated: z.string().regex(/^(\d{4}-\d{2}-\d{2})?$/, "must be YYYY-MM-DD, or empty"),
+  body: z.string(),
+  version: Sha256HexSchema,
+});
+
+/**
+ * The body of GET /api/memories: every memory, most recently updated first, as the system prompt's index lists them. The
+ * first `promptCount` of them fit that index under its caps and so are in Alfred's prompt; the rest are not.
+ */
+export const MemoryListSchema = z
+  .object({
+    memories: z.array(MemorySchema),
+    promptCount: z.int().min(0, "must be at least 0"),
+  })
+  .refine((list) => list.promptCount <= list.memories.length, {
+    path: ["promptCount"],
+    message: "must be at most the number of memories",
+  });
+
+/** The body of a successful memory.create and memory.update: the memory as its file now holds it. */
+export const MemoryResultSchema = z.object({ memory: MemorySchema });
 
 /** The body of POST /api/uploads: the file Alfred saved under inbox/. */
 export const UploadResultSchema = z.object({
@@ -761,6 +881,134 @@ export const IdeaRejectSchema = z.strictObject({
 /** Asks Alfred to generate ideas now. */
 export const IdeaGenerateSchema = z.strictObject({ type: z.literal("idea.generate") });
 
+/**
+ * Replaces the root ALFRED.md with `text`, stored as sent. `version` is the one the owner read, the `version` of the `Rules`
+ * they edited: a save against any other string is a conflict (409), so no schema check is made on its shape. Over
+ * `maxBytes` of UTF-8 or a NUL in `text` is refused by Alfred (400), after the schema.
+ */
+export const RulesSaveSchema = z.strictObject({
+  type: z.literal("rules.save"),
+  text: z.string(),
+  version: z.string(),
+});
+
+// A memory's kinds: the MEMORY_TYPES of src/agent/memory.ts.
+export const MemoryKindSchema = z.enum(["user", "preference", "project", "correction"]);
+type MemoryKindMatches = Expect<Equals<z.infer<typeof MemoryKindSchema>, (typeof MEMORY_TYPES)[number]>>;
+
+// A memory's file name is MEMORY_FILE_RE of src/agent/memory.ts (a test keeps the two the same).
+const MemoryFileSchema = z
+  .string()
+  .regex(/^[a-z0-9][a-z0-9-]{0,79}\.md$/, "must be a memory file name: lowercase letters, digits and hyphens, ending in .md");
+
+// A name or a description is one line of text, trimmed, with no control character and no line or paragraph separator.
+function memoryLine(min: number, max: number) {
+  return z
+    .string()
+    .refine((text) => text === text.trim(), "must not start or end with whitespace")
+    .refine((text) => !/[\p{Cc}\p{Zl}\p{Zp}]/u.test(text), "must be one line, with no control characters")
+    .refine((text) => [...text].length >= min, "must not be empty")
+    .refine((text) => [...text].length <= max, `must be at most ${max} characters`);
+}
+const MemoryNameSchema = memoryLine(1, MAX_MEMORY_NAME_CHARS);
+const MemoryDescriptionSchema = memoryLine(0, MAX_MEMORY_DESCRIPTION_CHARS);
+const MemoryBodySchema = z
+  .string()
+  .refine((body) => !body.includes("\0"), "must not contain a NUL")
+  .refine((body) => new TextEncoder().encode(body).length <= MAX_MEMORY_BODY_BYTES, `must be at most ${MAX_MEMORY_BODY_BYTES} bytes`);
+
+/**
+ * Adds a long-term memory. Alfred names its file from `name` and answers 201 with a `MemoryResult`. `name` (1 to 80
+ * characters) and `description` (0 to 200) are one trimmed line each; `body` is at most 8192 bytes of UTF-8.
+ */
+export const MemoryCreateSchema = z.strictObject({
+  type: z.literal("memory.create"),
+  name: MemoryNameSchema,
+  description: MemoryDescriptionSchema,
+  kind: MemoryKindSchema,
+  body: MemoryBodySchema,
+});
+
+/**
+ * Replaces a memory's name, description, kind and body. `version` is the one the owner read, the `version` of the `Memory`
+ * they edited: an update against any other string is a conflict (409), so no schema check is made on its shape.
+ */
+export const MemoryUpdateSchema = z.strictObject({
+  type: z.literal("memory.update"),
+  file: MemoryFileSchema,
+  version: z.string(),
+  name: MemoryNameSchema,
+  description: MemoryDescriptionSchema,
+  kind: MemoryKindSchema,
+  body: MemoryBodySchema,
+});
+
+/** Deletes a memory: its file moves into .trash/memory/. `version` is the one the owner read, as for memory.update. */
+export const MemoryDeleteSchema = z.strictObject({
+  type: z.literal("memory.delete"),
+  file: MemoryFileSchema,
+  version: z.string(),
+});
+
+// A setting's new value is within the range the owner may choose. A deployment's environment may set a value beyond it.
+const DailyBudgetSchema = z
+  .number()
+  .min(1, "must be at least 1")
+  .max(MAX_DAILY_BUDGET_USD, `must be at most ${MAX_DAILY_BUDGET_USD}`);
+const RunBudgetSchema = z
+  .number()
+  .min(1, "must be at least 1")
+  .max(MAX_RUN_BUDGET_USD, `must be at most ${MAX_RUN_BUDGET_USD}`);
+const SessionIdleHoursSchema = z
+  .number()
+  .min(0, "must be at least 0")
+  .max(MAX_SESSION_IDLE_HOURS, `must be at most ${MAX_SESSION_IDLE_HOURS}`);
+const CompactTokensSchema = z
+  .int()
+  .refine(
+    (tokens) => tokens === 0 || (tokens >= MIN_COMPACT_TOKENS && tokens <= MAX_COMPACT_TOKENS),
+    `must be 0, or from ${MIN_COMPACT_TOKENS} to ${MAX_COMPACT_TOKENS}`,
+  );
+const MemoryScanMinutesSchema = z
+  .number()
+  .min(0, "must be at least 0")
+  .max(MAX_MEMORY_SCAN_MINUTES, `must be at most ${MAX_MEMORY_SCAN_MINUTES}`);
+const MemoryScanBudgetSchema = z
+  .number()
+  .gt(0, "must be greater than 0")
+  .max(MAX_MEMORY_SCAN_BUDGET_USD, `must be at most ${MAX_MEMORY_SCAN_BUDGET_USD}`);
+const SettingsResetSchema = z
+  .array(SettingKeySchema)
+  .min(1, "must not be empty")
+  .refine((keys) => new Set(keys).size === keys.length, "must not repeat a key");
+
+/**
+ * Changes settings. Each setting it names is set to that value, and `ideasAt` null turns the daily generation off;
+ * `reset` returns its keys to their defaults. At least one setting is set or reset, and no key is both. Strict: an
+ * unknown key fails.
+ */
+export const SettingsUpdateSchema = z
+  .strictObject({
+    type: z.literal("settings.update"),
+    model: ModelSchema.optional(),
+    dailyBudgetUsd: DailyBudgetSchema.optional(),
+    runBudgetUsd: RunBudgetSchema.optional(),
+    sessionIdleHours: SessionIdleHoursSchema.optional(),
+    compactTokens: CompactTokensSchema.optional(),
+    memoryScanMinutes: MemoryScanMinutesSchema.optional(),
+    memoryScanBudgetUsd: MemoryScanBudgetSchema.optional(),
+    ideasAt: TimeOfDaySchema.nullable().optional(),
+    reset: SettingsResetSchema.optional(),
+  })
+  .refine(
+    (command) => SETTING_KEYS.some((key) => command[key] !== undefined) || command.reset !== undefined,
+    "must change at least one setting or reset one",
+  )
+  .refine((command) => (command.reset ?? []).every((key) => command[key] === undefined), {
+    path: ["reset"],
+    message: "must not name a setting that is also set",
+  });
+
 export const CommandSchema = z.discriminatedUnion("type", [
   MessageSendSchema,
   RunStopSchema,
@@ -773,6 +1021,11 @@ export const CommandSchema = z.discriminatedUnion("type", [
   IdeaAcceptSchema,
   IdeaRejectSchema,
   IdeaGenerateSchema,
+  RulesSaveSchema,
+  MemoryCreateSchema,
+  MemoryUpdateSchema,
+  MemoryDeleteSchema,
+  SettingsUpdateSchema,
 ]);
 
 export type Channel = z.infer<typeof ChannelSchema>;
@@ -796,6 +1049,7 @@ export type TaskDetail = z.infer<typeof TaskDetailSchema>;
 export type TaskCreate = z.infer<typeof TaskCreateSchema>;
 export type TaskUpdate = z.infer<typeof TaskUpdateSchema>;
 export type Document = z.infer<typeof DocumentSchema>;
+export type DocumentRemoved = z.infer<typeof DocumentRemovedSchema>;
 export type DocumentVersion = z.infer<typeof DocumentVersionSchema>;
 export type Annotation = z.infer<typeof AnnotationSchema>;
 export type AnnotationTarget = z.infer<typeof AnnotationTargetSchema>;
@@ -820,6 +1074,19 @@ export type IdeaList = z.infer<typeof IdeaListSchema>;
 export type IdeaAccept = z.infer<typeof IdeaAcceptSchema>;
 export type IdeaReject = z.infer<typeof IdeaRejectSchema>;
 export type IdeaGenerate = z.infer<typeof IdeaGenerateSchema>;
+export type Rules = z.infer<typeof RulesSchema>;
+export type RulesSave = z.infer<typeof RulesSaveSchema>;
+export type Memory = z.infer<typeof MemorySchema>;
+export type MemoryList = z.infer<typeof MemoryListSchema>;
+export type MemoryResult = z.infer<typeof MemoryResultSchema>;
+export type MemoryCreate = z.infer<typeof MemoryCreateSchema>;
+export type MemoryUpdate = z.infer<typeof MemoryUpdateSchema>;
+export type MemoryDelete = z.infer<typeof MemoryDeleteSchema>;
+export type SettingKey = z.infer<typeof SettingKeySchema>;
+export type Settings = z.infer<typeof SettingsSchema>;
+export type SettingsResult = z.infer<typeof SettingsResultSchema>;
+export type SettingsDetail = z.infer<typeof SettingsDetailSchema>;
+export type SettingsUpdate = z.infer<typeof SettingsUpdateSchema>;
 export type ErrorResponse = z.infer<typeof ErrorResponseSchema>;
 export type Pairing = z.infer<typeof PairingSchema>;
 export type PushRegistration = z.infer<typeof PushRegistrationSchema>;

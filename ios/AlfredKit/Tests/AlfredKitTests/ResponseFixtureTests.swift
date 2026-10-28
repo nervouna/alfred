@@ -27,6 +27,11 @@ final class ResponseFixtureTests: XCTestCase {
                 case "idea-generation-accepted.json": _ = try decoder.decode(IdeaGenerationAccepted.self, from: data)
                 case "idea-list.json", "idea-list-empty.json", "idea-list-nothing-new.json", "idea-list-failed.json":
                     _ = try decoder.decode(IdeaList.self, from: data)
+                case "settings-result.json", "settings-result-beyond-ranges.json": _ = try decoder.decode(SettingsResult.self, from: data)
+                case "settings-detail.json": _ = try decoder.decode(SettingsDetail.self, from: data)
+                case "rules.json": _ = try decoder.decode(Rules.self, from: data)
+                case "memory-list.json": _ = try decoder.decode(MemoryList.self, from: data)
+                case "memory-result.json": _ = try decoder.decode(MemoryResult.self, from: data)
                 case "error.json": _ = try decoder.decode(ErrorResponse.self, from: data)
                 default: XCTFail("\(name) has no response type")
                 }
@@ -58,6 +63,42 @@ final class ResponseFixtureTests: XCTestCase {
         XCTAssertEqual(detail.steps.map(\.tool), ["WebSearch", "Task", "Write"])
         XCTAssertNil(detail.steps[0].agent)
         XCTAssertEqual(detail.steps[1].agent, "reviewer")
+    }
+
+    func testRulesCarryTheTextItsVersionAndTheLimit() throws {
+        let data = try Data(contentsOf: Fixtures.directory.appending(path: "responses/rules.json"))
+        let rules = try JSONDecoder().decode(Rules.self, from: data)
+        XCTAssertTrue(rules.text.hasPrefix("# Workspace rules"))
+        XCTAssertEqual(rules.version, "3ca90a087679c144795ef3d87cd728ca2fc95886596e863550f376b76b61f10d")
+        XCTAssertEqual(rules.maxBytes, 8192)
+    }
+
+    func testMemoryListCarriesTheMemoriesNewestFirstAndHowManyAreInThePrompt() throws {
+        let data = try Data(contentsOf: Fixtures.directory.appending(path: "responses/memory-list.json"))
+        let list = try JSONDecoder().decode(MemoryList.self, from: data)
+        XCTAssertEqual(list.memories.map(\.file), [
+            "prefer-short-answers.md", "works-on-alfred.md", "memory-20261025-4k2p.md", "do-not-guess-prices.md", "standup-notes.md",
+        ])
+        XCTAssertEqual(list.promptCount, 3)
+        XCTAssertLessThan(list.promptCount, list.memories.count)
+        let first = try XCTUnwrap(list.memories.first)
+        XCTAssertEqual(first.name, "回答要简短")
+        XCTAssertEqual(first.kind, "preference")
+        XCTAssertEqual(first.updated, "2026-10-28")
+        XCTAssertEqual(first.version.count, 64)
+        // A memory of an older kind, with no date and no description, is a plain string and an empty one.
+        let old = try XCTUnwrap(list.memories.last)
+        XCTAssertEqual(old.kind, "feedback")
+        XCTAssertEqual(old.updated, "")
+        XCTAssertEqual(old.description, "")
+    }
+
+    func testMemoryResultCarriesTheMemoryAsItsFileNowHoldsIt() throws {
+        let data = try Data(contentsOf: Fixtures.directory.appending(path: "responses/memory-result.json"))
+        let result = try JSONDecoder().decode(MemoryResult.self, from: data)
+        XCTAssertEqual(result.memory.file, "prefer-short-answers.md")
+        XCTAssertEqual(result.memory.updated, "2026-10-29")
+        XCTAssertEqual(result.memory.description, "先给结论，再给理由，最多五行。")
     }
 
     func testErrorResponseCarriesItsMessage() throws {

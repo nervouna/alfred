@@ -1,7 +1,7 @@
 // The command API: the owner's commands in, Alfred's events out, over a Unix
 // socket (no TCP listener). A process on the same host posts message.send,
-// run.stop, question.answer, the task, document and idea commands to /commands, uploads files to /uploads (into the
-// workspace's inbox, for a message to name) and follows /events as server-sent
+// run.stop, question.answer, the task, document, idea, rules, memory and settings commands to /commands, uploads files to /uploads
+// (into the workspace's inbox, for a message to name) and follows /events as server-sent
 // events, resuming by event id. Every command is validated here by parseCommand.
 // Live events (reply text as it is written, the steps of a run) go out as frames
 // without an id and are never replayed.
@@ -31,7 +31,15 @@ import type {
   IdeaReject,
   IdeaResult,
   LiveEvent,
+  MemoryCreate,
+  MemoryDelete,
+  MemoryResult,
+  MemoryUpdate,
   RevisionAccepted,
+  Rules,
+  RulesSave,
+  Settings,
+  SettingsUpdate,
   Task,
   TaskCreate,
   TaskUpdate,
@@ -89,6 +97,34 @@ export interface IdeaCommands {
   generate(command: IdeaGenerate): IdeaReply<IdeaGenerationAccepted> | Promise<IdeaReply<IdeaGenerationAccepted>>;
 }
 
+/** A rules command's answer: the Rules as the file now holds them, or the status and the reason the save was refused. */
+export type RulesReply = { ok: true; body: Rules } | { ok: false; status: 400 | 409; error: string };
+
+export interface RulesCommands {
+  /** Replaces the root ALFRED.md with the text, or refuses the save. */
+  save(command: RulesSave): RulesReply | Promise<RulesReply>;
+}
+
+/** A memory command's answer: the body to send, or the status and the reason the command was refused. */
+export type MemoryReply<T> = { ok: true; body: T } | { ok: false; status: 400 | 404 | 409; error: string };
+
+export interface MemoryCommands {
+  /** Adds a memory, or refuses it. */
+  create(command: MemoryCreate): MemoryReply<MemoryResult> | Promise<MemoryReply<MemoryResult>>;
+  /** Replaces a memory's fields, or refuses the update. */
+  update(command: MemoryUpdate): MemoryReply<MemoryResult> | Promise<MemoryReply<MemoryResult>>;
+  /** Moves a memory's file into .trash/memory/, or refuses the delete. */
+  delete(command: MemoryDelete): MemoryReply<{ deleted: true }> | Promise<MemoryReply<{ deleted: true }>>;
+}
+
+/** A settings command's answer: the settings as they now are, or the status and the reason it was refused. */
+export type SettingsReply = { ok: true; settings: Settings } | { ok: false; status: 400; error: string };
+
+export interface SettingsCommands {
+  /** Changes the settings and answers with the whole of them, or refuses the change. */
+  update(command: SettingsUpdate): SettingsReply | Promise<SettingsReply>;
+}
+
 export interface ApiOptions {
   /** Path of the Unix socket. */
   socket: string;
@@ -101,6 +137,12 @@ export interface ApiOptions {
   documents?: DocumentCommands;
   /** Where idea commands go, once the idea store is wired in; without it every idea command answers 503. */
   ideas?: IdeaCommands;
+  /** Where rules commands go, once the rules service is wired in; without it every rules command answers 503. */
+  rules?: RulesCommands;
+  /** Where memory commands go, once the memory service is wired in; without it every memory command answers 503. */
+  memory?: MemoryCommands;
+  /** Where settings commands go, once the settings store is wired in; without it every settings command answers 503. */
+  settings?: SettingsCommands;
   /** Interval between pings on an event stream; 30 s by default. */
   heartbeatMs?: number;
   /** Events read per page of a stream's backlog. */
@@ -240,7 +282,7 @@ function receiveUpload(req: http.IncomingMessage, file: string): Promise<number 
 
 /** Start the API; resolves to a function that closes it. */
 export async function startApi(opts: ApiOptions): Promise<() => Promise<void>> {
-  const { socket, handler, events, tasks, documents, ideas } = opts;
+  const { socket, handler, events, tasks, documents, ideas, rules, memory, settings } = opts;
   const heartbeatMs = opts.heartbeatMs ?? HEARTBEAT_MS;
   const pageSize = opts.pageSize ?? BACKLOG_PAGE;
 
@@ -328,6 +370,32 @@ export async function startApi(opts: ApiOptions): Promise<() => Promise<void>> {
       const reply = await ideas.generate(command);
       if (!reply.ok) return sendJson(res, reply.status, { error: reply.error });
       return sendJson(res, 202, reply.body);
+    }
+    // A rules command never reaches the message path either. Without a rules service it is refused with 503.
+    if (command.type === "rules.save") {
+      if (!rules) return sendJson(res, 503, { error: "rules are not available" });
+      const reply = await rules.save(command);
+      if (!reply.ok) return sendJson(res, reply.status, { error: reply.error });
+      return sendJson(res, 200, reply.body);
+    }
+    // A memory command never reaches the message path either. Without a memory service it is refused with 503.
+    if (command.type === "memory.create" || command.type === "memory.update" || command.type === "memory.delete") {
+      if (!memory) return sendJson(res, 503, { error: "memory is not available" });
+      if (command.type === "memory.create") {
+        const reply = await memory.create(command);
+        if (!reply.ok) return sendJson(res, reply.status, { error: reply.error });
+        return sendJson(res, 201, reply.body);
+      }
+      const reply = command.type === "memory.update" ? await memory.update(command) : await memory.delete(command);
+      if (!reply.ok) return sendJson(res, reply.status, { error: reply.error });
+      return sendJson(res, 200, reply.body);
+    }
+    // A settings command never reaches the message path either. Without a settings store it is refused with 503.
+    if (command.type === "settings.update") {
+      if (!settings) return sendJson(res, 503, { error: "settings are not available" });
+      const reply = await settings.update(command);
+      if (!reply.ok) return sendJson(res, reply.status, { error: reply.error });
+      return sendJson(res, 200, { settings: reply.settings });
     }
     // A message's files are checked before anything is submitted: one that is not in the inbox refuses the message.
     const files = command.files ?? [];

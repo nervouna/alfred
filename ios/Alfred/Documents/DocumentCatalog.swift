@@ -3,8 +3,12 @@ import Foundation
 
 /// The owner's documents as the app knows them: the list `GET /api/documents` returned, and every `document.updated`
 /// event since. Each document takes its latest version by `updatedAt`, so a list that was read before a change cannot
-/// undo it, and a replayed event cannot either. A document is never removed: Alfred has no way to delete one. The
-/// annotations `annotation.updated` events told of are kept per document, for the screens that come to show them.
+/// undo it, and a replayed event cannot either. A `document.removed` event, which Alfred sends when the agent deletes a
+/// document, removes it with its annotations, and a later `document.updated` (a restore) adds it back. A document at a
+/// path under `.trash/` is removed the same way, since Alfred announced a deletion as `document.updated` before
+/// `document.removed` existed. A replay from the start still ends right: the removal follows the update that delivered
+/// the document. The annotations `annotation.updated` events told of are kept per document, for the screens that come
+/// to show them.
 struct DocumentCatalog: Hashable {
     /// Whether a list has been read.
     private(set) var hasLoaded = false
@@ -20,19 +24,31 @@ struct DocumentCatalog: Hashable {
         }
     }
 
-    /// A stored `document.updated` event changes its document, and an `annotation.updated` event its annotation; any
-    /// other event changes nothing.
+    /// A stored `document.updated` event changes its document, a `document.removed` event removes it, and an
+    /// `annotation.updated` event changes its annotation; any other event changes nothing.
     mutating func apply(_ event: StreamEvent) {
         guard case let .event(stored) = event else { return }
         switch stored.payload {
         case let .documentUpdated(document): apply(document)
+        case let .documentRemoved(id): remove(id)
         case let .annotationUpdated(annotation): apply(annotation)
         default: break
         }
     }
 
-    /// Takes a document unless the catalog already holds a newer version of it.
+    /// Drops a document and its annotations.
+    mutating func remove(_ id: String) {
+        byId[id] = nil
+        annotationsByDocument[id] = nil
+    }
+
+    /// Takes a document unless the catalog already holds a newer version of it. A document under `.trash/` is removed
+    /// instead.
     mutating func apply(_ document: AlfredDocument) {
+        if document.isTrashed {
+            remove(document.id)
+            return
+        }
         if let known = byId[document.id], known.updatedAt > document.updatedAt { return }
         byId[document.id] = document
     }

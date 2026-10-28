@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import { test } from "node:test";
 
@@ -9,6 +10,7 @@ import {
   AnnotationSchema,
   DocumentDetailSchema,
   DocumentListSchema,
+  DocumentRemovedSchema,
   DocumentResultSchema,
   DocumentVersionSchema,
   ErrorResponseSchema,
@@ -21,19 +23,34 @@ import {
   IdeaResultSchema,
   IdeaSchema,
   LiveEventSchema,
+  MAX_COMPACT_TOKENS,
+  MAX_DAILY_BUDGET_USD,
   MAX_IDEA_NOTE_CHARS,
   MAX_IDEA_WHY_CHARS,
+  MAX_MEMORY_SCAN_BUDGET_USD,
+  MAX_MEMORY_SCAN_MINUTES,
   MAX_MESSAGE_FILES,
   MAX_NEW_IDEAS,
+  MAX_RUN_BUDGET_USD,
+  MAX_SESSION_IDLE_HOURS,
   MAX_TASK_BUDGET_USD,
+  MIN_COMPACT_TOKENS,
+  MemoryKindSchema,
+  MemoryListSchema,
+  MemoryResultSchema,
+  MemorySchema,
   MessageSchema,
   PairingSchema,
   PushRegistrationSchema,
   RevisionAcceptedSchema,
+  RulesSchema,
   RunDetailSchema,
   RunKindSchema,
   RunListSchema,
   RunSchema,
+  SettingKeySchema,
+  SettingsDetailSchema,
+  SettingsResultSchema,
   TaskDetailSchema,
   TaskListSchema,
   TaskResultSchema,
@@ -64,6 +81,9 @@ const SCHEMAS_BY_NAME: Record<string, ZodType> = {
   "document-list": DocumentListSchema,
   "document-result": DocumentResultSchema,
   "revision-accepted": RevisionAcceptedSchema,
+  "memory-list": MemoryListSchema,
+  "memory-result": MemoryResultSchema,
+  rules: RulesSchema,
   "run-detail": RunDetailSchema,
   "run-list": RunListSchema,
   "task-detail": TaskDetailSchema,
@@ -74,6 +94,8 @@ const SCHEMAS_BY_NAME: Record<string, ZodType> = {
   "idea-accepted": IdeaAcceptedSchema,
   "idea-generation-accepted": IdeaGenerationAcceptedSchema,
   "idea-list": IdeaListSchema,
+  "settings-result": SettingsResultSchema,
+  "settings-detail": SettingsDetailSchema,
 };
 
 function schemaNamed(name: string): ZodType {
@@ -413,6 +435,17 @@ test("a document version is 40 lowercase hex characters, and a document id is si
   assert.deepEqual(revise({ documentId: "r4f7m0" }), { ok: false, error: "documentId: must be a six-character document id" });
 });
 
+test("a document.removed event carries the document's id and nothing else the client needs", () => {
+  const fixture = JSON.parse(readFixture("events", "document-removed.json"));
+  const parsed = EventSchema.parse(fixture);
+  assert.equal(parsed.type, "document.removed");
+  assert.deepEqual(parsed.data, { id: "r4f7ma" });
+  assert.deepEqual(DocumentRemovedSchema.parse({ id: "r4f7ma" }), { id: "r4f7ma" });
+  for (const data of [{}, { id: "r4f7m0" }, { id: "R4F7MA" }, { id: "r4f7ma0" }]) {
+    assert.equal(EventSchema.safeParse({ ...fixture, data }).success, false, JSON.stringify(data));
+  }
+});
+
 test("a file a delivery registered names its document and version together, or neither", () => {
   const path = { path: "reports/vps.md" };
   assert.equal(FileRefSchema.safeParse(path).success, true, "neither");
@@ -657,4 +690,275 @@ test("a generation of ideas is a run of its own kind", () => {
   const run = eventData("run-updated-ideas.json");
   assert.equal(RunKindSchema.safeParse("ideas").success, true);
   assert.equal(RunSchema.parse(run).kind, "ideas");
+});
+
+test("the rules fixtures tell one story: the owner reads a version, edits the text and saves against that version", () => {
+  const read = JSON.parse(readFixture("responses", "rules.json")) as { text: string; version: string; maxBytes: number };
+  assert.equal(read.version, crypto.createHash("sha256").update(read.text).digest("hex"), "the version is the sha256 of the text");
+  assert.equal(read.maxBytes, 8192);
+  const save = JSON.parse(readFixture("commands", "rules-save.json")) as { text: string; version: string };
+  assert.equal(save.version, read.version, "the save names the version that was read");
+  assert.notEqual(save.text, read.text);
+});
+
+test("rules.save takes any text, empty included, and any version string; only its shape is checked here", () => {
+  const save = (extra: Record<string, unknown>) => parseCommand({ type: "rules.save", text: "# rules\n", version: "x", ...extra });
+  assert.equal(save({}).ok, true);
+  assert.equal(save({ text: "" }).ok, true, "an empty text");
+  assert.equal(save({ text: "a\0b" }).ok, true, "the size and NUL checks are Alfred's, after the schema");
+  assert.equal(save({ text: "规".repeat(9000) }).ok, true, "the size check counts bytes, after the schema");
+  assert.equal(save({ text: 5 }).ok, false);
+  assert.equal(save({ version: 5 }).ok, false);
+  assert.equal(save({ version: undefined }).ok, false);
+});
+
+test("Rules has a lowercase hex sha256 version and a positive size cap", () => {
+  const rules = { text: "", version: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", maxBytes: 8192 };
+  assert.equal(RulesSchema.safeParse(rules).success, true);
+  for (const bad of [
+    { ...rules, version: rules.version.toUpperCase() },
+    { ...rules, version: rules.version.slice(1) },
+    { ...rules, maxBytes: 0 },
+    { ...rules, maxBytes: 1.5 },
+    { ...rules, text: undefined },
+  ]) {
+    assert.equal(RulesSchema.safeParse(bad).success, false, JSON.stringify(bad));
+  }
+});
+
+// --- Memory -------------------------------------------------------------------
+
+const memoryCreate = (over: Record<string, unknown>) =>
+  parseCommand({ type: "memory.create", name: "Metric units", description: "Use kilometres.", kind: "preference", body: "Convert miles.", ...over });
+const memoryUpdate = (over: Record<string, unknown>) =>
+  parseCommand({ type: "memory.update", file: "metric-units.md", version: "x", name: "Metric units", description: "", kind: "user", body: "", ...over });
+
+test("the memory fixtures tell one story: a list, an update of its first memory against its version, and the result", async () => {
+  const { formatMemory } = await import("../agent/memory.ts");
+  type Memory = { file: string; name: string; description: string; kind: string; updated: string; body: string; version: string };
+  const list = JSON.parse(readFixture("responses", "memory-list.json")) as { memories: Memory[]; promptCount: number };
+  const sha256 = (text: string) => crypto.createHash("sha256").update(text).digest("hex");
+  for (const m of list.memories) {
+    const bytes = formatMemory({ name: m.name, description: m.description, type: m.kind, updated: m.updated, body: m.body });
+    assert.equal(m.version, sha256(bytes), `${m.file}: the version is the sha256 of the file formatMemory writes`);
+  }
+  assert.ok(list.promptCount < list.memories.length, "the cap cuts the list");
+  assert.deepEqual(
+    list.memories.map((m) => m.updated),
+    [...list.memories.map((m) => m.updated)].sort().reverse(),
+    "most recently updated first, a memory with no date last",
+  );
+  assert.ok(list.memories.some((m) => !/^[a-z0-9-]+\.md$/.test(m.file) || m.file.startsWith("memory-")), "a memory with a Chinese name has a generated file name");
+  assert.ok(list.memories.some((m) => !["user", "preference", "project", "correction"].includes(m.kind)), "a memory of an older kind");
+
+  const update = JSON.parse(readFixture("commands", "memory-update.json")) as Memory & { type: string };
+  const edited = list.memories.find((m) => m.file === update.file);
+  assert.equal(update.version, edited?.version, "the update names the version that was read");
+  const result = JSON.parse(readFixture("responses", "memory-result.json")) as { memory: Memory };
+  assert.equal(result.memory.file, update.file);
+  assert.notEqual(result.memory.version, update.version);
+  assert.deepEqual([result.memory.name, result.memory.description, result.memory.kind, result.memory.body], [update.name, update.description, update.kind, update.body]);
+
+  const del = JSON.parse(readFixture("commands", "memory-delete.json")) as { file: string; version: string };
+  assert.equal(del.version, list.memories.find((m) => m.file === del.file)?.version);
+});
+
+test("memory.create takes a kind of MEMORY_TYPES, a name of 1 to 80 characters and a description of 0 to 200, each one trimmed line", async () => {
+  const { MEMORY_TYPES } = await import("../agent/memory.ts");
+  assert.deepEqual(MemoryKindSchema.options, [...MEMORY_TYPES]);
+  for (const kind of MEMORY_TYPES) assert.equal(memoryCreate({ kind }).ok, true, kind);
+  assert.equal(memoryCreate({ kind: "habit" }).ok, false);
+  assert.equal(memoryCreate({ kind: "" }).ok, false);
+
+  assert.equal(memoryCreate({ name: "名".repeat(80) }).ok, true, "80 characters, counted as characters and not bytes");
+  assert.equal(memoryCreate({ name: "名".repeat(81) }).ok, false);
+  assert.equal(memoryCreate({ name: "😀".repeat(80) }).ok, true, "an emoji is one character");
+  assert.equal(memoryCreate({ name: "" }).ok, false, "a name is not empty");
+  assert.equal(memoryCreate({ description: "" }).ok, true, "a description may be");
+  assert.equal(memoryCreate({ description: "d".repeat(200) }).ok, true);
+  assert.equal(memoryCreate({ description: "d".repeat(201) }).ok, false);
+
+  for (const text of [" padded", "padded ", "\tx", "two\nlines", "carriage\rreturn", "tab\there", "nul\0", "bell\u0007", "del\u007f", "next\u0085line", `sep${String.fromCharCode(0x2028)}arator`, `par${String.fromCharCode(0x2029)}agraph`]) {
+    assert.equal(memoryCreate({ name: text }).ok, false, `name ${JSON.stringify(text)}`);
+    assert.equal(memoryCreate({ description: text }).ok, false, `description ${JSON.stringify(text)}`);
+  }
+  assert.equal(memoryCreate({ name: "inner  spaces and 标点，。" }).ok, true);
+});
+
+test("a memory's body is at most 8192 bytes of UTF-8, may be empty and has no NUL", () => {
+  assert.equal(memoryCreate({ body: "a".repeat(8192) }).ok, true);
+  assert.equal(memoryCreate({ body: "a".repeat(8193) }).ok, false);
+  assert.equal(memoryCreate({ body: "规".repeat(2730) }).ok, true, "8190 bytes");
+  assert.equal(memoryCreate({ body: "规".repeat(2731) }).ok, false, "8193 bytes");
+  assert.equal(memoryCreate({ body: "" }).ok, true);
+  assert.equal(memoryCreate({ body: "line\n\nline\n" }).ok, true, "a body has lines");
+  assert.equal(memoryCreate({ body: "a\0b" }).ok, false);
+  assert.equal(memoryUpdate({ body: "a".repeat(8193) }).ok, false);
+});
+
+test("memory.update and memory.delete name a file of MEMORY_FILE_RE and a version, and take no other key", async () => {
+  const { MEMORY_FILE_RE } = await import("../agent/memory.ts");
+  for (const file of ["a.md", "metric-units.md", "memory-20261025-4k2p.md", `${"a".repeat(80)}.md`, `${"a".repeat(81)}.md`, "-a.md", "A.md", "a b.md", "a.txt", "a.md.md", "a/b.md", "../a.md", "MEMORY.md", "名.md", ""]) {
+    const expected = MEMORY_FILE_RE.test(file);
+    assert.equal(memoryUpdate({ file }).ok, expected, `update ${file}`);
+    assert.equal(parseCommand({ type: "memory.delete", file, version: "x" }).ok, expected, `delete ${file}`);
+  }
+  assert.equal(memoryUpdate({ version: undefined }).ok, false, "an update needs the version");
+  assert.equal(parseCommand({ type: "memory.delete", file: "a.md" }).ok, false, "so does a delete");
+  assert.equal(memoryUpdate({ version: "not-a-hash" }).ok, true, "its shape is not checked: another version is a conflict, which Alfred answers");
+  assert.equal(memoryUpdate({ updated: "2026-10-29" }).ok, false);
+  assert.equal(parseCommand({ type: "memory.delete", file: "a.md", version: "x", force: true }).ok, false);
+  assert.equal(memoryCreate({ file: "a.md" }).ok, false, "a new memory's file is Alfred's to name");
+});
+
+test("a Memory has a lowercase hex sha256 version, a date or nothing for updated, and a kind that is any string", () => {
+  const memory = {
+    file: "a.md",
+    name: "",
+    description: "",
+    kind: "",
+    updated: "",
+    body: "",
+    version: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  };
+  assert.equal(MemorySchema.safeParse(memory).success, true, "what an old file with no fields reads as");
+  assert.equal(MemorySchema.safeParse({ ...memory, kind: "feedback", updated: "2026-10-29" }).success, true);
+  for (const bad of [
+    { ...memory, version: memory.version.toUpperCase() },
+    { ...memory, version: memory.version.slice(1) },
+    { ...memory, version: undefined },
+    { ...memory, updated: "2026-10-9" },
+    { ...memory, updated: "yesterday" },
+    { ...memory, file: "" },
+  ]) {
+    assert.equal(MemorySchema.safeParse(bad).success, false, JSON.stringify(bad));
+  }
+  assert.equal(MemoryListSchema.safeParse({ memories: [], promptCount: 0 }).success, true);
+  assert.equal(MemoryListSchema.safeParse({ memories: [memory], promptCount: 1 }).success, true);
+  assert.equal(MemoryListSchema.safeParse({ memories: [memory], promptCount: 2 }).success, false, "more in the prompt than there are");
+  assert.equal(MemoryListSchema.safeParse({ memories: [memory], promptCount: -1 }).success, false);
+  assert.equal(MemoryResultSchema.safeParse({ memory }).success, true);
+});
+
+// --- Settings -----------------------------------------------------------------
+
+const settingsUpdate = (over: Record<string, unknown>) => parseCommand({ type: "settings.update", ...over });
+const settingsResult = (): Record<string, unknown> => JSON.parse(readFixture("responses", "settings-result.json"));
+
+test("the settings range constants are the ranges of the settings table", () => {
+  assert.equal(MAX_DAILY_BUDGET_USD, 100);
+  assert.equal(MAX_RUN_BUDGET_USD, 20);
+  assert.equal(MAX_RUN_BUDGET_USD, MAX_TASK_BUDGET_USD, "a chat run may spend what a task's run may");
+  assert.equal(MAX_SESSION_IDLE_HOURS, 168);
+  assert.equal(MIN_COMPACT_TOKENS, 20_000);
+  assert.equal(MAX_COMPACT_TOKENS, 1_000_000);
+  assert.equal(MAX_MEMORY_SCAN_MINUTES, 1440);
+  assert.equal(MAX_MEMORY_SCAN_BUDGET_USD, 1);
+});
+
+test("the setting keys are the table's eight, and a Settings object has each of them and overridden", () => {
+  const keys = ["model", "dailyBudgetUsd", "runBudgetUsd", "sessionIdleHours", "compactTokens", "memoryScanMinutes", "memoryScanBudgetUsd", "ideasAt"];
+  assert.deepEqual(SettingKeySchema.options, keys);
+  assert.deepEqual(Object.keys(settingsResult().settings as object).filter((key) => key !== "overridden").sort(), [...keys].sort());
+});
+
+test("settings.update sets each setting within its range, bounds included, and refuses a value beyond it", () => {
+  const ok = (over: Record<string, unknown>) => settingsUpdate(over).ok;
+  assert.equal(ok({ dailyBudgetUsd: 1 }), true, "the daily budget's lower bound");
+  assert.equal(ok({ dailyBudgetUsd: 100 }), true, "the daily budget's upper bound");
+  assert.equal(ok({ dailyBudgetUsd: 0.99 }), false, "below 1");
+  assert.equal(ok({ dailyBudgetUsd: 101 }), false, "above 100");
+  assert.equal(ok({ runBudgetUsd: 1 }), true);
+  assert.equal(ok({ runBudgetUsd: 20 }), true);
+  assert.equal(ok({ runBudgetUsd: 20.5 }), false);
+  assert.equal(ok({ sessionIdleHours: 0 }), true, "0 turns rotation off");
+  assert.equal(ok({ sessionIdleHours: 168 }), true);
+  assert.equal(ok({ sessionIdleHours: -1 }), false);
+  assert.equal(ok({ compactTokens: 0 }), true, "0 keeps Claude Code's window");
+  assert.equal(ok({ compactTokens: 20_000 }), true);
+  assert.equal(ok({ compactTokens: 1_000_000 }), true);
+  for (const tokens of [1, 19_999, 1_000_001, 20_000.5]) assert.equal(ok({ compactTokens: tokens }), false, String(tokens));
+  assert.equal(ok({ memoryScanMinutes: 0 }), true, "0 turns scans off");
+  assert.equal(ok({ memoryScanMinutes: 1440 }), true);
+  assert.equal(ok({ memoryScanMinutes: 1441 }), false);
+  assert.equal(ok({ memoryScanBudgetUsd: 0 }), false, "above 0");
+  assert.equal(ok({ memoryScanBudgetUsd: 0.01 }), true);
+  assert.equal(ok({ memoryScanBudgetUsd: 1 }), true);
+  assert.equal(ok({ memoryScanBudgetUsd: 1.01 }), false);
+  for (const model of ["sonnet", "opus", "haiku"]) assert.equal(ok({ model }), true, model);
+  assert.equal(ok({ model: "gpt" }), false);
+});
+
+test("ideasAt is an HH:MM time or null in a command, and a response takes the same shapes", () => {
+  assert.equal(settingsUpdate({ ideasAt: "00:00" }).ok, true);
+  assert.equal(settingsUpdate({ ideasAt: "23:59" }).ok, true);
+  assert.equal(settingsUpdate({ ideasAt: null }).ok, true, "null turns the generation off");
+  for (const ideasAt of ["24:00", "8:00", "", "08:00:00"]) assert.equal(settingsUpdate({ ideasAt }).ok, false, JSON.stringify(ideasAt));
+
+  const result = settingsResult();
+  const withIdeasAt = (ideasAt: unknown) => SettingsResultSchema.safeParse({ settings: { ...(result.settings as object), ideasAt } }).success;
+  assert.equal(withIdeasAt(null), true);
+  assert.equal(withIdeasAt("08:00"), true);
+  assert.equal(withIdeasAt("24:00"), false);
+});
+
+test("a settings.update changes at least one setting or resets one, and resets each key once", () => {
+  assert.deepEqual(parseCommand({ type: "settings.update" }), { ok: false, error: "must change at least one setting or reset one" });
+  assert.equal(settingsUpdate({ reset: ["ideasAt"] }).ok, true, "a reset alone is a change");
+  assert.deepEqual(settingsUpdate({ reset: [] }), { ok: false, error: "reset: must not be empty" });
+  assert.deepEqual(settingsUpdate({ reset: ["dailyBudgetUsd", "dailyBudgetUsd"] }), { ok: false, error: "reset: must not repeat a key" });
+  assert.equal(settingsUpdate({ reset: ["temperature"] }).ok, false, "a key outside the eight");
+  assert.deepEqual(settingsUpdate({ dailyBudgetUsd: 30, reset: ["dailyBudgetUsd"] }), {
+    ok: false,
+    error: "reset: must not name a setting that is also set",
+  });
+  assert.deepEqual(settingsUpdate({ dailyBudgetUsd: 101 }), { ok: false, error: "dailyBudgetUsd: must be at most 100" });
+  assert.deepEqual(settingsUpdate({ compactTokens: 19_999 }), { ok: false, error: "compactTokens: must be 0, or from 20000 to 1000000" });
+  assert.equal(settingsUpdate({ dailyBudgetUsd: 30, colour: "red" }).ok, false, "an unknown key");
+});
+
+test("every invalid settings.update command is rejected", () => {
+  const invalid = fixtureNames("invalid-commands").filter((name) => name.startsWith("settings-"));
+  assert.equal(invalid.length, 17, "one file per rule of the settings command");
+  for (const name of invalid) {
+    assert.equal(parseCommand(JSON.parse(readFixture("invalid-commands", name))).ok, false, name);
+  }
+});
+
+test("a settings response has all eight keys and overridden, which names each override once, in the table's order", () => {
+  const result = settingsResult();
+  const withOverridden = (overridden: unknown) => SettingsResultSchema.safeParse({ settings: { ...(result.settings as object), overridden } }).success;
+  assert.equal(withOverridden(["model", "dailyBudgetUsd", "ideasAt"]), true);
+  assert.equal(withOverridden([]), true, "nothing overridden");
+  assert.equal(withOverridden(["dailyBudgetUsd", "model"]), false, "out of the table's order");
+  assert.equal(withOverridden(["model", "model"]), false, "a repeated key");
+
+  const { ideasAt: _ideasAt, ...noIdeasAt } = result.settings as Record<string, unknown>;
+  assert.equal(SettingsResultSchema.safeParse({ settings: noIdeasAt }).success, false, "ideasAt is present even when off");
+});
+
+test("a settings response checks types and the HH:MM shape only, so a value beyond a command's range is accepted", () => {
+  const beyond = JSON.parse(readFixture("responses", "settings-result-beyond-ranges.json"));
+  assert.equal(SettingsResultSchema.parse(beyond).settings.dailyBudgetUsd, 150);
+  assert.equal(settingsUpdate({ dailyBudgetUsd: 150 }).ok, false, "the command still refuses it");
+
+  const settings = { ...(settingsResult().settings as object) };
+  const beyondRanges = { ...settings, runBudgetUsd: 0, sessionIdleHours: -1, compactTokens: 5, memoryScanMinutes: 5000, memoryScanBudgetUsd: 3 };
+  assert.equal(SettingsResultSchema.safeParse({ settings: beyondRanges }).success, true);
+  assert.equal(SettingsResultSchema.safeParse({ settings: { ...settings, compactTokens: 2.5 } }).success, false, "compactTokens is an integer");
+});
+
+test("the settings detail's spend today is 0 or more", () => {
+  const detail = JSON.parse(readFixture("responses", "settings-detail.json"));
+  assert.equal(SettingsDetailSchema.safeParse(detail).success, true);
+  assert.equal(SettingsDetailSchema.safeParse({ ...detail, spentTodayUsd: 0 }).success, true, "zero");
+  assert.equal(SettingsDetailSchema.safeParse({ ...detail, spentTodayUsd: -0.01 }).success, false);
+});
+
+test("the settings.updated event carries the whole settings", () => {
+  const event = JSON.parse(readFixture("events", "settings-updated.json"));
+  const parsed = EventSchema.safeParse(event);
+  assert.equal(parsed.success, true);
+  assert.deepEqual(eventData("settings-updated.json").overridden, ["model", "dailyBudgetUsd"]);
+  assert.equal(EventSchema.safeParse({ ...event, data: { ...event.data, ideasAt: undefined } }).success, false, "every key is there");
 });

@@ -75,6 +75,44 @@ public struct IdeaGenerationAccepted: Decodable, Hashable, Sendable {
     public let runId: String
 }
 
+/// The body of a successful `settings.update`: the settings as Alfred now holds them.
+public struct SettingsResult: Decodable, Hashable, Sendable {
+    public let settings: AlfredSettings
+}
+
+/// The body of `GET /api/rules` and of a successful `rules.save`: the root ALFRED.md. `version` is the lowercase hex
+/// sha256 of the file's bytes, which a save names; `maxBytes` is the most a saved text may hold, in UTF-8 bytes.
+public struct Rules: Decodable, Hashable, Sendable {
+    public let text: String
+    public let version: String
+    public let maxBytes: Int
+}
+
+/// One long-term memory, as its file holds it. `kind` is the memory's type as a plain string: a file written before the
+/// kinds were fixed may hold another, or none (""). `updated` is the local date it was last written as YYYY-MM-DD, or ""
+/// when the file has none. `version` is the lowercase hex sha256 of the file's bytes, which an update or a delete names.
+public struct Memory: Decodable, Hashable, Sendable {
+    public let file: String
+    public let name: String
+    public let description: String
+    public let kind: String
+    public let updated: String
+    public let body: String
+    public let version: String
+}
+
+/// The body of `GET /api/memories`: every memory, most recently updated first. The first `promptCount` of them fit the
+/// system prompt's index and so are in Alfred's prompt; the rest are not.
+public struct MemoryList: Decodable, Hashable, Sendable {
+    public let memories: [Memory]
+    public let promptCount: Int
+}
+
+/// The body of a successful `memory.create` and `memory.update`: the memory as its file now holds it.
+public struct MemoryResult: Decodable, Hashable, Sendable {
+    public let memory: Memory
+}
+
 /// The body of `GET /api/ideas`: every idea Alfred keeps, newest created first, the generation run while one is queued
 /// or running, and the latest generation that ended.
 public struct IdeaList: Decodable, Hashable, Sendable {

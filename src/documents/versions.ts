@@ -8,6 +8,7 @@ import path from "node:path";
 
 import { resolveInside } from "../agent/guard.ts";
 import { STATE_DIR } from "../store.ts";
+import { TRASH_DIR } from "./trash.ts";
 
 /** The git dir of the workspace's history: under the state dir, never inside the workspace. */
 export const VERSIONS_GIT_DIR = path.join(STATE_DIR, "workbench", "versions.git");
@@ -16,7 +17,7 @@ export const VERSIONS_GIT_DIR = path.join(STATE_DIR, "workbench", "versions.git"
 export const VERSION_MAX_BYTES = 20 * 1024 * 1024;
 
 /** Top-level directories whose files are never versioned by rule. */
-const UNVERSIONED_DIRS = ["inbox", ".trash"];
+const UNVERSIONED_DIRS = ["inbox", TRASH_DIR];
 
 /** Extensions, in any case, that are never versioned by rule: images, PDFs, audio and video. */
 const UNVERSIONED_EXTS = [

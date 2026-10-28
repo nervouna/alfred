@@ -14,10 +14,15 @@ public struct Event: Decodable, Hashable, Sendable {
         case taskUpdated(AlfredTask)
         /// A document was delivered or changed: the whole document, as Alfred now holds it.
         case documentUpdated(AlfredDocument)
+        /// A document was deleted (moved into the agent's trash): the id of the document. Moving it back out announces
+        /// it again as `documentUpdated`.
+        case documentRemoved(id: String)
         /// An annotation was submitted or changed: the whole annotation, as Alfred now holds it.
         case annotationUpdated(Annotation)
         /// An idea was generated or changed state: the whole idea, as Alfred now holds it.
         case ideaUpdated(AlfredIdea)
+        /// A setting changed: the whole settings, as Alfred now holds them.
+        case settingsUpdated(AlfredSettings)
         /// An event type this client does not know. Its `data` is not decoded.
         case unknown(type: String)
     }
@@ -48,12 +53,21 @@ public struct Event: Decodable, Hashable, Sendable {
             payload = .taskUpdated(try container.decode(AlfredTask.self, forKey: .data))
         case "document.updated":
             payload = .documentUpdated(try container.decode(AlfredDocument.self, forKey: .data))
+        case "document.removed":
+            payload = .documentRemoved(id: try container.decode(DocumentRemoved.self, forKey: .data).id)
         case "annotation.updated":
             payload = .annotationUpdated(try container.decode(Annotation.self, forKey: .data))
         case "idea.updated":
             payload = .ideaUpdated(try container.decode(AlfredIdea.self, forKey: .data))
+        case "settings.updated":
+            payload = .settingsUpdated(try container.decode(AlfredSettings.self, forKey: .data))
         default:
             payload = .unknown(type: type)
         }
+    }
+
+    /// The data of a `document.removed` event.
+    private struct DocumentRemoved: Decodable {
+        let id: String
     }
 }

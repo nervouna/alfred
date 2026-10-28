@@ -1,7 +1,6 @@
 // The daily generation of ideas, on a fake clock, a fake timer and a state file of its own: no model is called.
 
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -25,7 +24,7 @@ afterEach(() => {
 const { EventLog } = await import("../events.ts");
 const { IdeaStore } = await import("./store.ts");
 const { IDEAS_SCHEDULE_FILE, OPEN_IDEAS_SKIP, startDailyIdeas } = await import("./schedule.ts");
-const { parseIdeasAt } = await import("../agent/config.ts");
+const { envSettings, parseIdeasAt } = await import("../agent/config.ts");
 const { STATE_DIR } = await import("../store.ts");
 
 /** 2026-10-27, Tuesday, at a local (Taipei) time. */
@@ -65,7 +64,9 @@ function setup({ time = "08:00", start = at("07:00"), open = 0, file, replies }:
     triggers.push(trigger);
     return queued.shift() ?? { ok: true, body: { runId: "k7m2qa" } };
   };
-  const stop = startDailyIdeas({ at: time ?? undefined, ideas, generate, file: stateFile, now: () => clock.now });
+  // The time is read at each check, as startDailyIdeas does: a test changes it with `schedule.at`.
+  const schedule = { at: time };
+  const stop = startDailyIdeas({ at: () => schedule.at, ideas, generate, file: stateFile, now: () => clock.now });
   const tick = (ms: number) => {
     clock.now = new Date(clock.now.getTime() + ms);
     mock.timers.tick(ms);
@@ -82,7 +83,7 @@ function setup({ time = "08:00", start = at("07:00"), open = 0, file, replies }:
       return undefined;
     }
   };
-  return { clock, ideas, calls, triggers, generate, stop, tick, jump, stateFile, savedDay };
+  return { clock, ideas, calls, triggers, generate, stop, tick, jump, stateFile, savedDay, schedule };
 }
 
 /** The lines the log wrote while `fn` ran. */
@@ -276,7 +277,7 @@ test("a generate that throws is logged and the timer goes on", () => {
   const ideas = new IdeaStore({ file: path.join(dir, "ideas.json"), events: new EventLog(path.join(dir, "events.jsonl")) });
   let calls = 0;
   const stop = startDailyIdeas({
-    at: "08:00",
+    at: () => "08:00",
     ideas,
     generate: () => {
       if (++calls === 1) throw new Error("disk full");
@@ -310,7 +311,7 @@ test("the timer does not keep the process alive", () => {
   }) as typeof setInterval);
   const dir = path.join(tmp, "unref");
   const stop = startDailyIdeas({
-    at: "08:00",
+    at: () => "08:00",
     ideas: new IdeaStore({ file: path.join(dir, "ideas.json"), events: new EventLog(path.join(dir, "events.jsonl")) }),
     generate: () => ({ ok: false, status: 409, error: "no" }),
     file: path.join(dir, "ideas-schedule.json"),
@@ -339,20 +340,96 @@ test("the setting: HH:MM, empty turns it off, anything else fails with a message
   for (const bad of ["8:00", "24:00", "08:60", "08.00", "0800", "noon", "08:00:00", "8", "-1"]) {
     assert.throws(() => parseIdeasAt(bad), new RegExp(`ALFRED_IDEAS_AT must be a 24-hour time as HH:MM.*got "${bad.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"`), bad);
   }
-  assert.throws(() => startDailyIdeas({ at: "noon", ideas: new IdeaStore({ file: path.join(tmp, "x", "ideas.json"), events: new EventLog(path.join(tmp, "x", "e.jsonl")) }), generate: () => ({ ok: false, status: 409, error: "no" }) }), /HH:MM/);
 });
 
-test("ALFRED_IDEAS_AT is read where the other settings are: unset is 08:00, empty is off, an invalid one fails", () => {
-  const read = (env: Record<string, string>): string => {
-    const code = `import { ideasAt } from "./src/agent/config.ts"; try { console.log(JSON.stringify({ at: ideasAt() ?? null })); } catch (err) { console.log(JSON.stringify({ error: err.message })); }`;
-    const base: Record<string, string | undefined> = { ...process.env, ALFRED_STATE_DIR: path.join(tmp, "setting") };
-    delete base.ALFRED_IDEAS_AT;
-    return execFileSync(process.execPath, ["--input-type=module", "-e", code], { env: { ...base, ...env }, cwd: path.join(import.meta.dirname, "..", ".."), encoding: "utf8" }).trim();
-  };
-  assert.equal(read({}), '{"at":"08:00"}');
-  assert.equal(read({ ALFRED_IDEAS_AT: "" }), '{"at":null}');
-  assert.equal(read({ ALFRED_IDEAS_AT: "06:45" }), '{"at":"06:45"}');
-  assert.match(read({ ALFRED_IDEAS_AT: "6pm" }), /ALFRED_IDEAS_AT must be a 24-hour time as HH:MM/);
+test("ALFRED_IDEAS_AT is read with the other environment settings: unset is 08:00, empty is off, an invalid one fails", () => {
+  assert.equal(envSettings({}).ideasAt, "08:00");
+  assert.equal(envSettings({ ALFRED_IDEAS_AT: "" }).ideasAt, null);
+  assert.equal(envSettings({ ALFRED_IDEAS_AT: " 06:45 " }).ideasAt, "06:45");
+  assert.throws(() => envSettings({ ALFRED_IDEAS_AT: "6pm" }), /ALFRED_IDEAS_AT must be a 24-hour time as HH:MM/);
+});
+
+test("the time is read at each check: a new time is picked up at the next minute, later or earlier than the old one", () => {
+  const later = setup({ start: at("07:00") });
+  later.tick(30 * MINUTE_MS); // 07:30
+  later.schedule.at = "09:00";
+  later.jump(at("08:00"));
+  later.jump(at("08:59"));
+  assert.deepEqual(later.calls, [], "the old time no longer counts");
+  later.jump(at("09:00"));
+  assert.equal(later.calls.length, 1, "the new time does");
+
+  later.stop();
+  const earlier = setup({ start: at("07:00") });
+  earlier.schedule.at = "07:45";
+  earlier.jump(at("07:44"));
+  assert.deepEqual(earlier.calls, []);
+  earlier.jump(at("07:45"));
+  assert.equal(earlier.calls.length, 1);
+  earlier.stop();
+});
+
+test("a time moved to one just passed starts the generation at the next check; one hours behind skips the day as a late one", () => {
+  const near = setup({ start: at("08:30"), time: "09:00" });
+  near.schedule.at = "08:20";
+  near.tick(MINUTE_MS);
+  assert.equal(near.calls.length, 1, "11 minutes late is still on time");
+
+  near.stop();
+  const far = setup({ start: at("14:00"), time: "15:00" });
+  far.schedule.at = "08:00";
+  far.tick(MINUTE_MS);
+  assert.deepEqual(far.calls, [], "hours late is a skipped day");
+  assert.equal(far.savedDay(), "2026-10-27");
+  far.stop();
+});
+
+test("null or an empty time turns the generation off from the next check, and a time turns it on again", () => {
+  const s = setup({ start: at("07:00") });
+  s.schedule.at = null;
+  s.jump(at("08:30"));
+  assert.deepEqual(s.calls, [], "off");
+  assert.equal(s.savedDay(), undefined, "an off day is not a done day");
+  s.schedule.at = "";
+  s.jump(at("08:31"));
+  assert.deepEqual(s.calls, [], "an empty time is off too");
+  s.schedule.at = "08:30";
+  s.jump(at("08:32"));
+  assert.equal(s.calls.length, 1, "on again, and 2 minutes late is on time");
+
+  s.stop();
+  const cold = setup({ time: null, start: at("07:00") });
+  cold.schedule.at = "09:00";
+  cold.jump(at("09:00"));
+  assert.equal(cold.calls.length, 1, "from off at startup to a time");
+  cold.stop();
+});
+
+test("the day-done record works as before when the time changes: a day that had its generation does not run again", () => {
+  const s = setup({ start: at("07:59") });
+  s.tick(MINUTE_MS);
+  assert.equal(s.calls.length, 1);
+  s.schedule.at = "09:00";
+  s.jump(at("09:00"));
+  assert.equal(s.calls.length, 1, "the day is done, whatever the time now says");
+  s.jump(at("08:59", "2026-10-28"));
+  assert.equal(s.calls.length, 1, "the next day follows the new time");
+  s.jump(at("09:00", "2026-10-28"));
+  assert.equal(s.calls.length, 2);
+  s.stop();
+});
+
+test("a time that is not HH:MM is logged and runs nothing, and the timer goes on", () => {
+  const lines = logged();
+  const s = setup({ start: at("07:00") });
+  s.schedule.at = "noon";
+  s.jump(at("08:00"));
+  assert.deepEqual(s.calls, []);
+  assert.ok(lines.lines().some((line) => /HH:MM/.test(line)));
+  s.schedule.at = "08:00";
+  s.jump(at("08:01"));
+  assert.equal(s.calls.length, 1, "the next check ran with a valid time");
+  s.stop();
 });
 
 test("the default state file is ideas-schedule.json in the state directory", () => {
