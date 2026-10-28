@@ -91,20 +91,32 @@ export function memoryDir(workspace: string): string | undefined {
   }
 }
 
+/** A memory with the bytes of its file, so that a hash of them is the hash of what the memory was parsed from. */
+export interface MemoryFile {
+  memory: Memory;
+  bytes: Buffer;
+}
+
 /**
- * All memories, most recently updated first. Only regular top-level `.md`
+ * All memories with their files' bytes, most recently updated first. Only regular top-level `.md`
  * files count; symlinks are skipped so a link cannot pull outside content
  * into the system prompt.
  */
-export function loadMemories(workspace: string): Memory[] {
+export function loadMemoryFiles(workspace: string): MemoryFile[] {
   const dir = memoryDir(workspace);
   if (!dir) return [];
-  const memories: Memory[] = [];
+  const files: MemoryFile[] = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     if (!entry.isFile() || !entry.name.endsWith(".md") || entry.name === MEMORY_INDEX) continue;
-    memories.push(parseMemory(entry.name, fs.readFileSync(path.join(dir, entry.name), "utf-8")));
+    const bytes = fs.readFileSync(path.join(dir, entry.name));
+    files.push({ memory: parseMemory(entry.name, bytes.toString("utf-8")), bytes });
   }
-  return memories.sort((a, b) => b.updated.localeCompare(a.updated) || a.name.localeCompare(b.name));
+  return files.sort((a, b) => b.memory.updated.localeCompare(a.memory.updated) || a.memory.name.localeCompare(b.memory.name));
+}
+
+/** All memories, most recently updated first (see loadMemoryFiles). */
+export function loadMemories(workspace: string): Memory[] {
+  return loadMemoryFiles(workspace).map((file) => file.memory);
 }
 
 export function indexLine(m: Memory): string {
@@ -172,6 +184,9 @@ export function looksLikeSecret(text: string): boolean {
     /(?:password|passwd|密码|口令|token|api[ _-]?key|secret)\s*[:=：是为]\s*\S{6,}/i,
   ].some((re) => re.test(text)) || /\b(?=[A-Za-z]*\d)(?=\d*[A-Za-z])[A-Za-z0-9]{32,}\b/.test(text);
 }
+
+/** What running a job under the memory lock came to: its value, or that the lock was not free within the wait. */
+export type Locked<T> = { locked: true; value: T } | { locked: false };
 
 type LockHolder = "task" | "scan";
 interface LockInfo {

@@ -16,16 +16,30 @@ import http from "node:http";
 import path from "node:path";
 
 import { resolveInside } from "../agent/guard.ts";
+import { memoryList } from "../agent/memory-edit.ts";
 import { loadMemories } from "../agent/memory.ts";
 import { RULES_READ_MAX_BYTES, readRulesForOwner } from "../agent/rules.ts";
 import { DocumentDetailSchema, PushRegistrationSchema, RunSchema, StepSchema } from "../api/schema.ts";
-import type { DocumentDetail, DocumentList, Run, RunDetail, TaskDetail } from "../api/schema.ts";
+import type { DocumentDetail, DocumentList, Run, RunDetail, SettingsDetail, TaskDetail } from "../api/schema.ts";
 import { apiSocketPath } from "../api/server.ts";
-import { readDocumentFile } from "../documents/store.ts";
+import { isTrashedPath, readDocumentFile } from "../documents/store.ts";
 import { VERSIONS_GIT_DIR, Versions } from "../documents/versions.ts";
 import { describeError, log } from "../log.ts";
 import type { AccessVerifier } from "./access.ts";
-import { allRuns, alfredStatus, listSessions, readIdeaList, readTaskList, readTranscript, runDetail, spendByDay, tailLog } from "./data.ts";
+import {
+  allRuns,
+  alfredStatus,
+  listSessions,
+  localDay,
+  readIdeaList,
+  readSettings,
+  readTaskList,
+  readTranscript,
+  runDetail,
+  spendByDay,
+  spendOnDay,
+  tailLog,
+} from "./data.ts";
 import { DeviceStore } from "./devices.ts";
 import { forwardCommand, forwardEvents, forwardUpload, jsonError, jsonReply, readBody } from "./forward.ts";
 import { html, trusted } from "./html.ts";
@@ -380,11 +394,30 @@ function ideaListReply(): Response {
 }
 
 /**
- * GET /api/documents: the documents the store keeps in documents.json, most recently updated first. A missing file is
- * an empty list; a file that does not fit fails the request, and is logged.
+ * GET /api/settings: the effective settings Alfred mirrors for the workbench, and what the owner has spent today, by the
+ * overview page's rule for "today" (the runs that started on the local day, subagents left out). The mirror is missing
+ * until Alfred first starts; one that cannot be read or does not fit is answered the same way, 503, and logged.
+ */
+function settingsReply(): Response {
+  let settings: SettingsDetail["settings"];
+  try {
+    settings = readSettings();
+  } catch (err) {
+    log.error(`GET /api/settings: ${describeError(err)}`);
+    return jsonError(503, "The settings are not available yet.");
+  }
+  const body: SettingsDetail = { settings, spentTodayUsd: spendOnDay(allRuns(), localDay(new Date().toISOString())) };
+  return jsonReply(200, body);
+}
+
+/**
+ * GET /api/documents: the documents the store keeps in documents.json, most recently updated first, those in .trash/
+ * left out. A missing file is an empty list; a file that does not fit fails the request, and is logged.
  */
 function documentListReply(): Response {
-  const documents = readDocumentFile().documents.map((entry) => entry.document);
+  const documents = readDocumentFile()
+    .documents.map((entry) => entry.document)
+    .filter((document) => !isTrashedPath(document.path));
   documents.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
   const body: DocumentList = { documents };
   return jsonReply(200, body);
@@ -392,16 +425,16 @@ function documentListReply(): Response {
 
 /**
  * GET /api/documents/<id>: the document, its versions (newest first, the first being the current one), its annotations
- * (newest first) and its revision runs (newest first, at most 50). A malformed or unknown id is 404; runs whose record
- * does not fit the client's schema are left out and logged, as GET /api/tasks/<id> leaves them out. A body that does
- * not fit DocumentDetailSchema fails the request, and is logged.
+ * (newest first) and its revision runs (newest first, at most 50). A malformed or unknown id is 404, and so is the id of
+ * a document in .trash/; runs whose record does not fit the client's schema are left out and logged, as
+ * GET /api/tasks/<id> leaves them out. A body that does not fit DocumentDetailSchema fails the request, and is logged.
  */
 function documentDetailReply(id: string): Response {
   const notFound = () => jsonError(404, "There is no such document.");
   if (!DOCUMENT_ID.test(id)) return notFound();
   const file = readDocumentFile();
   const entry = file.documents.find((other) => other.document.id === id);
-  if (!entry) return notFound();
+  if (!entry || isTrashedPath(entry.document.path)) return notFound();
   const runs: Run[] = [];
   let left = 0;
   for (const record of allRuns()) {
@@ -455,6 +488,15 @@ function rulesReply(workspace: string): Response {
   const rules = readRulesForOwner(workspace);
   if (!rules) return jsonError(413, `ALFRED.md is over ${RULES_READ_MAX_BYTES} bytes, too long to edit here.`);
   return jsonReply(200, rules);
+}
+
+/**
+ * GET /api/memories: the long-term memories as a MemoryList, in the order of the system prompt's index, each with the
+ * sha256 of its file's bytes as the version that memory.update and memory.delete are made against. No memory folder is
+ * an empty list.
+ */
+function memoryListReply(workspace: string): Response {
+  return jsonReply(200, memoryList(workspace));
 }
 
 /**
@@ -555,6 +597,8 @@ async function apiRoute(req: http.IncomingMessage, url: URL, ctx: ApiContext): P
   if (p.startsWith(DOCUMENT_PREFIX)) return only("GET", () => documentDetailReply(p.slice(DOCUMENT_PREFIX.length)));
   if (p === "/api/ideas") return only("GET", () => ideaListReply());
   if (p === "/api/rules") return only("GET", () => rulesReply(ctx.workspace));
+  if (p === "/api/memories") return only("GET", () => memoryListReply(ctx.workspace));
+  if (p === "/api/settings") return only("GET", () => settingsReply());
   if (p === "/api/push") return only("POST", () => pushRegistrationReply(req, device.id, ctx.devices));
   const run = RUN_PATH.exec(p)?.[1];
   if (run) return only("GET", () => runDetailReply(run));

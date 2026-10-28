@@ -81,6 +81,8 @@ curl --unix-socket "$STATE_DIR/api/alfred.sock" -N http://localhost/events
 
 A malformed value of a setting that `src/agent/config.ts` validates stops Alfred at startup with a message naming the variable.
 
+The variables are defaults. The app can override `ALFRED_MAX_BUDGET_USD`, `ALFRED_DAILY_BUDGET_USD`, `ALFRED_SESSION_IDLE_HOURS`, `ALFRED_COMPACT_TOKENS`, `ALFRED_MEMORY_SCAN_MINUTES`, `ALFRED_MEMORY_SCAN_BUDGET_USD` and `ALFRED_IDEAS_AT` while Alfred runs, and the model with `/model`; an override beats the environment, and the environment beats the built-in default.
+
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `ALFRED_ANTHROPIC_API_KEY` | required | Anthropic API key; inherited `ANTHROPIC_*` variables are ignored |
@@ -107,14 +109,14 @@ A malformed value of a setting that `src/agent/config.ts` validates stops Alfred
 
 | Path | Content |
 | --- | --- |
-| `$XDG_STATE_HOME/alfred/` (default `~/.local/state/alfred/`, override with `ALFRED_STATE_DIR`; `…` below) | `agent-state.json` (the owner's record: sessions, model, spend, per-model unit prices, deliveries since the last message), `memory-scan.json`, `ideas-schedule.json`, `memory.lock`, `events/events.jsonl` (the append-only event log, kept for good), `api/alfred.sock`; files are mode 600 |
-| `…/workbench/` | what the workbench reads: `runs.jsonl`, `runs/<id>.json` (kept 30 days), `status.json` (heartbeat), `alfred.log` (rotated at 5 MB), and `tasks.json`, `ideas.json`, `documents.json`, each written only by its store |
+| `$XDG_STATE_HOME/alfred/` (default `~/.local/state/alfred/`, override with `ALFRED_STATE_DIR`; `…` below) | `agent-state.json` (the owner's record: sessions, model, spend, per-model unit prices, deliveries since the last message), `settings.json` (the owner's overrides of the settings, nothing else), `memory-scan.json`, `ideas-schedule.json`, `memory.lock`, `events/events.jsonl` (the append-only event log, kept for good), `api/alfred.sock`; files are mode 600 |
+| `…/workbench/` | what the workbench reads: `runs.jsonl`, `runs/<id>.json` (kept 30 days), `status.json` (heartbeat), `alfred.log` (rotated at 5 MB), and `tasks.json`, `ideas.json`, `documents.json`, `settings.json` (the effective settings, which the workbench cannot work out for itself), each written only by its store, and `trash.json` (the time the sweep first saw each file in `.trash/`), written only by the sweep |
 | `…/workbench/versions.git/` | the workspace's git history (mode 700), a git dir outside the workspace, so the workspace holds no `.git` ([docs/documents.md](docs/documents.md)) |
 | `…/claude/` | isolated Claude Code config dir: session transcripts, used for resume |
 | `…/workspace-plugin/` | the `workspace` skills plugin, recreated at startup |
 | `…/{account,sync,context-tokens}.json` | what the retired WeChat bot kept; nothing reads them |
 | `$ALFRED_WORKBENCH_STATE` (default `…/app/`) | `devices.json` (each device with the SHA-256 of its token, never the token, and its push registration), `push-cursor.json`; directory mode 700, file 600 |
-| `~/Alfred/` (override with `ALFRED_WORKSPACE`) | the workspace: `ALFRED.md`, `inbox/`, `reports/` (a task's in `reports/tasks/<task id>/`), `notes/`, `images/`, `memory/`, `skills/`, `.trash/` |
+| `~/Alfred/` (override with `ALFRED_WORKSPACE`) | the workspace: `ALFRED.md`, `inbox/`, `reports/` (a task's in `reports/tasks/<task id>/`), `notes/`, `images/`, `memory/`, `skills/`, `.trash/` (emptied: a file is removed 30 days after Alfred first sees it there) |
 | `$XDG_CACHE_HOME/alfred/ms-playwright/` | Chrome Headless Shell for PDF rendering |
 
 ## Layout
@@ -128,6 +130,7 @@ src/api/            the client API: schema, the Unix-socket server, the client b
 src/agent/          the Agent SDK handler (intake queue, routing, stop), questions, guard, rules, skills, tools, sessions, memory
 src/documents/      workspace versions in git, the document store, the document commands
 src/ideas/          the idea store, its commands, archiving, generation and its daily schedule
+src/settings/       the settings store (the owner's overrides over the environment) and its command
 src/tasks/          schedule arithmetic, the task store, the task commands
 src/workbench/      the read-only workbench: server, Access check, pages, pairing, forwarding to the API, push
 plugin/             the baked skills plugin `alfred`

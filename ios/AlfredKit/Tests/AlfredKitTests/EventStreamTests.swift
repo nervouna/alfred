@@ -102,6 +102,9 @@ func frame(_ path: String) throws -> Data {
     return Data((text + "data: \(line)\n\n").utf8)
 }
 
+/// The frame that ends a stream's backlog: an event name, no id.
+let caughtUp = Data("event: caught-up\ndata: {}\n\n".utf8)
+
 /// The stream event a fixture holds.
 func streamEvent(_ path: String) throws -> StreamEvent {
     try JSONDecoder().decode(StreamEvent.self, from: fixture(path))
@@ -156,9 +159,10 @@ final class EventStreamTests: XCTestCase {
             StubReply(chunks: [
                 try frame("events/message-created-app-in.json"),
                 try frame("events/run-updated-running.json"),
+                caughtUp,
                 try frame("live/message-delta.json"),
             ]),
-            StubReply(chunks: [try frame("events/message-created-app-out.json")]),
+            StubReply(chunks: [caughtUp, try frame("events/message-created-app-out.json")]),
         ], sleep: sleep, log: log)
         let updates = UpdateLog()
         let task = consume(stream, into: updates)
@@ -168,11 +172,14 @@ final class EventStreamTests: XCTestCase {
 
         XCTAssertEqual(Array(updates.all.prefix(7)), [
             .connected,
-            .received(try streamEvent("events/message-created-app-in.json")),
-            .received(try streamEvent("events/run-updated-running.json")),
+            .backlog([
+                try streamEvent("events/message-created-app-in.json"),
+                try streamEvent("events/run-updated-running.json"),
+            ]),
             .received(try streamEvent("live/message-delta.json")),
             .disconnected,
             .connected,
+            .backlog([]),
             .received(try streamEvent("events/message-created-app-out.json")),
         ])
         let first = try XCTUnwrap(log.entries.first)
@@ -219,7 +226,7 @@ final class EventStreamTests: XCTestCase {
         let log = RequestLog()
         let stream = try makeStream([
             StubReply(chunks: [Data(": ping\n\n".utf8)], finish: false),
-            StubReply(chunks: [try frame("events/message-created-app-in.json")]),
+            StubReply(chunks: [try frame("events/message-created-app-in.json"), caughtUp]),
         ], sleep: sleep, log: log)
         let updates = UpdateLog()
         let task = consume(stream, into: updates)
@@ -240,12 +247,159 @@ final class EventStreamTests: XCTestCase {
             .connected,
             .disconnected,
             .connected,
-            .received(try streamEvent("events/message-created-app-in.json")),
+            .backlog([try streamEvent("events/message-created-app-in.json")]),
         ])
         let reconnect = try XCTUnwrap(log.entries.dropFirst().first)
         XCTAssertEqual(reconnect.request.value(forHTTPHeaderField: "Last-Event-ID"), "0")
         task.cancel()
         await task.value
+    }
+
+    func testBacklogFramesThenTheMarkerGiveOneBacklogAndLaterFramesGiveReceived() async throws {
+        let stream = try makeStream([
+            StubReply(chunks: [
+                Data(": ping\n\n".utf8),
+                try frame("events/message-created-app-in.json"),
+                try frame("events/run-updated-running.json"),
+                caughtUp,
+                try frame("events/message-created-app-out.json"),
+                try frame("live/message-delta.json"),
+            ]),
+        ], sleep: FakeSleep(), log: RequestLog())
+        let updates = UpdateLog()
+        let task = consume(stream, into: updates)
+        await eventually { updates.all.count >= 4 }
+        task.cancel()
+        await task.value
+
+        XCTAssertEqual(Array(updates.all.prefix(4)), [
+            .connected,
+            .backlog([
+                try streamEvent("events/message-created-app-in.json"),
+                try streamEvent("events/run-updated-running.json"),
+            ]),
+            .received(try streamEvent("events/message-created-app-out.json")),
+            .received(try streamEvent("live/message-delta.json")),
+        ])
+    }
+
+    func testAnEmptyBacklogGivesAnEmptyBacklog() async throws {
+        let stream = try makeStream([
+            StubReply(chunks: [Data(": ping\n\n".utf8), caughtUp], finish: false),
+        ], sleep: FakeSleep(), log: RequestLog())
+        let updates = UpdateLog()
+        let task = consume(stream, into: updates)
+        await eventually { updates.all.count >= 2 }
+        task.cancel()
+        await task.value
+        XCTAssertEqual(updates.all, [.connected, .backlog([])])
+    }
+
+    func testTheMarkerIsReadOncePerConnectionAndMovesNoResumePoint() async throws {
+        let sleep = FakeSleep()
+        let log = RequestLog()
+        let stream = try makeStream([
+            StubReply(chunks: [
+                try frame("events/message-created-app-in.json"),
+                caughtUp,
+                caughtUp,
+                try frame("events/run-updated-running.json"),
+            ]),
+            StubReply(chunks: [caughtUp], finish: false),
+        ], sleep: sleep, log: log)
+        let updates = UpdateLog()
+        let task = consume(stream, into: updates)
+        await eventually { updates.all.count >= 6 }
+        task.cancel()
+        await task.value
+
+        XCTAssertEqual(Array(updates.all.prefix(6)), [
+            .connected,
+            .backlog([try streamEvent("events/message-created-app-in.json")]),
+            .received(try streamEvent("events/run-updated-running.json")),
+            .disconnected,
+            .connected,
+            .backlog([]),
+        ])
+        let reconnect = try XCTUnwrap(log.entries.dropFirst().first)
+        XCTAssertEqual(reconnect.request.value(forHTTPHeaderField: "Last-Event-ID"), "2")
+    }
+
+    func testADropBeforeTheMarkerGivesWhatArrivedAsABacklogThenDisconnectedAndResumesAfterTheLastID() async throws {
+        let sleep = FakeSleep()
+        let log = RequestLog()
+        let stream = try makeStream([
+            StubReply(chunks: [
+                try frame("events/message-created-app-in.json"),
+                try frame("events/run-updated-running.json"),
+                try frame("live/message-delta.json"),
+            ]),
+            StubReply(chunks: [caughtUp, try frame("events/message-created-app-out.json")]),
+        ], sleep: sleep, log: log)
+        let updates = UpdateLog()
+        let task = consume(stream, into: updates)
+        await eventually { updates.all.count >= 7 }
+        task.cancel()
+        await task.value
+
+        XCTAssertEqual(Array(updates.all.prefix(7)), [
+            .connected,
+            .backlog([
+                try streamEvent("events/message-created-app-in.json"),
+                try streamEvent("events/run-updated-running.json"),
+                try streamEvent("live/message-delta.json"),
+            ]),
+            .disconnected,
+            .connected,
+            .backlog([]),
+            .received(try streamEvent("events/message-created-app-out.json")),
+            .disconnected,
+        ])
+        let reconnect = try XCTUnwrap(log.entries.dropFirst().first)
+        XCTAssertEqual(reconnect.request.value(forHTTPHeaderField: "Last-Event-ID"), "2")
+    }
+
+    func testAWatchdogDropBeforeTheMarkerGivesWhatArrivedAsABacklog() async throws {
+        let sleep = FakeSleep()
+        let log = RequestLog()
+        let stream = try makeStream([
+            StubReply(chunks: [try frame("events/message-created-app-in.json")], finish: false),
+            StubReply(chunks: [caughtUp], finish: false),
+        ], sleep: sleep, log: log)
+        let updates = UpdateLog()
+        let task = consume(stream, into: updates)
+        await eventually {
+            let requests = await sleep.watchdogRequests
+            let pending = await sleep.pendingWatchdogs
+            return requests == 2 && pending == 1 && updates.all.count >= 1
+        }
+        XCTAssertEqual(updates.all, [.connected], "what arrived before the marker is held back")
+
+        await sleep.fireWatchdog()
+        await eventually { updates.all.count >= 4 }
+        task.cancel()
+        await task.value
+        XCTAssertEqual(Array(updates.all.prefix(4)), [
+            .connected,
+            .backlog([try streamEvent("events/message-created-app-in.json")]),
+            .disconnected,
+            .connected,
+        ])
+        let reconnect = try XCTUnwrap(log.entries.dropFirst().first)
+        XCTAssertEqual(reconnect.request.value(forHTTPHeaderField: "Last-Event-ID"), "1")
+    }
+
+    func testAConnectionThatDropsBeforeTheMarkerWithNothingCollectedGivesNoBacklog() async throws {
+        let stream = try makeStream([
+            StubReply(chunks: [Data(": ping\n\n".utf8)]),
+            StubReply(status: 500),
+        ], sleep: FakeSleep(), log: RequestLog())
+        let updates = UpdateLog()
+        let task = consume(stream, into: updates)
+        await eventually { updates.all.count >= 3 }
+        task.cancel()
+        await task.value
+        XCTAssertEqual(Array(updates.all.prefix(3)), [.connected, .disconnected, .disconnected])
     }
 
     func testAnAccessErrorStopsTheStreamWithoutARetry() async throws {
@@ -272,6 +426,7 @@ final class EventStreamTests: XCTestCase {
             StubReply(chunks: [
                 try frame("events/message-created-app-in.json"),
                 Data("id: 2\ndata: {not json\n\n".utf8),
+                caughtUp,
             ]),
             StubReply(status: 500),
         ], sleep: sleep, log: log)
@@ -283,7 +438,7 @@ final class EventStreamTests: XCTestCase {
         // The reconnect is refused with a 500, so it reports a failed connection and never connects.
         XCTAssertEqual(Array(updates.all.prefix(4)), [
             .connected,
-            .received(try streamEvent("events/message-created-app-in.json")),
+            .backlog([try streamEvent("events/message-created-app-in.json")]),
             .disconnected,
             .disconnected,
         ])

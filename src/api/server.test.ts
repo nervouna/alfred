@@ -18,15 +18,21 @@ import type {
   IdeaGenerationAccepted,
   IdeaReject,
   IdeaResult,
+  MemoryCreate,
+  MemoryDelete,
+  MemoryResult,
+  MemoryUpdate,
   Run,
   RevisionAccepted,
   Rules,
   RulesSave,
+  SettingsResult,
+  SettingsUpdate,
   TaskCreate,
   TaskResult,
   TaskUpdate,
 } from "./schema.ts";
-import type { DocumentCommands, DocumentReply, IdeaCommands, IdeaReply, RulesCommands, RulesReply, TaskCommands, TaskReply } from "./server.ts";
+import type { DocumentCommands, DocumentReply, IdeaCommands, IdeaReply, MemoryCommands, MemoryReply, RulesCommands, RulesReply, SettingsCommands, SettingsReply, TaskCommands, TaskReply } from "./server.ts";
 import type { Inbound } from "../channels.ts";
 import type { EventLog as EventLogType } from "../events.ts";
 
@@ -47,7 +53,7 @@ after(() => {
 
 const { EventLog } = await import("../events.ts");
 const { localDate } = await import("../files.ts");
-const { MAX_COMMAND_BYTES, MAX_UPLOAD_BYTES, TaskResultSchema, parseCommand } = await import("./schema.ts");
+const { MAX_COMMAND_BYTES, MAX_UPLOAD_BYTES, SettingsResultSchema, TaskResultSchema, parseCommand } = await import("./schema.ts");
 const { HEARTBEAT_MS, apiSocketPath, startApi } = await import("./server.ts");
 const { InvalidAnswer } = await import("../channels.ts");
 
@@ -114,7 +120,7 @@ let fixtures = 0;
 /** An API on a socket of its own, with a stub handler and an event log of its own. */
 async function start(
   t: TestContext,
-  opts: { heartbeatMs?: number; pageSize?: number; tasks?: TaskCommands; documents?: DocumentCommands; ideas?: IdeaCommands; rules?: RulesCommands } = {},
+  opts: { heartbeatMs?: number; pageSize?: number; tasks?: TaskCommands; documents?: DocumentCommands; ideas?: IdeaCommands; rules?: RulesCommands; memory?: MemoryCommands; settings?: SettingsCommands } = {},
 ) {
   const dir = path.join(tmp, `t${fixtures++}`);
   const socket = path.join(dir, "api", "a.sock");
@@ -736,6 +742,129 @@ test("the real rules service saves with the version it read, and refuses the old
   assert.equal((await post(socket, { type: "rules.save", text: "# two\n", version: sha256("# one\n") })).status, 200);
 });
 
+// --- Memory commands ----------------------------------------------------------
+
+const memoryResult = JSON.parse(fixture("responses", "memory-result.json")) as MemoryResult;
+
+/** Stands in for the memory service: records the commands it is given, and refuses with `refuse` when it is set. */
+function stubMemory() {
+  const memory = {
+    calls: [] as (MemoryCreate | MemoryUpdate | MemoryDelete)[],
+    refuse: undefined as Extract<MemoryReply<unknown>, { ok: false }> | undefined,
+    async create(command: MemoryCreate): Promise<MemoryReply<MemoryResult>> {
+      memory.calls.push(command);
+      return memory.refuse ?? { ok: true, body: memoryResult };
+    },
+    async update(command: MemoryUpdate): Promise<MemoryReply<MemoryResult>> {
+      memory.calls.push(command);
+      return memory.refuse ?? { ok: true, body: memoryResult };
+    },
+    async delete(command: MemoryDelete): Promise<MemoryReply<{ deleted: true }>> {
+      memory.calls.push(command);
+      return memory.refuse ?? { ok: true, body: { deleted: true } };
+    },
+  };
+  return memory;
+}
+
+const MEMORY_COMMAND_FIXTURES = ["memory-create.json", "memory-update.json", "memory-delete.json"];
+
+test("the memory commands get 503 until memory is wired in, and never reach the handler", async (t) => {
+  const { socket, handler } = await start(t);
+  for (const name of MEMORY_COMMAND_FIXTURES) {
+    const reply = await post(socket, fixture("commands", name));
+    assert.equal(reply.status, 503, name);
+    assert.deepEqual(reply.json(), { error: "memory is not available" }, name);
+  }
+  assert.equal(handler.submitted.length, 0, "a memory command never reaches the message path");
+  assert.deepEqual(handler.stopped, []);
+  assert.deepEqual(handler.answered, []);
+});
+
+test("memory.create answers 201 with a MemoryResult, memory.update 200 with one and memory.delete 200 with { deleted: true }", async (t) => {
+  const memory = stubMemory();
+  const { socket, handler } = await start(t, { memory });
+  const created = await post(socket, fixture("commands", "memory-create.json"));
+  assert.equal(created.status, 201);
+  assert.deepEqual(created.json(), memoryResult);
+  const updated = await post(socket, fixture("commands", "memory-update.json"));
+  assert.equal(updated.status, 200);
+  assert.deepEqual(updated.json(), memoryResult);
+  const deleted = await post(socket, fixture("commands", "memory-delete.json"));
+  assert.equal(deleted.status, 200);
+  assert.deepEqual(deleted.json(), { deleted: true });
+
+  assert.deepEqual(memory.calls, MEMORY_COMMAND_FIXTURES.map(parsedCommand), "each reached the memory service as the parsed command");
+  assert.equal(handler.submitted.length, 0, "a memory command never reaches the message path");
+});
+
+test("a memory reply that is not ok answers its status and its error", async (t) => {
+  const memory = stubMemory();
+  const { socket } = await start(t, { memory });
+  for (const [status, error] of [
+    [404, "no memory prefer-short-answers.md"],
+    [409, "version: not the current version of prefer-short-answers.md"],
+    [409, "Alfred is tidying memory right now; try again shortly."],
+    [400, "name: must be at most 80 characters"],
+  ] as const) {
+    memory.refuse = { ok: false, status, error };
+    for (const name of MEMORY_COMMAND_FIXTURES) {
+      const reply = await post(socket, fixture("commands", name));
+      assert.equal(reply.status, status, name);
+      assert.deepEqual(reply.json(), { error }, name);
+    }
+  }
+});
+
+test("a memory command that does not fit the schema gets 400 and never reaches the memory service", async (t) => {
+  const memory = stubMemory();
+  const { socket } = await start(t, { memory });
+  const names = fs.readdirSync(new URL("../../fixtures/api/invalid-commands/", import.meta.url)).filter((name) => name.startsWith("memory-"));
+  assert.ok(names.length >= 6, "a case for each rule: kind, name, version, file, one line and the extra key");
+  for (const name of names) assert.equal((await post(socket, fixture("invalid-commands", name))).status, 400, name);
+  assert.deepEqual(memory.calls, []);
+});
+
+test("the real memory service creates, updates and deletes through the API, and a stale version is 409", async (t) => {
+  const { memoryCommands } = await import("../agent/memory-edit.ts");
+  const { socket } = await start(t, {
+    memory: memoryCommands({ withMemoryLock: async (job) => ({ locked: true, value: job() }) }, { workspace }),
+  });
+  const dir = path.join(workspace, "memory");
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.rmSync(path.join(workspace, ".trash"), { recursive: true, force: true });
+  t.after(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(path.join(workspace, ".trash"), { recursive: true, force: true });
+  });
+  const index = () => fs.readFileSync(path.join(dir, "MEMORY.md"), "utf8");
+
+  const created = await post(socket, { type: "memory.create", name: "Metric units", description: "Use kilometres.", kind: "preference", body: "Convert miles." });
+  assert.equal(created.status, 201);
+  const first = (created.json() as MemoryResult).memory;
+  assert.deepEqual([first.file, first.name, first.kind, first.updated], ["metric-units.md", "Metric units", "preference", localDate()]);
+  assert.match(index(), /\[Metric units\]\(metric-units\.md\) — Use kilometres\./);
+
+  const edit = { type: "memory.update", file: first.file, version: first.version, name: "Metric", description: "", kind: "user", body: "Changed." };
+  const updated = await post(socket, edit);
+  assert.equal(updated.status, 200);
+  const second = (updated.json() as MemoryResult).memory;
+  assert.notEqual(second.version, first.version);
+  assert.match(index(), /\[Metric\]\(metric-units\.md\)/);
+
+  const stale = await post(socket, edit);
+  assert.equal(stale.status, 409, "the old version");
+  assert.match((stale.json() as { error: string }).error, /^version: /);
+  assert.equal((await post(socket, { ...edit, file: "nothing.md" })).status, 404);
+
+  const deleted = await post(socket, { type: "memory.delete", file: first.file, version: second.version });
+  assert.equal(deleted.status, 200);
+  assert.deepEqual(deleted.json(), { deleted: true });
+  assert.ok(fs.existsSync(path.join(workspace, ".trash", "memory", "metric-units.md")));
+  assert.doesNotMatch(index(), /metric-units\.md/);
+  assert.equal((await post(socket, { type: "memory.delete", file: first.file, version: second.version })).status, 404);
+});
+
 // --- Idea commands ------------------------------------------------------------
 
 const ideaAccepted = JSON.parse(fixture("responses", "idea-accepted.json")) as IdeaAccepted;
@@ -788,6 +917,57 @@ test("each settings command fixture gets 503 until settings are wired in, and ne
   assert.equal(handler.submitted.length, 0, "a settings command never reaches the message path");
   assert.deepEqual(handler.stopped, []);
   assert.deepEqual(handler.answered, []);
+});
+
+/** Stands in for the settings service: records the commands it is given, and answers the fixture's settings or `refuse`. */
+function stubSettings() {
+  const answer = JSON.parse(fixture("responses", "settings-result.json")) as SettingsResult;
+  const settings = {
+    updated: [] as SettingsUpdate[],
+    refuse: undefined as SettingsReply | undefined,
+    answer,
+    update(command: SettingsUpdate): SettingsReply {
+      settings.updated.push(command);
+      return settings.refuse ?? { ok: true, settings: answer.settings };
+    },
+  };
+  return settings;
+}
+
+test("settings.update reaches the settings service as a parsed command and answers 200 with a SettingsResult", async (t) => {
+  const settings = stubSettings();
+  const { socket, handler } = await start(t, { settings });
+  for (const name of ["settings-update.json", "settings-update-ideas-off.json", "settings-update-reset-all.json"]) {
+    const reply = await post(socket, fixture("commands", name));
+    assert.equal(reply.status, 200, name);
+    assert.deepEqual(reply.json(), settings.answer, name);
+    assert.equal(SettingsResultSchema.safeParse(reply.json()).success, true, name);
+  }
+  assert.deepEqual(settings.updated, [
+    parsedCommand("settings-update.json"),
+    parsedCommand("settings-update-ideas-off.json"),
+    parsedCommand("settings-update-reset-all.json"),
+  ]);
+  assert.equal(handler.submitted.length, 0, "a settings command never reaches the message path");
+  assert.deepEqual(handler.stopped, []);
+  assert.deepEqual(handler.answered, []);
+});
+
+test("a settings change the service refuses is answered with its status and reason", async (t) => {
+  const settings = stubSettings();
+  const { socket } = await start(t, { settings });
+  settings.refuse = { ok: false, status: 400, error: "dailyBudgetUsd: must be at most 100" };
+  const reply = await post(socket, fixture("commands", "settings-update.json"));
+  assert.equal(reply.status, 400);
+  assert.deepEqual(reply.json(), { error: "dailyBudgetUsd: must be at most 100" });
+});
+
+test("a settings command that fails the contract's ranges never reaches the settings service", async (t) => {
+  const settings = stubSettings();
+  const { socket } = await start(t, { settings });
+  const reply = await post(socket, fixture("invalid-commands", "settings-update-daily-101.json"));
+  assert.equal(reply.status, 400);
+  assert.deepEqual(settings.updated, []);
 });
 
 test("idea.accept, idea.reject and idea.generate reach the ideas service as parsed commands, and answer 200, 200 and 202", async (t) => {
@@ -890,6 +1070,67 @@ test("events appended while the backlog is read are neither skipped nor repeated
   assert.equal(events.reads, 3, "the backlog took three pages of two");
 });
 
+/** The frame that ends a backlog, as it is on the wire. */
+const CAUGHT_UP = "event: caught-up\ndata: {}\n\n";
+const markers = (text: string) => text.split(CAUGHT_UP).length - 1;
+
+test("the backlog ends with a caught-up frame that has no id, before the first live event", async (t) => {
+  const { socket, events } = await start(t);
+  appendRuns(events, 2);
+  const sse = await open(t, socket);
+  await until("the marker", () => markers(sse.text()) === 1);
+  const last = events.readSince(1, 1)[0];
+  assert.ok(sse.text().endsWith(`id: 2\nevent: run.updated\ndata: ${JSON.stringify(last)}\n\n${CAUGHT_UP}`), "right after the last backlog event, and nothing after it yet");
+  assert.deepEqual(sse.ids(), [1, 2], "the marker has no id line");
+
+  const live = events.append("run.updated", run);
+  await until("the live event", () => sse.ids().length === 3);
+  assert.ok(sse.text().endsWith(`id: 3\nevent: run.updated\ndata: ${JSON.stringify(live)}\n\n`));
+  assert.equal(markers(sse.text()), 1, "once per stream");
+  assert.ok(sse.text().indexOf(CAUGHT_UP) < sse.text().indexOf("id: 3"));
+});
+
+test("a stream with nothing to catch up on gets the ping and then the marker, also when it resumes at the end", async (t) => {
+  const { socket, events } = await start(t, { heartbeatMs: 60_000 });
+  const empty = await open(t, socket);
+  await until("the marker", () => empty.text() === `: ping\n\n${CAUGHT_UP}`);
+
+  appendRuns(events, 3);
+  const atEnd = await open(t, socket, "/events", { "Last-Event-ID": "3" });
+  await until("the marker", () => atEnd.text() === `: ping\n\n${CAUGHT_UP}`);
+  assert.deepEqual(atEnd.ids(), []);
+});
+
+test("a backlog of several pages gets the marker only after the last page", async (t) => {
+  const { socket, events } = await start(t, { pageSize: 2 });
+  appendRuns(events, 5);
+  events.onRead = () => {}; // reads are counted only while a hook is set
+  const sse = await open(t, socket);
+  await until("the marker", () => markers(sse.text()) === 1);
+  assert.deepEqual(sse.ids(), [1, 2, 3, 4, 5], "every page came first");
+  assert.ok(sse.text().endsWith(CAUGHT_UP));
+  assert.equal(events.reads, 3, "three pages of two");
+
+  // A stream that resumes mid-log gets its own marker, after its own last page.
+  const exact = await open(t, socket, "/events?after=1");
+  await until("the marker", () => markers(exact.text()) === 1);
+  assert.deepEqual(exact.ids(), [2, 3, 4, 5]);
+  assert.ok(exact.text().endsWith(CAUGHT_UP));
+});
+
+test("events that arrive while the backlog is read come before the marker", async (t) => {
+  const { socket, events } = await start(t, { pageSize: 2 });
+  appendRuns(events, 3);
+  events.onRead = (read) => {
+    if (read <= 2) events.append("run.updated", run);
+  };
+  const sse = await open(t, socket);
+  await until("the marker", () => markers(sse.text()) === 1);
+  events.onRead = undefined;
+  assert.deepEqual(sse.ids(), [1, 2, 3, 4, 5]);
+  assert.ok(sse.text().endsWith(CAUGHT_UP), "buffered events are part of the backlog");
+});
+
 test("a client resumes after Last-Event-ID, which wins over ?after", async (t) => {
   const { socket, events } = await start(t);
   appendRuns(events, 5);
@@ -935,7 +1176,7 @@ test("an id that is not a non-negative integer gets 400", async (t) => {
 test("a stream pings as it opens, so a client with nothing to catch up on gets a byte at once", async (t) => {
   const { socket } = await start(t, { heartbeatMs: 60_000 });
   const sse = await open(t, socket);
-  await until("the opening ping", () => sse.text() === ": ping\n\n");
+  await until("the opening ping", () => sse.text().startsWith(": ping\n\n"));
 });
 
 test("a ping goes out on the heartbeat interval, which is 30 s by default", async (t) => {
@@ -943,7 +1184,7 @@ test("a ping goes out on the heartbeat interval, which is 30 s by default", asyn
   const { socket } = await start(t, { heartbeatMs: 20 });
   const sse = await open(t, socket);
   await until("three pings", () => sse.text().split(": ping\n\n").length > 3);
-  assert.equal(sse.text().replaceAll(": ping\n\n", ""), "", "only pings, as there are no events");
+  assert.equal(sse.text().replaceAll(": ping\n\n", ""), CAUGHT_UP, "only pings and the one marker, as there are no events");
 });
 
 test("after the client disconnects, nothing stays subscribed and the heartbeat stops", async (t) => {
@@ -1010,8 +1251,8 @@ test("a live event goes out as a frame with an event and a data line and no id l
   assert.deepEqual(sse.ids(), [1, 2], "ids go on as if the live events had not been there");
   assert.deepEqual(
     [...sse.text().matchAll(/^event: (.+)$/gm)].map((m) => m[1]),
-    ["run.updated", "message.delta", "run.step", "run.updated"],
-    "in the order they happened",
+    ["run.updated", "caught-up", "message.delta", "run.step", "run.updated"],
+    "in the order they happened, the marker after the backlog",
   );
 });
 

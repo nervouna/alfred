@@ -50,6 +50,10 @@
 // the prompt, and how it ended (the ideas added and the model's note, or that it failed) is recorded in the store
 // before the run ends, for the app to read with the list. A shutdown aborts it, and it ends lost, recording nothing.
 //
+// The owner's edits of long-term memory in the app (memory-edit.ts) go through withMemoryLock: the handler owns the
+// MemoryLock that its runs and its scans use, and a second instance in this process would not share it. An edit holds
+// the lock as a task does, so it runs beside runs and never beside a scan.
+//
 // While a run works it also publishes live events (see events.ts): the main
 // agent's reply text as it is written, and every step the run records.
 
@@ -64,8 +68,9 @@ import type { DocumentReply, IdeaReply } from "../api/server.ts";
 import type { Annotation, DocumentRevise, IdeaGenerationAccepted, IdeaTrigger, Question, RevisionAccepted, Task } from "../api/schema.ts";
 import { InvalidAnswer, SerialQueue, outboundKind, recordInbound, recorded, workspaceRelative } from "../channels.ts";
 import type { Inbound, Intake, Outbound } from "../channels.ts";
+import { TRASH_RETENTION_DAYS, pruneTrash } from "../documents/purge.ts";
 import type { Documents } from "../documents/register.ts";
-import { DocumentRefused } from "../documents/store.ts";
+import { DocumentRefused, TRASH_DIR } from "../documents/store.ts";
 import { type EventLog, sharedEventLog } from "../events.ts";
 import { firstLine, humanAge, localDate, localStamp } from "../files.ts";
 import { IdeaGenerationFailed, collectInputs, generateIdeas as askForIdeas, inputsLine } from "../ideas/generate.ts";
@@ -73,30 +78,30 @@ import type { IdeaStore } from "../ideas/store.ts";
 import { describeError, log } from "../log.ts";
 import { RunRecorder, findRun, markLostRuns, newRunId, pruneRunFiles, runIdCandidates, stepDetail } from "../runs.ts";
 import type { RunRecord, RunStatus } from "../runs.ts";
+import type { SettingsStore } from "../settings/store.ts";
 import { WORKSPACE_DIR } from "../store.ts";
 import type { TaskStore } from "../tasks/store.ts";
 import {
   AGENT_CONFIG_DIR,
   AGENT_SETTINGS,
   BUILTIN_TOOLS,
-  DAILY_BUDGET_USD,
   MAX_BACKGROUND_RUNS,
-  MAX_BUDGET_USD,
   MAX_TURNS,
-  MEMORY_SCAN_MINUTES,
   MODELS,
-  SESSION_IDLE_HOURS,
   WORKBENCH_ON,
   WORKBENCH_URL,
   agentEnv,
   checkCompactTokens,
   checkDailyBudget,
   checkMemoryScanSettings,
+  checkRunBudget,
   checkSessionIdleHours,
   checkWorkbenchSettings,
+  installSettings,
   isModelKey,
   runCardUrl,
   runIdNote,
+  setting,
   subagentDefinitions,
   systemPrompt,
 } from "./config.ts";
@@ -108,7 +113,7 @@ import { resolveInside, workspaceGuard } from "./guard.ts";
 import { TaskInput, answeredBy } from "./input.ts";
 import { EXTRACT_MODEL, MEMORY_LOCK_FILE, MemoryScanScheduler, SCAN_TIMEOUT_MS, scanTranscripts, transcriptDirs } from "./memory-scan.ts";
 import type { ScanReport } from "./memory-scan.ts";
-import { MemoryLock, capIndex, loadMemories, syncMemoryIndex } from "./memory.ts";
+import { type Locked, MemoryLock, capIndex, loadMemories, syncMemoryIndex } from "./memory.ts";
 import { QUESTION_TOOL, answersFromReply, denyPermissionPrompts, questionHook } from "./questions.ts";
 import type { AskOwner, QuestionOutcome } from "./questions.ts";
 import { revisionMessage, revisionPrompt, revisionSettings, revisionsSection } from "./revision.ts";
@@ -133,7 +138,7 @@ const RUN_TITLE_CHARS = 60;
 const IDEAS_RUN_TITLE = "想法";
 /** Built-in tools whose file_path a run creates or changes. */
 const FILE_WRITE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
-const WORKSPACE_SUBDIRS = ["inbox", "reports", "notes", "images", "memory", SKILLS_DIR, ".trash"];
+const WORKSPACE_SUBDIRS = ["inbox", "reports", "notes", "images", "memory", SKILLS_DIR, TRASH_DIR];
 /** Memories listed in the /memory reply; the full index is in memory/MEMORY.md. */
 const MEMORY_REPLY_LINES = 50;
 /** How often the tasks are asked which are due. */
@@ -156,18 +161,22 @@ const TOOL_LABELS: Record<string, string> = {
   AskUserQuestion: "提问",
 };
 
-const HELP = `Alfred 调研助手
+/** The /help text. Built at each use, since the idle hours it names can change while Alfred runs. */
+function help(): string {
+  const idleHours = setting("sessionIdleHours");
+  return `Alfred 调研助手
 直接发要做的事给我。文件、图片可以先发，再发说明。
 运行进行中也可以接着发消息补充或改方向，Alfred 会在当前步骤结束后看到。
 耗时长的事交给后台子任务时，Alfred 可以一边等一边回答别的问题；提到某个子任务时带上它的运行 id。
 
-/new  开始新会话（清空上下文${SESSION_IDLE_HOURS > 0 ? `；空闲超过 ${SESSION_IDLE_HOURS} 小时也会自动开始` : ""}）
+/new  开始新会话（清空上下文${idleHours > 0 ? `；空闲超过 ${idleHours} 小时也会自动开始` : ""}）
 /resume  切回上一个会话
 /stop [运行 id]  停止当前运行，后台子任务继续运行（带 id 只停这个后台子任务）
 /model [sonnet|opus|haiku]  查看或切换模型
 /memory  查看长期记忆（要记住、修改或忘记什么，直接说）
 /status  当前状态和花费
 /help  显示帮助`;
+}
 
 interface Run {
   /** Everything the run says to the owner goes through this: recorded, with the run's id. */
@@ -185,6 +194,8 @@ interface Run {
   /** The responses the run's stream carried that no result has reported: estimated if the run ends without its last result. */
   ledger: ResponseLedger;
   query?: Query;
+  /** The spend cap the run's query started with, which the owner may change meanwhile: what a reply about hitting it names. */
+  budgetUsd?: number;
   /** The message that handed a queued brief back to the agent, until it is answered. */
   releaseUuid?: string;
   /** Set while the main agent works on a turn: its start. */
@@ -301,6 +312,12 @@ export interface AgentHandlerOptions {
   documents?: Documents;
   /** The owner's ideas: with them the handler generates ideas (generateIdeas). Without them it refuses to. */
   ideas?: IdeaStore;
+  /**
+   * The owner's settings: with them every cap, the idle hours, the compaction size and the memory scan follow what the
+   * owner sets, and the handler gives the store its model and restarts the scan timer when its interval changes. Without
+   * them the settings are the environment's, as they were at startup.
+   */
+  settings?: SettingsStore;
 }
 
 /** What the handler offers: the intake queue and the stop for the channel, a run of a task, and a shutdown for the process. */
@@ -320,6 +337,18 @@ export interface AgentHandler extends Intake {
    * the day's spend cap is reached, and while a generation is running. A refusal leaves nothing behind.
    */
   generateIdeas(trigger: IdeaTrigger): IdeaReply<IdeaGenerationAccepted>;
+  /**
+   * The one model switch, for /model and the settings command: keeps the key for the owner's next runs and moves the live
+   * query, if there is one, to the model from its next turn on, with the run's record. Resolves to whether a query was
+   * moved. It does not tell the settings store: the caller does, once it has all it changes.
+   */
+  setModel(key: ModelKey): Promise<boolean>;
+  /**
+   * Runs `job` while no memory scan runs, so it may edit memory files. It holds the memory lock as a run does: beside
+   * running tasks and never beside a scan, and `job` must not wait, so that what it checks it still finds when it
+   * writes. Waits up to `waitMs` for a scan to end, then gives up without running `job` (`locked: false`).
+   */
+  withMemoryLock<T>(job: () => T, waitMs: number): Promise<Locked<T>>;
   /** Stop the work the handler started, before the process exits. */
   shutdown(): Promise<void>;
 }
@@ -357,8 +386,9 @@ function sessionStatus(user: AgentUserState, now: number): string {
 
 function idleStatus(user: AgentUserState, now: number): string {
   const idle = user.lastRunAt ? humanAge(now - Date.parse(user.lastRunAt)) : "未知";
-  if (SESSION_IDLE_HOURS <= 0) return `${idle}（自动开新会话已关闭）`;
-  const due = rotationDueAt(user, SESSION_IDLE_HOURS);
+  const idleHours = setting("sessionIdleHours");
+  if (idleHours <= 0) return `${idle}（自动开新会话已关闭）`;
+  const due = rotationDueAt(user, idleHours);
   if (due === undefined) return idle;
   if (now > due) return `${idle}，下一条消息会开新会话`;
   return `${idle}，再过 ${humanAge(due - now)} 下一条消息会开新会话`;
@@ -403,14 +433,14 @@ function interruptedTurn(result: SDKResultMessage): boolean {
   return result.subtype === "error_during_execution" && (result.terminal_reason === "aborted_streaming" || result.terminal_reason === "aborted_tools");
 }
 
-/** The reply for one result. */
-function resultReply(result: SDKResultMessage): string {
+/** The reply for one result of a run that was capped at `budgetUsd`. */
+function resultReply(result: SDKResultMessage, budgetUsd: number | undefined): string {
   if (result.subtype === "success") {
     return result.is_error ? `出错了：${result.result}` : result.result.trim() || "完成。";
   }
   if (result.subtype === "error_max_turns") return `运行步骤超过 ${MAX_TURNS} 步，已中止。发“继续”可以接着做。`;
   if (result.subtype === "error_max_budget_usd") {
-    return `本次运行花费超过上限 ${usd(MAX_BUDGET_USD)}，已中止。发“继续”可以接着做，或者把要做的事拆小。`;
+    return `本次运行花费超过上限 ${usd(budgetUsd ?? setting("runBudgetUsd"))}，已中止。发“继续”可以接着做，或者把要做的事拆小。`;
   }
   return `执行出错：${result.errors.join("; ") || result.subtype}`;
 }
@@ -539,7 +569,7 @@ export function agentOptions(params: {
    */
   tasks?: TaskStore;
   /**
-   * Set for a run nobody watches, such as a scheduled task's, with its own budget in place of MAX_BUDGET_USD. Its session
+   * Set for a run nobody watches, such as a scheduled task's, with its own budget in place of the runBudgetUsd setting. Its session
    * is not kept, so it can be neither resumed nor memory-scanned; memory/, skills/ and the ALFRED.md files are read-only
    * to it and to its subagents; and its background Agent calls are denied, whatever `admission` says.
    */
@@ -601,7 +631,7 @@ export function agentOptions(params: {
     // The reply text arrives as stream events, which the handler publishes as live events.
     includePartialMessages: true,
     maxTurns: MAX_TURNS,
-    maxBudgetUsd: unattended?.budgetUsd ?? MAX_BUDGET_USD,
+    maxBudgetUsd: unattended?.budgetUsd ?? setting("runBudgetUsd"),
     ...(unattended ? { persistSession: false } : {}),
     resume: params.resume,
     abortController: params.abortController,
@@ -685,11 +715,19 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
   checkMemoryScanSettings();
   checkWorkbenchSettings();
   checkDailyBudget();
+  checkRunBudget();
   prepareWorkspace();
 
   const store = new AgentStateStore(opts.stateFile);
   // State kept before the app was the only channel moves to the owner's record, so sessions, settings and spend carry over.
   store.adoptOwnerRecord();
+  // What every reader of a setting asks from here on: the owner's store, or the environment alone without one.
+  const settings = opts.settings;
+  const uninstallSettings = installSettings(settings);
+  // The model is the owner's record's, so the store reads it from here.
+  settings?.useModel(() => store.get(owner).model);
+  /** The spend cap of the day, read at each check so a change takes effect at once. */
+  const dailyBudget = (): number => setting("dailyBudgetUsd");
   // Runs still marked running or queued belonged to a process that is gone: their cards show
   // them as lost, and the owner's next message gets a note naming them.
   const lost = markLostRuns();
@@ -711,6 +749,8 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
   const prune = () => {
     const n = pruneRunFiles();
     if (n) log.info(`pruned ${n} run file(s) older than the retention period`);
+    const trashed = pruneTrash({ onPurged: (paths) => opts.documents?.store.forget(paths) });
+    if (trashed) log.info(`purged ${trashed} trashed file(s) older than ${TRASH_RETENTION_DAYS} days`);
   };
   prune();
   setInterval(prune, PRUNE_INTERVAL_MS).unref();
@@ -772,7 +812,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
   }
 
   const spentToday = (user: AgentUserState): number => (user.spendDay === localDate() ? (user.spendDayUsd ?? 0) : 0);
-  const overBudget = (userId: string): boolean => spentToday(store.get(userId)) >= DAILY_BUDGET_USD;
+  const overBudget = (userId: string): boolean => spentToday(store.get(userId)) >= dailyBudget();
   const runtime = (userId: string): UserRuntime => {
     let rt = runtimes.get(userId);
     if (!rt) runtimes.set(userId, (rt = { busy: false, queue: [], attachments: [], questions: new Map() }));
@@ -787,7 +827,22 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
     isBusy: () => [...runtimes.values()].some((rt) => rt.busy),
     scan: () => recordScan(() => scanTranscripts({ workspace: WORKSPACE_DIR })),
   });
-  if (MEMORY_SCAN_MINUTES > 0) scheduler.start(MEMORY_SCAN_MINUTES * 60_000);
+  /** The interval between memory scans in milliseconds, read from the setting at each use; 0 means off. */
+  const scanIntervalMs = (): number => setting("memoryScanMinutes") * 60_000;
+  if (scanIntervalMs() > 0) scheduler.start(scanIntervalMs());
+  // A change of the interval restarts the timer with it; 0 stops it, and from 0 to more starts it with the first scan.
+  const stopListeningToSettings = settings?.onChange((now, before) => {
+    if (!closing && now.memoryScanMinutes !== before.memoryScanMinutes) scheduler.restart(now.memoryScanMinutes * 60_000);
+  });
+
+  async function withMemoryLock<T>(job: () => T, waitMs: number): Promise<Locked<T>> {
+    if (!(await memoryLock.acquire("task", waitMs))) return { locked: false };
+    try {
+      return { locked: true, value: job() };
+    } finally {
+      memoryLock.release();
+    }
+  }
 
   /**
    * Every session retirement goes through here. It is logged and triggers a
@@ -796,7 +851,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
    */
   function retired(userId: string, sessionId: string, reason: RetireReason, note: string): void {
     log.info(`session ${sessionId} retired (${reason}): ${note}`);
-    if (MEMORY_SCAN_MINUTES > 0) scheduler.request(`session retired (${reason})`);
+    if (scanIntervalMs() > 0) scheduler.request(`session retired (${reason})`);
   }
 
   /**
@@ -833,24 +888,23 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
     const unattended = run.task ?? run.revision;
     let sessionId: string | undefined;
     let results = 0;
-    const q = runQuery({
-      prompt: run.input,
-      options: agentOptions({
-        out: run.out,
-        model: unattended?.model ?? user.model,
-        resume,
-        abortController: run.abort,
-        run: run.recorder,
-        admission: run.background,
-        subagentRun: (agentId) => run.background.recorderOf(agentId),
-        subagentRunId: (toolUseId) => run.background.runIdFor(toolUseId),
-        ask: unattended ? undefined : (questions, signal) => askOwner(userId, run, questions, signal),
-        tasks,
-        task: run.task && { budgetUsd: run.task.budgetUsd },
-        revision: run.revision && { budgetUsd: run.revision.budgetUsd },
-        documents,
-      }),
+    const options = agentOptions({
+      out: run.out,
+      model: unattended?.model ?? user.model,
+      resume,
+      abortController: run.abort,
+      run: run.recorder,
+      admission: run.background,
+      subagentRun: (agentId) => run.background.recorderOf(agentId),
+      subagentRunId: (toolUseId) => run.background.runIdFor(toolUseId),
+      ask: unattended ? undefined : (questions, signal) => askOwner(userId, run, questions, signal),
+      tasks,
+      task: run.task && { budgetUsd: run.task.budgetUsd },
+      revision: run.revision && { budgetUsd: run.revision.budgetUsd },
+      documents,
     });
+    run.budgetUsd = options.maxBudgetUsd;
+    const q = runQuery({ prompt: run.input, options });
     run.query = q;
     try {
       for await (const m of q) {
@@ -1025,10 +1079,10 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
     const rt = runtime(userId);
     if (overBudget(userId)) {
       const spent = spentToday(store.get(userId));
-      log.warn(`daily spend cap reached (${usd(spent)} of ${usd(DAILY_BUDGET_USD)}); not starting a task`);
+      log.warn(`daily spend cap reached (${usd(spent)} of ${usd(dailyBudget())}); not starting a task`);
       start.recordInbound?.(undefined);
       await outbound()
-        .text(`今天的花费已到每日上限 ${usd(DAILY_BUDGET_USD)}（已花 ${usd(spent)}），新运行明天再开始。`)
+        .text(`今天的花费已到每日上限 ${usd(dailyBudget())}（已花 ${usd(spent)}），新运行明天再开始。`)
         .catch(() => {});
       return;
     }
@@ -1104,7 +1158,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
       // A reply after subagents ended is about them, whatever started its turn.
       const footer = (notification ? "" : runFooter(recorder)) + backgroundFooter(dispatched, reports);
       // A failed send must not end the query while later turns are still coming.
-      await run.out.text(resultReply(result) + footer).catch((err) => log.error(`reply failed run=${recorder.id}: ${describeError(err)}`));
+      await run.out.text(resultReply(result, run.budgetUsd) + footer).catch((err) => log.error(`reply failed run=${recorder.id}: ${describeError(err)}`));
     };
 
     try {
@@ -1117,11 +1171,12 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
       if (!locked) log.warn(`memory lock still held by ${JSON.stringify(memoryLock.current())}; running the task anyway`);
       let before = store.get(userId);
       const idleSession = before.sessionId;
-      if (idleSession && shouldRotate(before, run.startedAt, SESSION_IDLE_HOURS)) {
+      const idleHours = setting("sessionIdleHours");
+      if (idleSession && shouldRotate(before, run.startedAt, idleHours)) {
         const idle = humanAge(run.startedAt - Date.parse(before.lastRunAt ?? ""));
         before = store.update(userId, retire(before));
-        retired(userId, idleSession, "idle", `idle ${idle} > ${SESSION_IDLE_HOURS}h`);
-        await run.out.text(`距上次对话已超过 ${SESSION_IDLE_HOURS} 小时，已开始新会话（发 /resume 接回上一个会话）。`);
+        retired(userId, idleSession, "idle", `idle ${idle} > ${idleHours}h`);
+        await run.out.text(`距上次对话已超过 ${idleHours} 小时，已开始新会话（发 /resume 接回上一个会话）。`);
       }
       log.info(`agent run start run=${recorder.id} model=${before.model} resume=${before.sessionId ?? "none"}`);
       let outcome: ExecOutcome = await execute(userId, run, before.sessionId, onResult);
@@ -1321,7 +1376,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
     }
     if (overBudget(owner)) {
       const spent = spentToday(store.get(owner));
-      log.warn(`daily spend cap reached (${usd(spent)} of ${usd(DAILY_BUDGET_USD)}); not running task ${task.id}`);
+      log.warn(`daily spend cap reached (${usd(spent)} of ${usd(dailyBudget())}); not running task ${task.id}`);
       if (item.scheduled) {
         try {
           tasks.recordSkip(task.id, item.scheduledAt, "daily-cap");
@@ -1330,7 +1385,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
         }
       }
       await outbound(undefined, task.id)
-        .text(`任务「${task.title}」该运行了，但今天的花费已到每日上限 ${usd(DAILY_BUDGET_USD)}（已花 ${usd(spent)}），这次不运行。`)
+        .text(`任务「${task.title}」该运行了，但今天的花费已到每日上限 ${usd(dailyBudget())}（已花 ${usd(spent)}），这次不运行。`)
         .catch(() => {});
       return;
     }
@@ -1412,8 +1467,8 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
     const { recorder, documentId, title, taskId, model, budgetUsd } = item;
     if (overBudget(owner)) {
       const spent = spentToday(store.get(owner));
-      log.warn(`daily spend cap reached (${usd(spent)} of ${usd(DAILY_BUDGET_USD)}); not running revision ${recorder.id}`);
-      await endRevision(item, { status: "failed", failure: `今天的花费已到每日上限 ${usd(DAILY_BUDGET_USD)}（已花 ${usd(spent)}），这次不运行。` });
+      log.warn(`daily spend cap reached (${usd(spent)} of ${usd(dailyBudget())}); not running revision ${recorder.id}`);
+      await endRevision(item, { status: "failed", failure: `今天的花费已到每日上限 ${usd(dailyBudget())}（已花 ${usd(spent)}），这次不运行。` });
       return;
     }
     recorder.start();
@@ -1804,13 +1859,27 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
     }
   }
 
+  /**
+   * The one model switch (/model and the settings command): keeps the key for the owner's next runs, and moves the open
+   * query, if there is one, to the model at once: the main agent's next turn runs on it; subagent roles keep theirs.
+   * Resolves to whether a query was moved.
+   */
+  async function setModel(key: ModelKey): Promise<boolean> {
+    store.update(owner, { model: key });
+    const run = runtime(owner).run;
+    if (!run?.query) return false;
+    await run.query.setModel(MODELS[key]);
+    run.recorder.update({ model: MODELS[key] });
+    return true;
+  }
+
   async function handleCommand(userId: string, cmd: string, arg: string): Promise<void> {
     const rt = runtime(userId);
     const user = store.get(userId);
     const out = outbound();
     switch (cmd) {
       case "/help":
-        return out.text(HELP);
+        return out.text(help());
 
       case "/new":
         if (rt.busy) return out.text("当前运行还在进行，先发 /stop 或等它完成。");
@@ -1844,14 +1913,14 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
         if (!arg) return out.text(`当前模型：${user.model}（${MODELS[user.model]}）\n可选：sonnet、opus、haiku`);
         const key = arg.toLowerCase();
         if (!isModelKey(key)) return out.text("可选模型：sonnet、opus、haiku");
-        store.update(userId, { model: key });
-        if (rt.run?.query) {
-          // An open query switches at once: the main agent's next turn runs on the new model; subagent roles keep theirs.
-          await rt.run.query.setModel(MODELS[key]);
-          rt.run.recorder.update({ model: MODELS[key] });
-          return out.text(`已切换到 ${key}（${MODELS[key]}），当前运行的下一轮起生效。`);
+        let live: boolean;
+        try {
+          live = await setModel(key);
+        } finally {
+          // The settings store compares what it announced with the model now, so this is harmless when nothing changed.
+          settings?.refresh();
         }
-        return out.text(`已切换到 ${key}（${MODELS[key]}）。`);
+        return out.text(live ? `已切换到 ${key}（${MODELS[key]}），当前运行的下一轮起生效。` : `已切换到 ${key}（${MODELS[key]}）。`);
       }
 
       case "/memory": {
@@ -1869,7 +1938,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
         if (user.sessionId && !rt.run) lines.push(`空闲：${idleStatus(user, now)}`);
         if (user.previousSession) lines.push(`上一个会话：${user.previousSession.sessionId.slice(0, 8)}，发 /resume 接回`);
         lines.push(
-          `累计花费：${usd(user.totalCostUsd)}，今天 ${usd(spentToday(user))} / 上限 ${usd(DAILY_BUDGET_USD)}`,
+          `累计花费：${usd(user.totalCostUsd)}，今天 ${usd(spentToday(user))} / 上限 ${usd(dailyBudget())}`,
           rt.run ? `运行：${rt.run.recorder.id}，进行中 ${humanAge(now - rt.run.startedAt)}，${runSummary(rt.run, now)}` : "运行：空闲",
         );
         for (const b of rt.run?.background.running ?? []) {
@@ -1895,7 +1964,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
       }
 
       default:
-        return out.text(`不认识的命令 ${cmd}\n\n${HELP}`);
+        return out.text(`不认识的命令 ${cmd}\n\n${help()}`);
     }
   }
 
@@ -2014,8 +2083,11 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
       ideasRun.abort.abort();
     }
     scheduler.stop();
+    stopListeningToSettings?.();
     const timeout = new Promise<void>((resolve) => setTimeout(resolve, SHUTDOWN_STOP_MS).unref());
     await Promise.race([Promise.allSettled([...inFlight]), timeout]);
+    // The runs that were stopping have written their records under the owner's settings; nothing reads them after.
+    uninstallSettings();
   }
 
   // The tasks that fell due while Alfred was down are taken once the runs it lost are marked, and then every so often.
@@ -2036,6 +2108,8 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
     runTask,
     reviseDocument,
     generateIdeas,
+    setModel,
+    withMemoryLock,
     shutdown,
   };
 }

@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { after, before, mock, test } from "node:test";
 
-import type { IdeaList, TaskList } from "../api/schema.ts";
+import type { IdeaList, Settings, TaskList } from "../api/schema.ts";
 
 // store.ts reads these at import time, so set them before loading the modules under test.
 const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "alfred-workbench-")));
@@ -22,7 +22,8 @@ const { EventLog } = await import("../events.ts");
 const { DOCUMENTS_FILE, DocumentStore } = await import("../documents/store.ts");
 const { VERSIONS_GIT_DIR, Versions } = await import("../documents/versions.ts");
 const { IDEAS_FILE } = await import("../ideas/store.ts");
-const { DocumentDetailSchema, DocumentListSchema, ErrorResponseSchema, IdeaListSchema, RulesSchema, RunDetailSchema, RunListSchema, TaskDetailSchema, TaskListSchema } = await import("../api/schema.ts");
+const { SETTINGS_MIRROR_FILE } = await import("../settings/store.ts");
+const { DocumentDetailSchema, DocumentListSchema, ErrorResponseSchema, IdeaListSchema, MemoryListSchema, RulesSchema, RunDetailSchema, RunListSchema, SettingsDetailSchema, TaskDetailSchema, TaskListSchema } = await import("../api/schema.ts");
 const { AccessVerifier } = await import("./access.ts");
 const { DeviceStore } = await import("./devices.ts");
 const { REPORT_CSP, createHandler, inlineImages, startWorkbench } = await import("./server.ts");
@@ -619,6 +620,88 @@ test("GET /api/rules needs a device token, and refuses other methods with 405", 
   assert.equal(fs.existsSync(rulesFile), false, "a refused request writes nothing");
 });
 
+// --- /api/memories ----------------------------------------------------------
+
+const memoryDir = path.join(workspace, "memory");
+
+/** GET /api/memories with the paired device's token, with the memory files `put` writes; they are gone again afterwards. */
+async function getMemories(put: (write: (file: string, text: string) => void) => void = () => {}): Promise<Response> {
+  const written: string[] = [];
+  put((file, text) => {
+    fs.writeFileSync(path.join(memoryDir, file), text);
+    written.push(file);
+  });
+  try {
+    return await fetch(`${open}/api/memories`, { headers: bearer(paired.token) });
+  } finally {
+    for (const file of written) fs.rmSync(path.join(memoryDir, file), { force: true });
+  }
+}
+
+const memoryText = (name: string, updated: string, type = "preference") => `---\nname: "${name}"\ndescription: "About ${name}."\ntype: ${type}\nupdated: ${updated}\n---\n\n${name} body.\n`;
+
+test("GET /api/memories lists the memories most recently updated first, each with the sha256 of its file's bytes as its version", async () => {
+  const bytes = new Map<string, string>();
+  const res = await getMemories((write) => {
+    for (const [file, name, updated, type] of [
+      ["newer.md", "Newer", "2026-10-25", "project"],
+      ["older.md", "Older", "2026-10-01", "correction"],
+      ["memory-20261022-ab12.md", "住在上海", "2026-10-22", "user"],
+    ] as const) {
+      write(file, memoryText(name, updated, type));
+      bytes.set(file, memoryText(name, updated, type));
+    }
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("content-type"), "application/json; charset=utf-8");
+  assert.equal(res.headers.get("cache-control"), "no-store");
+  const list = MemoryListSchema.parse(await res.json());
+  assert.deepEqual(list.memories.map((m) => m.file), ["newer.md", "memory-20261022-ab12.md", "m.md", "older.md"], "the one in the workspace for the /memory page is between them");
+  assert.equal(list.promptCount, 4);
+  const [newer, chinese] = list.memories;
+  assert.deepEqual(newer, {
+    file: "newer.md",
+    name: "Newer",
+    description: "About Newer.",
+    kind: "project",
+    updated: "2026-10-25",
+    body: "Newer body.",
+    version: sha256(bytes.get("newer.md") ?? ""),
+  });
+  assert.equal(chinese?.name, "住在上海");
+  for (const m of list.memories) assert.equal(m.version, sha256(fs.existsSync(path.join(memoryDir, m.file)) ? fs.readFileSync(path.join(memoryDir, m.file)) : bytes.get(m.file) ?? ""), m.file);
+});
+
+test("GET /api/memories counts in promptCount the memories that fit the system prompt's index, and lists them all", async () => {
+  const res = await getMemories((write) => {
+    for (let i = 0; i < 205; i++) write(`bulk-${String(i).padStart(3, "0")}.md`, memoryText(`B${i}`, "2026-10-30"));
+  });
+  const list = MemoryListSchema.parse(await res.json());
+  assert.equal(list.memories.length, 206);
+  assert.equal(list.promptCount, 200, "the index holds at most 200 lines");
+  assert.ok(list.memories.slice(0, 205).every((m) => m.file.startsWith("bulk-")), "the newest 205 come first");
+});
+
+test("GET /api/memories is an empty list when there is no memory folder", async () => {
+  const away = `${memoryDir}-away`;
+  fs.renameSync(memoryDir, away);
+  try {
+    const res = await fetch(`${open}/api/memories`, { headers: bearer(paired.token) });
+    assert.equal(res.status, 200);
+    assert.deepEqual(MemoryListSchema.parse(await res.json()), { memories: [], promptCount: 0 });
+  } finally {
+    fs.renameSync(away, memoryDir);
+  }
+});
+
+test("GET /api/memories needs a device token, and refuses other methods with 405", async () => {
+  await assertApiError(await fetch(`${open}/api/memories`), 401, "without a token");
+  await assertApiError(await fetch(`${guarded}/api/memories`), 403, "on the tunnel without Access");
+  const wrong = await fetch(`${open}/api/memories`, { method: "POST", headers: bearer(paired.token), body: "{}" });
+  assert.equal(wrong.status, 405);
+  assert.equal(wrong.headers.get("allow"), "GET");
+});
+
 // --- /api/tasks -------------------------------------------------------------
 
 type RunRecord = import("../runs.ts").RunRecord;
@@ -770,6 +853,94 @@ test("an ideas file that does not fit answers 500 on the route, and the log name
   assert.ok(logged.some((line) => line.includes(IDEAS_FILE)), "the log names the file");
 });
 
+// --- /api/settings -----------------------------------------------------------
+
+const settingsMirror = JSON.parse(fs.readFileSync(new URL("../../fixtures/api/responses/settings-detail.json", import.meta.url), "utf8")).settings as Settings;
+
+/** The mirror file the settings store writes, from the fixture's settings or `settings`. */
+function writeMirror(settings: unknown = settingsMirror): void {
+  fs.mkdirSync(path.dirname(SETTINGS_MIRROR_FILE), { recursive: true });
+  fs.writeFileSync(SETTINGS_MIRROR_FILE, typeof settings === "string" ? settings : JSON.stringify(settings));
+}
+
+/** A finished run of `kind` that started `ago` ms ago and cost `costUsd`. */
+function spendRun(kind: RunRecord["kind"], costUsd: number, ago = 0): RunRecord {
+  const at = new Date(Date.now() - ago).toISOString();
+  return { ...taskRun(undefined, `${kind} run`, Date.now() - ago), kind, costUsd, startedAt: at, endedAt: at };
+}
+
+async function settingsDetail(): Promise<{ settings: Settings; spentTodayUsd: number }> {
+  const res = await fetch(`${open}/api/settings`, { headers: bearer(paired.token) });
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("content-type"), "application/json; charset=utf-8");
+  assert.equal(res.headers.get("cache-control"), "no-store");
+  return SettingsDetailSchema.parse(await res.json());
+}
+
+test("GET /api/settings gives the settings of the mirror as the store wrote them, with today's spend", async () => {
+  writeMirror();
+  const body = await settingsDetail();
+  assert.deepEqual(body.settings, settingsMirror);
+  assert.ok(body.spentTodayUsd >= 0);
+  assert.equal(body.spentTodayUsd, Math.round(body.spentTodayUsd * 1e9) / 1e9, "a plain number of USD");
+});
+
+test("GET /api/settings follows the mirror: a rewritten file is the next answer, with values beyond the write ranges", async () => {
+  writeMirror();
+  const changed = { ...settingsMirror, dailyBudgetUsd: 150, ideasAt: "06:30", overridden: ["ideasAt"] };
+  writeMirror(changed);
+  assert.deepEqual((await settingsDetail()).settings, changed);
+});
+
+test("GET /api/settings counts the runs that started today in the owner's day, by the overview page's rule: subagents leave out", async () => {
+  writeMirror();
+  const before = (await settingsDetail()).spentTodayUsd;
+  for (const run of [
+    spendRun("task", 1.25),
+    spendRun("scan", 0.5),
+    spendRun("ideas", 0.25),
+    spendRun("subagent", 7), // its cost is part of the run that started it
+    spendRun("task", 3, 36 * 3_600_000), // yesterday, or the day before
+  ]) {
+    appendRunLog(run);
+  }
+  const after = (await settingsDetail()).spentTodayUsd;
+  assert.equal(after - before, 2, "1.25 + 0.5 + 0.25");
+
+  // The overview page shows the same sum.
+  const page = await (await fetch(`${open}/`)).text();
+  assert.ok(page.includes(`今天 $${after.toFixed(2)}`) || page.includes(`今天 $${after.toFixed(3)}`), page.match(/今天[^<]*/)?.[0]);
+});
+
+test("GET /api/settings needs a device token, and refuses other methods with 405", async () => {
+  writeMirror();
+  await assertApiError(await fetch(`${open}/api/settings`), 401, "without a token");
+  await assertApiError(await fetch(`${guarded}/api/settings`), 403, "on the tunnel without Access");
+  const wrong = await fetch(`${open}/api/settings`, { method: "POST", headers: bearer(paired.token), body: "{}" });
+  assert.equal(wrong.status, 405);
+  assert.equal(wrong.headers.get("allow"), "GET");
+});
+
+test("GET /api/settings answers 503 with an error body when there is no mirror, or one that cannot be read or does not fit", async () => {
+  const lines = mock.method(console, "error", () => {});
+  try {
+    fs.rmSync(SETTINGS_MIRROR_FILE, { force: true });
+    await assertApiError(await fetch(`${open}/api/settings`, { headers: bearer(paired.token) }), 503, "missing");
+    for (const body of ["{ not json", JSON.stringify({ model: "gpt" }), JSON.stringify({ ...settingsMirror, overridden: ["nope"] }), "[]"]) {
+      writeMirror(body);
+      await assertApiError(await fetch(`${open}/api/settings`, { headers: bearer(paired.token) }), 503, body);
+    }
+    fs.rmSync(SETTINGS_MIRROR_FILE, { force: true });
+    fs.mkdirSync(SETTINGS_MIRROR_FILE); // a directory cannot be read as a file
+    await assertApiError(await fetch(`${open}/api/settings`, { headers: bearer(paired.token) }), 503, "unreadable");
+  } finally {
+    lines.mock.restore();
+    fs.rmSync(SETTINGS_MIRROR_FILE, { recursive: true, force: true });
+  }
+  const logged = lines.mock.calls.map((call) => String(call.arguments[0]));
+  assert.ok(logged.some((line) => line.includes(SETTINGS_MIRROR_FILE)), "the log names the file");
+});
+
 // --- /api/documents and /api/files at a version -----------------------------
 
 /** Writes `text` to the workspace file at `rel` and commits that file alone; resolves to the commit's id. */
@@ -821,6 +992,40 @@ test("GET /api/documents lists the documents, most recently updated first", asyn
   const list = DocumentListSchema.parse(await res.json());
   assert.deepEqual(list.documents.map((d) => d.id), [a.id, b.id]);
   assert.equal(list.documents[0]?.version, aSecond);
+});
+
+test("GET /api/documents leaves out a trashed document and GET /api/documents/<id> answers 404 for it, until it is restored", async () => {
+  const store = newDocumentStore();
+  const keepVersion = await commitFile("docs/keep.md", "# Keep\n");
+  const keep = store.deliver({ path: "docs/keep.md", version: keepVersion, at: new Date("2031-05-01T00:00:00Z"), title: "Keep", kind: "markdown" });
+  const goneVersion = await commitFile("docs/old-draft.md", "# Old draft\n");
+  const gone = store.deliver({ path: "docs/old-draft.md", version: goneVersion, at: new Date("2031-05-02T00:00:00Z"), title: "Old draft", kind: "markdown" });
+  const [note] = store.submit({
+    documentId: gone.id,
+    version: goneVersion,
+    annotations: [{ target: { kind: "document" }, comment: "再核对" }],
+    runId: newRunId(),
+    at: new Date("2031-05-02T01:00:00Z"),
+  });
+  assert.ok(note);
+
+  const ids = async () => DocumentListSchema.parse(await (await fetch(`${open}/api/documents`, { headers: bearer(paired.token) })).json()).documents.map((d) => d.id);
+  const detail = (id: string) => fetch(`${open}/api/documents/${id}`, { headers: bearer(paired.token) });
+  assert.deepEqual(await ids(), [gone.id, keep.id]);
+
+  store.move("docs/old-draft.md", ".trash/old-draft.md", new Date("2031-05-03T00:00:00Z"));
+  assert.deepEqual(await ids(), [keep.id], "the list leaves it out");
+  const missing = await detail(gone.id);
+  assert.equal(missing.status, 404);
+  assert.deepEqual(await missing.json(), { error: "There is no such document." });
+  assert.equal((await detail(keep.id)).status, 200, "the others are served");
+
+  store.move(".trash/old-draft.md", "docs/old-draft.md", new Date("2031-05-04T00:00:00Z"));
+  assert.deepEqual(await ids(), [gone.id, keep.id], "a restore brings it back");
+  const back = DocumentDetailSchema.parse(await (await detail(gone.id)).json());
+  assert.equal(back.document.id, gone.id);
+  assert.deepEqual(back.versions.map((v) => v.version), [goneVersion]);
+  assert.deepEqual(back.annotations.map((a) => a.id), [note.id]);
 });
 
 test("GET /api/documents/<id> answers 404 with its message for an unknown id and a malformed one", async () => {

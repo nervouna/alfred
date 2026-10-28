@@ -1,5 +1,6 @@
-// The daily generation of ideas: once the local time reaches ALFRED_IDEAS_AT on a day that has not had its scheduled
-// generation, one is started, checked at startup and then every minute. The day is recorded in
+// The daily generation of ideas: once the local time reaches the ideasAt setting on a day that has not had its scheduled
+// generation, one is started, checked at startup and then every minute. The setting is read at each check, so the owner
+// can move the time or turn the generation off while Alfred runs. The day is recorded in
 // $STATE_DIR/ideas-schedule.json once a generation has started or the day was skipped for lateness or for the ideas
 // already open, so a restart does not run it twice. A refusal (the cap is reached, a generation runs, Alfred is
 // closing) leaves the day open: the next check tries again.
@@ -21,8 +22,11 @@ export const OPEN_IDEAS_SKIP = 5;
 const CHECK_MS = 60_000;
 
 export interface DailyIdeasOptions {
-  /** The time of day, HH:MM in the process's time zone, which is the owner's. Undefined turns the daily generation off. */
-  at: string | undefined;
+  /**
+   * The time of day, HH:MM in the process's time zone, which is the owner's, read at each check. Undefined, null or an
+   * empty string turns the daily generation off: nothing is started until a time comes back.
+   */
+  at: () => string | null | undefined;
   ideas: Pick<IdeaStore, "list">;
   /** Starts a generation, told what started it (always the daily schedule): the handler's generateIdeas. */
   generate: (trigger: IdeaTrigger) => IdeaReply<IdeaGenerationAccepted>;
@@ -46,15 +50,10 @@ function readLastDay(file: string): string | undefined {
 
 /**
  * Starts the daily generation and returns a function that stops it. It checks at once and then every `checkMs`. The
- * timer does not keep the process alive. A failure of a check is logged and the timer goes on. With no time the
- * generation is off, and nothing is started. A time that is not HH:MM throws.
+ * timer does not keep the process alive. A failure of a check is logged and the timer goes on: so is a time that is not
+ * HH:MM, which starts nothing. With no time the generation is off, and nothing is started.
  */
 export function startDailyIdeas({ at, ideas, generate, file = IDEAS_SCHEDULE_FILE, now = () => new Date(), checkMs = CHECK_MS }: DailyIdeasOptions): () => void {
-  if (at === undefined) return () => {};
-  const time = parseIdeasAt(at);
-  if (time === undefined) return () => {};
-  const hours = Number(time.slice(0, 2));
-  const minutes = Number(time.slice(3, 5));
   let doneDay = readLastDay(file);
   /** The last reason said, so the same one is not said again every minute. */
   let said: string | undefined;
@@ -77,10 +76,12 @@ export function startDailyIdeas({ at, ideas, generate, file = IDEAS_SCHEDULE_FIL
 
   const check = (): void => {
     try {
+      const time = parseIdeasAt(at() ?? "");
+      if (time === undefined) return;
       const current = now();
       const day = localDate(current);
       if (doneDay === day) return;
-      const due = new Date(current.getFullYear(), current.getMonth(), current.getDate(), hours, minutes);
+      const due = new Date(current.getFullYear(), current.getMonth(), current.getDate(), Number(time.slice(0, 2)), Number(time.slice(3, 5)));
       if (current < due) return;
       const late = current.getTime() - due.getTime();
       if (late > MISSED_RUN_MS) {
