@@ -138,7 +138,7 @@ final class RunsUITests: XCTestCase {
     /// The identifiers of the stored messages on screen: `message.in.<id>` or `message.out.<id>`.
     @MainActor
     private func messageIds(in app: XCUIApplication) -> [String] {
-        app.staticTexts.matching(NSPredicate(format: "identifier BEGINSWITH 'message.'"))
+        app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'message.'"))
             .allElementsBoundByIndex.map(\.identifier)
             .filter { $0.hasPrefix("message.in.") || $0.hasPrefix("message.out.") }
     }
@@ -147,9 +147,9 @@ final class RunsUITests: XCTestCase {
     @MainActor
     private func newReply(_ known: [String], containing fragment: String? = nil, in app: XCUIApplication) -> XCUIElement {
         let fresh = NSPredicate(format: "identifier BEGINSWITH 'message.out.' AND NOT (identifier IN %@)", known)
-        guard let fragment else { return app.staticTexts.matching(fresh).firstMatch }
+        guard let fragment else { return app.descendants(matching: .any).matching(fresh).firstMatch }
         let matching = NSPredicate(format: "label CONTAINS %@", fragment)
-        return app.staticTexts.matching(NSCompoundPredicate(andPredicateWithSubpredicates: [fresh, matching])).firstMatch
+        return app.descendants(matching: .any).matching(NSCompoundPredicate(andPredicateWithSubpredicates: [fresh, matching])).firstMatch
     }
 
     // MARK: Runs

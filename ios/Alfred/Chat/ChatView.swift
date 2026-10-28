@@ -5,6 +5,7 @@ import SwiftUI
 struct ChatView: View {
     let model: AppModel
     @State private var confirmsUnpairing = false
+    @State private var showsProfile = false
 
     var body: some View {
         NavigationStack {
@@ -13,13 +14,19 @@ struct ChatView: View {
                 // The bar holds only the two buttons and is as tall as the system's own: the list's soft edge
                 // effect ends at its bottom edge.
                 .safeAreaBar(edge: .top, spacing: 0) {
-                    ChatHeader {
-                        confirmsUnpairing = true
-                    }
+                    ChatHeader(
+                        isChatRunning: model.runningChatRun != nil,
+                        send: { command in Task { await ChatView.choose(command, in: model) } },
+                        unpair: { confirmsUnpairing = true }
+                    )
                 }
                 // Over the bar and the list, and not in the bar's content (see ChatHeader).
                 .overlay(alignment: .top) {
-                    ChatHeaderOverlay(state: AvatarState(isWorking: model.runningChatRun != nil), isConnected: model.isConnected)
+                    ChatHeaderOverlay(
+                        state: AvatarState(isWorking: model.runningChatRun != nil),
+                        isConnected: model.isConnected,
+                        openProfile: { showsProfile = true }
+                    )
                 }
                 .safeAreaInset(edge: .bottom, spacing: 0) {
                     Composer(model: model)
@@ -27,10 +34,19 @@ struct ChatView: View {
                 // The header is drawn by hand. The title stays for the back button of the screens this one opens.
                 .navigationTitle("对话")
                 .toolbar(.hidden, for: .navigationBar)
+                .navigationDestination(isPresented: $showsProfile) {
+                    ProfileView()
+                }
                 .confirmationDialog("取消配对？", isPresented: $confirmsUnpairing, titleVisibility: .visible) {
                     Button("取消配对", role: .destructive) { model.unpair() }
                 }
         }
+    }
+
+    /// Sends a menu command as the owner's message, as typed. The composer is not touched, so a draft being typed stays.
+    @MainActor
+    static func choose(_ command: ChatCommand, in model: AppModel) async {
+        await model.send(command.text)
     }
 }
 
@@ -223,16 +239,40 @@ private struct Bubble: View {
     let identifier: String
 
     var body: some View {
+        // Parsed on every pass, so a draft that grows is laid out again as it is.
+        let blocks = MessageText.blocks(text)
+        let palette = isOwner ? MessagePalette.owner : .alfred
         HStack(spacing: 0) {
             if isOwner { Spacer(minLength: 48) }
-            Text(MessageText.attributed(text))
-                .textSelection(.enabled)
+            MessageMarkdown(blocks: blocks, palette: palette)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
-                .foregroundStyle(isOwner ? Color.white : Color.primary)
+                .foregroundStyle(palette.text)
                 .background(isOwner ? Color.accentColor : Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16))
-                .accessibilityIdentifier(identifier)
+                .contextMenu {
+                    Button("复制", systemImage: "doc.on.doc") {
+                        UIPasteboard.general.string = MessageText.plainText(blocks)
+                    }
+                }
+                .modifier(BubbleAccessibility(isSingleText: MessageMarkdown.singleText(blocks) != nil, identifier: identifier))
             if !isOwner { Spacer(minLength: 48) }
+        }
+    }
+}
+
+/// A message of one paragraph stays a `Text`, which carries the identifier. Any other is one element for VoiceOver and
+/// the UI tests, with the text of its blocks as its label.
+private struct BubbleAccessibility: ViewModifier {
+    let isSingleText: Bool
+    let identifier: String
+
+    func body(content: Content) -> some View {
+        if isSingleText {
+            content.accessibilityIdentifier(identifier)
+        } else {
+            content
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier(identifier)
         }
     }
 }

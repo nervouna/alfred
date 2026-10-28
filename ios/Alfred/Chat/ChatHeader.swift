@@ -27,6 +27,10 @@ struct ChatHeader: View {
         barHeight - (AvatarMetrics.diameter - AvatarMetrics.hang)
     }
 
+    /// Whether a chat run is going: the commands that start or switch a session are held off until it has ended.
+    let isChatRunning: Bool
+    /// Sends a command's text as the owner's message.
+    let send: (ChatCommand) -> Void
     /// The 取消配对 item of the menu.
     let unpair: () -> Void
 
@@ -40,6 +44,18 @@ struct ChatHeader: View {
             .accessibilityIdentifier("chat.header.leading")
             Spacer(minLength: 0)
             Menu {
+                ForEach(Array(ChatCommand.menu.enumerated()), id: \.offset) { _, group in
+                    Section {
+                        if group.allSatisfy(\.isModel) {
+                            Menu("模型", systemImage: "cpu") {
+                                ForEach(group, id: \.self, content: item)
+                            }
+                        } else {
+                            ForEach(group, id: \.self, content: item)
+                        }
+                    }
+                }
+                Divider()
                 Button("取消配对", systemImage: "iphone.slash", role: .destructive, action: unpair)
             } label: {
                 GlassCircle(symbol: "ellipsis")
@@ -58,26 +74,42 @@ struct ChatHeader: View {
                 .accessibilityIdentifier("chat.header.bar")
         }
     }
+
+    /// A menu item for a command. One that needs an idle chat is off while a run is going.
+    private func item(_ command: ChatCommand) -> some View {
+        Button(command.title, systemImage: command.symbol) { send(command) }
+            .disabled(command.needsIdleChat && isChatRunning)
+    }
 }
 
 /// Alfred's avatar over the top of the chat, centred, with its lower third below the bar's bottom edge; under it, while
 /// the stream is not connected, a capsule that says so. It is a layer of the chat above the bar and the list, not part of
-/// the bar, and takes no touches, so a drag that starts on it scrolls the list.
+/// the bar.
+///
+/// The avatar is a button that opens Alfred's profile, and it is all of the overlay that takes touches: the capsule does
+/// not, and neither does the space around them. A drag that starts on the avatar does not scroll the list under it any
+/// more, since the touch is the button's.
 struct ChatHeaderOverlay: View {
     let state: AvatarState
     let isConnected: Bool
+    /// Opens Alfred's profile.
+    let openProfile: () -> Void
 
     var body: some View {
         // An overlay is laid out inside the safe area, so its top is the bar's top edge: the avatar is placed from there.
         VStack(spacing: 6) {
-            AvatarView(state: state)
+            Button(action: openProfile) {
+                AvatarView(state: state)
+                    .contentShape(.circle)
+            }
+            .buttonStyle(.plain)
             if !isConnected {
                 ConnectingCapsule()
+                    .allowsHitTesting(false)
             }
         }
         .frame(maxWidth: .infinity, alignment: .top)
         .padding(.top, ChatHeader.avatarOffset)
-        .allowsHitTesting(false)
     }
 }
 

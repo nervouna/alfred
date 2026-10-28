@@ -122,7 +122,7 @@ public struct Timeline: Hashable, Sendable {
         case .taskUpdated, .ideaUpdated, .settingsUpdated:
             // Tasks, ideas and settings are not part of the chat's timeline.
             break
-        case .documentUpdated, .annotationUpdated:
+        case .documentUpdated, .documentRemoved, .annotationUpdated:
             // Documents and their annotations are not part of the chat's timeline.
             break
         case .unknown:

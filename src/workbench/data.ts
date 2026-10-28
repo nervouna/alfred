@@ -7,12 +7,13 @@ import path from "node:path";
 
 import { AGENT_CONFIG_DIR } from "../agent/config.ts";
 import { transcriptDirs } from "../agent/memory-scan.ts";
-import { IdeaListSchema, TaskListSchema } from "../api/schema.ts";
-import type { IdeaList, TaskList } from "../api/schema.ts";
+import { IdeaListSchema, SettingsSchema, TaskListSchema } from "../api/schema.ts";
+import type { IdeaList, Settings, TaskList } from "../api/schema.ts";
 import { IDEAS_FILE } from "../ideas/store.ts";
 import { describeError } from "../log.ts";
 import { LOG_FILE, STATUS_FILE, TASKS_FILE, readRunFile, readRunLog, runFileIds } from "../runs.ts";
 import type { Heartbeat, RunFile, RunRecord } from "../runs.ts";
+import { SETTINGS_MIRROR_FILE } from "../settings/store.ts";
 import { readJson } from "../store.ts";
 
 /** A heartbeat older than this means Alfred is down. */
@@ -76,6 +77,23 @@ export function readIdeaList(file = IDEAS_FILE): IdeaList {
   return parsed.data;
 }
 
+/**
+ * The effective settings the settings store mirrors into the workbench's folder (the workbench does not see Alfred's
+ * environment), through SettingsSchema. A missing file, one that cannot be read and one that does not fit throw, naming the file.
+ */
+export function readSettings(file = SETTINGS_MIRROR_FILE): Settings {
+  let raw: unknown;
+  try {
+    raw = readJson<unknown>(file);
+  } catch (err) {
+    throw new Error(`cannot read ${file}: ${describeError(err)}`);
+  }
+  if (raw === undefined) throw new Error(`${file} does not exist: Alfred has not written the settings yet`);
+  const parsed = SettingsSchema.safeParse(raw);
+  if (!parsed.success) throw new Error(`${file} does not fit the settings: ${parsed.error.message}`);
+  return parsed.data;
+}
+
 export interface AlfredStatus {
   up: boolean;
   beat?: Heartbeat;
@@ -113,6 +131,11 @@ export function localDay(iso: string): string {
 /** A subagent's cost is part of the cost its task reports, so totals leave subagent runs out. */
 export function countsForSpend(r: RunRecord): boolean {
   return r.kind !== "subagent";
+}
+
+/** What the runs that started on the local day `day` (YYYY-MM-DD) cost: the rule of "today" on the overview page and of the days on the spend page. */
+export function spendOnDay(runs: RunRecord[], day: string): number {
+  return runs.filter((r) => countsForSpend(r) && localDay(r.startedAt) === day).reduce((sum, r) => sum + (r.costUsd || 0), 0);
 }
 
 export interface DaySpend {
