@@ -115,6 +115,9 @@ private struct MessageList: View {
             .task(id: model.revealRequest) {
                 await reveal(model.revealRequest, using: proxy)
             }
+            .task {
+                await followWhenTheOwnerSends()
+            }
             .overlay(alignment: .bottom) {
                 ZStack {
                     if !follows {
@@ -163,6 +166,17 @@ private struct MessageList: View {
         // The row is where the owner wanted it, which is not the end of the list if it is an old one.
         follows = isNearEnd
         model.revealHandled(request)
+    }
+
+    /// Sets `follows` when the owner sends a message. The pending message and its echo can both come before the list draws
+    /// again, and the list then sees only the echo, so the pending messages are watched as the model changes, not when the
+    /// list draws. The list scrolls once it draws what was sent.
+    private func followWhenTheOwnerSends() async {
+        var count = model.timeline.pending.count
+        for await now in Observations({ model.timeline.pending.count }) {
+            if now > count { follows = true }
+            count = now
+        }
     }
 
     /// Changes whenever something is added to the list or grows.
