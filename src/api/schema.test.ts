@@ -34,6 +34,10 @@ import {
   MAX_SESSION_IDLE_HOURS,
   MAX_TASK_BUDGET_USD,
   MIN_COMPACT_TOKENS,
+  MemoryKindSchema,
+  MemoryListSchema,
+  MemoryResultSchema,
+  MemorySchema,
   MessageSchema,
   PairingSchema,
   PushRegistrationSchema,
@@ -76,6 +80,8 @@ const SCHEMAS_BY_NAME: Record<string, ZodType> = {
   "document-list": DocumentListSchema,
   "document-result": DocumentResultSchema,
   "revision-accepted": RevisionAcceptedSchema,
+  "memory-list": MemoryListSchema,
+  "memory-result": MemoryResultSchema,
   rules: RulesSchema,
   "run-detail": RunDetailSchema,
   "run-list": RunListSchema,
@@ -706,6 +712,120 @@ test("Rules has a lowercase hex sha256 version and a positive size cap", () => {
   ]) {
     assert.equal(RulesSchema.safeParse(bad).success, false, JSON.stringify(bad));
   }
+});
+
+// --- Memory -------------------------------------------------------------------
+
+const memoryCreate = (over: Record<string, unknown>) =>
+  parseCommand({ type: "memory.create", name: "Metric units", description: "Use kilometres.", kind: "preference", body: "Convert miles.", ...over });
+const memoryUpdate = (over: Record<string, unknown>) =>
+  parseCommand({ type: "memory.update", file: "metric-units.md", version: "x", name: "Metric units", description: "", kind: "user", body: "", ...over });
+
+test("the memory fixtures tell one story: a list, an update of its first memory against its version, and the result", async () => {
+  const { formatMemory } = await import("../agent/memory.ts");
+  type Memory = { file: string; name: string; description: string; kind: string; updated: string; body: string; version: string };
+  const list = JSON.parse(readFixture("responses", "memory-list.json")) as { memories: Memory[]; promptCount: number };
+  const sha256 = (text: string) => crypto.createHash("sha256").update(text).digest("hex");
+  for (const m of list.memories) {
+    const bytes = formatMemory({ name: m.name, description: m.description, type: m.kind, updated: m.updated, body: m.body });
+    assert.equal(m.version, sha256(bytes), `${m.file}: the version is the sha256 of the file formatMemory writes`);
+  }
+  assert.ok(list.promptCount < list.memories.length, "the cap cuts the list");
+  assert.deepEqual(
+    list.memories.map((m) => m.updated),
+    [...list.memories.map((m) => m.updated)].sort().reverse(),
+    "most recently updated first, a memory with no date last",
+  );
+  assert.ok(list.memories.some((m) => !/^[a-z0-9-]+\.md$/.test(m.file) || m.file.startsWith("memory-")), "a memory with a Chinese name has a generated file name");
+  assert.ok(list.memories.some((m) => !["user", "preference", "project", "correction"].includes(m.kind)), "a memory of an older kind");
+
+  const update = JSON.parse(readFixture("commands", "memory-update.json")) as Memory & { type: string };
+  const edited = list.memories.find((m) => m.file === update.file);
+  assert.equal(update.version, edited?.version, "the update names the version that was read");
+  const result = JSON.parse(readFixture("responses", "memory-result.json")) as { memory: Memory };
+  assert.equal(result.memory.file, update.file);
+  assert.notEqual(result.memory.version, update.version);
+  assert.deepEqual([result.memory.name, result.memory.description, result.memory.kind, result.memory.body], [update.name, update.description, update.kind, update.body]);
+
+  const del = JSON.parse(readFixture("commands", "memory-delete.json")) as { file: string; version: string };
+  assert.equal(del.version, list.memories.find((m) => m.file === del.file)?.version);
+});
+
+test("memory.create takes a kind of MEMORY_TYPES, a name of 1 to 80 characters and a description of 0 to 200, each one trimmed line", async () => {
+  const { MEMORY_TYPES } = await import("../agent/memory.ts");
+  assert.deepEqual(MemoryKindSchema.options, [...MEMORY_TYPES]);
+  for (const kind of MEMORY_TYPES) assert.equal(memoryCreate({ kind }).ok, true, kind);
+  assert.equal(memoryCreate({ kind: "habit" }).ok, false);
+  assert.equal(memoryCreate({ kind: "" }).ok, false);
+
+  assert.equal(memoryCreate({ name: "名".repeat(80) }).ok, true, "80 characters, counted as characters and not bytes");
+  assert.equal(memoryCreate({ name: "名".repeat(81) }).ok, false);
+  assert.equal(memoryCreate({ name: "😀".repeat(80) }).ok, true, "an emoji is one character");
+  assert.equal(memoryCreate({ name: "" }).ok, false, "a name is not empty");
+  assert.equal(memoryCreate({ description: "" }).ok, true, "a description may be");
+  assert.equal(memoryCreate({ description: "d".repeat(200) }).ok, true);
+  assert.equal(memoryCreate({ description: "d".repeat(201) }).ok, false);
+
+  for (const text of [" padded", "padded ", "\tx", "two\nlines", "carriage\rreturn", "tab\there", "nul\0", "bell\u0007", "del\u007f", "next\u0085line", `sep${String.fromCharCode(0x2028)}arator`, `par${String.fromCharCode(0x2029)}agraph`]) {
+    assert.equal(memoryCreate({ name: text }).ok, false, `name ${JSON.stringify(text)}`);
+    assert.equal(memoryCreate({ description: text }).ok, false, `description ${JSON.stringify(text)}`);
+  }
+  assert.equal(memoryCreate({ name: "inner  spaces and 标点，。" }).ok, true);
+});
+
+test("a memory's body is at most 8192 bytes of UTF-8, may be empty and has no NUL", () => {
+  assert.equal(memoryCreate({ body: "a".repeat(8192) }).ok, true);
+  assert.equal(memoryCreate({ body: "a".repeat(8193) }).ok, false);
+  assert.equal(memoryCreate({ body: "规".repeat(2730) }).ok, true, "8190 bytes");
+  assert.equal(memoryCreate({ body: "规".repeat(2731) }).ok, false, "8193 bytes");
+  assert.equal(memoryCreate({ body: "" }).ok, true);
+  assert.equal(memoryCreate({ body: "line\n\nline\n" }).ok, true, "a body has lines");
+  assert.equal(memoryCreate({ body: "a\0b" }).ok, false);
+  assert.equal(memoryUpdate({ body: "a".repeat(8193) }).ok, false);
+});
+
+test("memory.update and memory.delete name a file of MEMORY_FILE_RE and a version, and take no other key", async () => {
+  const { MEMORY_FILE_RE } = await import("../agent/memory.ts");
+  for (const file of ["a.md", "metric-units.md", "memory-20261025-4k2p.md", `${"a".repeat(80)}.md`, `${"a".repeat(81)}.md`, "-a.md", "A.md", "a b.md", "a.txt", "a.md.md", "a/b.md", "../a.md", "MEMORY.md", "名.md", ""]) {
+    const expected = MEMORY_FILE_RE.test(file);
+    assert.equal(memoryUpdate({ file }).ok, expected, `update ${file}`);
+    assert.equal(parseCommand({ type: "memory.delete", file, version: "x" }).ok, expected, `delete ${file}`);
+  }
+  assert.equal(memoryUpdate({ version: undefined }).ok, false, "an update needs the version");
+  assert.equal(parseCommand({ type: "memory.delete", file: "a.md" }).ok, false, "so does a delete");
+  assert.equal(memoryUpdate({ version: "not-a-hash" }).ok, true, "its shape is not checked: another version is a conflict, which Alfred answers");
+  assert.equal(memoryUpdate({ updated: "2026-10-29" }).ok, false);
+  assert.equal(parseCommand({ type: "memory.delete", file: "a.md", version: "x", force: true }).ok, false);
+  assert.equal(memoryCreate({ file: "a.md" }).ok, false, "a new memory's file is Alfred's to name");
+});
+
+test("a Memory has a lowercase hex sha256 version, a date or nothing for updated, and a kind that is any string", () => {
+  const memory = {
+    file: "a.md",
+    name: "",
+    description: "",
+    kind: "",
+    updated: "",
+    body: "",
+    version: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  };
+  assert.equal(MemorySchema.safeParse(memory).success, true, "what an old file with no fields reads as");
+  assert.equal(MemorySchema.safeParse({ ...memory, kind: "feedback", updated: "2026-10-29" }).success, true);
+  for (const bad of [
+    { ...memory, version: memory.version.toUpperCase() },
+    { ...memory, version: memory.version.slice(1) },
+    { ...memory, version: undefined },
+    { ...memory, updated: "2026-10-9" },
+    { ...memory, updated: "yesterday" },
+    { ...memory, file: "" },
+  ]) {
+    assert.equal(MemorySchema.safeParse(bad).success, false, JSON.stringify(bad));
+  }
+  assert.equal(MemoryListSchema.safeParse({ memories: [], promptCount: 0 }).success, true);
+  assert.equal(MemoryListSchema.safeParse({ memories: [memory], promptCount: 1 }).success, true);
+  assert.equal(MemoryListSchema.safeParse({ memories: [memory], promptCount: 2 }).success, false, "more in the prompt than there are");
+  assert.equal(MemoryListSchema.safeParse({ memories: [memory], promptCount: -1 }).success, false);
+  assert.equal(MemoryResultSchema.safeParse({ memory }).success, true);
 });
 
 // --- Settings -----------------------------------------------------------------

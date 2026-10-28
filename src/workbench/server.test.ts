@@ -22,7 +22,7 @@ const { EventLog } = await import("../events.ts");
 const { DOCUMENTS_FILE, DocumentStore } = await import("../documents/store.ts");
 const { VERSIONS_GIT_DIR, Versions } = await import("../documents/versions.ts");
 const { IDEAS_FILE } = await import("../ideas/store.ts");
-const { DocumentDetailSchema, DocumentListSchema, ErrorResponseSchema, IdeaListSchema, RulesSchema, RunDetailSchema, RunListSchema, TaskDetailSchema, TaskListSchema } = await import("../api/schema.ts");
+const { DocumentDetailSchema, DocumentListSchema, ErrorResponseSchema, IdeaListSchema, MemoryListSchema, RulesSchema, RunDetailSchema, RunListSchema, TaskDetailSchema, TaskListSchema } = await import("../api/schema.ts");
 const { AccessVerifier } = await import("./access.ts");
 const { DeviceStore } = await import("./devices.ts");
 const { REPORT_CSP, createHandler, inlineImages, startWorkbench } = await import("./server.ts");
@@ -617,6 +617,88 @@ test("GET /api/rules needs a device token, and refuses other methods with 405", 
   assert.equal(wrong.status, 405);
   assert.equal(wrong.headers.get("allow"), "GET");
   assert.equal(fs.existsSync(rulesFile), false, "a refused request writes nothing");
+});
+
+// --- /api/memories ----------------------------------------------------------
+
+const memoryDir = path.join(workspace, "memory");
+
+/** GET /api/memories with the paired device's token, with the memory files `put` writes; they are gone again afterwards. */
+async function getMemories(put: (write: (file: string, text: string) => void) => void = () => {}): Promise<Response> {
+  const written: string[] = [];
+  put((file, text) => {
+    fs.writeFileSync(path.join(memoryDir, file), text);
+    written.push(file);
+  });
+  try {
+    return await fetch(`${open}/api/memories`, { headers: bearer(paired.token) });
+  } finally {
+    for (const file of written) fs.rmSync(path.join(memoryDir, file), { force: true });
+  }
+}
+
+const memoryText = (name: string, updated: string, type = "preference") => `---\nname: "${name}"\ndescription: "About ${name}."\ntype: ${type}\nupdated: ${updated}\n---\n\n${name} body.\n`;
+
+test("GET /api/memories lists the memories most recently updated first, each with the sha256 of its file's bytes as its version", async () => {
+  const bytes = new Map<string, string>();
+  const res = await getMemories((write) => {
+    for (const [file, name, updated, type] of [
+      ["newer.md", "Newer", "2026-10-25", "project"],
+      ["older.md", "Older", "2026-10-01", "correction"],
+      ["memory-20261022-ab12.md", "住在上海", "2026-10-22", "user"],
+    ] as const) {
+      write(file, memoryText(name, updated, type));
+      bytes.set(file, memoryText(name, updated, type));
+    }
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("content-type"), "application/json; charset=utf-8");
+  assert.equal(res.headers.get("cache-control"), "no-store");
+  const list = MemoryListSchema.parse(await res.json());
+  assert.deepEqual(list.memories.map((m) => m.file), ["newer.md", "memory-20261022-ab12.md", "m.md", "older.md"], "the one in the workspace for the /memory page is between them");
+  assert.equal(list.promptCount, 4);
+  const [newer, chinese] = list.memories;
+  assert.deepEqual(newer, {
+    file: "newer.md",
+    name: "Newer",
+    description: "About Newer.",
+    kind: "project",
+    updated: "2026-10-25",
+    body: "Newer body.",
+    version: sha256(bytes.get("newer.md") ?? ""),
+  });
+  assert.equal(chinese?.name, "住在上海");
+  for (const m of list.memories) assert.equal(m.version, sha256(fs.existsSync(path.join(memoryDir, m.file)) ? fs.readFileSync(path.join(memoryDir, m.file)) : bytes.get(m.file) ?? ""), m.file);
+});
+
+test("GET /api/memories counts in promptCount the memories that fit the system prompt's index, and lists them all", async () => {
+  const res = await getMemories((write) => {
+    for (let i = 0; i < 205; i++) write(`bulk-${String(i).padStart(3, "0")}.md`, memoryText(`B${i}`, "2026-10-30"));
+  });
+  const list = MemoryListSchema.parse(await res.json());
+  assert.equal(list.memories.length, 206);
+  assert.equal(list.promptCount, 200, "the index holds at most 200 lines");
+  assert.ok(list.memories.slice(0, 205).every((m) => m.file.startsWith("bulk-")), "the newest 205 come first");
+});
+
+test("GET /api/memories is an empty list when there is no memory folder", async () => {
+  const away = `${memoryDir}-away`;
+  fs.renameSync(memoryDir, away);
+  try {
+    const res = await fetch(`${open}/api/memories`, { headers: bearer(paired.token) });
+    assert.equal(res.status, 200);
+    assert.deepEqual(MemoryListSchema.parse(await res.json()), { memories: [], promptCount: 0 });
+  } finally {
+    fs.renameSync(away, memoryDir);
+  }
+});
+
+test("GET /api/memories needs a device token, and refuses other methods with 405", async () => {
+  await assertApiError(await fetch(`${open}/api/memories`), 401, "without a token");
+  await assertApiError(await fetch(`${guarded}/api/memories`), 403, "on the tunnel without Access");
+  const wrong = await fetch(`${open}/api/memories`, { method: "POST", headers: bearer(paired.token), body: "{}" });
+  assert.equal(wrong.status, 405);
+  assert.equal(wrong.headers.get("allow"), "GET");
 });
 
 // --- /api/tasks -------------------------------------------------------------

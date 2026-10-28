@@ -27,6 +27,9 @@ Object.assign(process.env, {
 
 const { createAgentHandler } = await import("./handler.ts");
 const { readRulesForOwner, saveRules } = await import("./rules.ts");
+const { memoryCommands } = await import("./memory-edit.ts");
+const { MEMORY_LOCK_FILE } = await import("./memory-scan.ts");
+const { MemoryLock } = await import("./memory.ts");
 const { EventLog, isLiveEvent } = await import("../events.ts");
 const { readRunFile } = await import("../runs.ts");
 const { InvalidAnswer, appOutbound } = await import("../channels.ts");
@@ -638,6 +641,99 @@ test("a run that also changes ALFRED.md after the owner's save still reports it,
   await until("the run to finish", () => alone.finished());
   await until("the notice", () => alone.app.texts.length === 2);
   assert.deepEqual(alone.app.texts, ["写好了", "已更新 ALFRED.md"]);
+});
+
+// --- The owner's memory edits and the handler's memory lock ---------------------
+
+const memoryFolder = path.join(tmp, "workspace", "memory");
+const memoryTrash = path.join(tmp, "workspace", ".trash", "memory");
+
+/** The memory commands on `handler`, waiting `lockWaitMs` for a scan; the memory folder and its trash are emptied after the test. */
+function memoryOn(t: ReturnType<typeof setup>, lockWaitMs: number) {
+  const clean = () => {
+    fs.rmSync(memoryFolder, { recursive: true, force: true });
+    fs.rmSync(memoryTrash, { recursive: true, force: true });
+  };
+  clean();
+  fs.mkdirSync(memoryFolder, { recursive: true });
+  cleanups.push(async () => clean());
+  return memoryCommands(t.handler, { workspace: path.join(tmp, "workspace"), lockWaitMs });
+}
+
+const newMemory = (name: string) => ({ type: "memory.create" as const, name, description: "A fact.", kind: "user" as const, body: "Body." });
+const memoryFilesNow = () => fs.readdirSync(memoryFolder).filter((file) => file !== "MEMORY.md").sort();
+
+test("a memory scan that holds the handler's memory lock refuses the owner's memory commands with 409 and nothing changes, and they work when it lets go", async () => {
+  const t = setup();
+  const commands = memoryOn(t, 0);
+  const made = await commands.create(newMemory("Before the scan"));
+  assert.ok(made.ok);
+  const { memory } = made.ok ? (made.body as { memory: { file: string; version: string } }) : { memory: { file: "", version: "" } };
+  const before = fs.readFileSync(path.join(memoryFolder, memory.file), "utf8");
+
+  const scan = new MemoryLock(MEMORY_LOCK_FILE);
+  assert.ok(scan.tryAcquire("scan"), "a memory scan holds the lock");
+  try {
+    const refused = [
+      await commands.create(newMemory("During the scan")),
+      await commands.update({ type: "memory.update", file: memory.file, version: memory.version, name: "Changed", description: "", kind: "user", body: "Changed." }),
+      await commands.delete({ type: "memory.delete", file: memory.file, version: memory.version }),
+    ];
+    for (const reply of refused) {
+      assert.equal(reply.ok, false);
+      if (!reply.ok) {
+        assert.equal(reply.status, 409);
+        assert.match(reply.error, /tidying memory.*try again shortly/);
+      }
+    }
+    assert.deepEqual(memoryFilesNow(), [memory.file], "nothing was added or moved");
+    assert.equal(fs.readFileSync(path.join(memoryFolder, memory.file), "utf8"), before, "nothing was changed");
+    assert.equal(scan.current()?.holder, "scan", "and the lock is still the scan's");
+  } finally {
+    scan.release();
+  }
+
+  const updated = await commands.update({ type: "memory.update", file: memory.file, version: memory.version, name: "Changed", description: "", kind: "user", body: "Changed." });
+  assert.equal(updated.ok, true, "the same update goes through once the scan has let go");
+  assert.equal(new MemoryLock(MEMORY_LOCK_FILE).current(), undefined, "a command leaves the lock as it found it");
+});
+
+test("a command waits for a scan that ends within its wait, and goes through", async () => {
+  const t = setup();
+  const commands = memoryOn(t, 3000);
+  const scan = new MemoryLock(MEMORY_LOCK_FILE);
+  assert.ok(scan.tryAcquire("scan"));
+  const pending = commands.create(newMemory("After the scan"));
+  await sleep(100);
+  assert.deepEqual(memoryFilesNow(), [], "it waits");
+  scan.release();
+  const reply = await pending;
+  assert.equal(reply.ok, true);
+  assert.deepEqual(memoryFilesNow(), ["after-the-scan.md"], "its memory is there");
+});
+
+test("a running task's lock does not refuse the owner's memory commands: they run beside it and leave its lock alone", async () => {
+  const hold = held();
+  const t = setup({ turn: hold.turn });
+  const commands = memoryOn(t, 0);
+  await t.send("查一下");
+  await until("the run to start", () => hold.waiting === 1);
+  const probe = new MemoryLock(MEMORY_LOCK_FILE);
+  assert.equal(probe.current()?.holder, "task", "the run holds the memory lock as a task");
+
+  const made = await commands.create(newMemory("Beside the run"));
+  assert.equal(made.ok, true, "a create beside the run's lock");
+  const { memory } = made.ok ? (made.body as { memory: { file: string; version: string } }) : { memory: { file: "", version: "" } };
+  const updated = await commands.update({ type: "memory.update", file: memory.file, version: memory.version, name: "Edited", description: "", kind: "user", body: "Edited." });
+  assert.equal(updated.ok, true, "an update beside it");
+  const next = updated.ok ? (updated.body as { memory: { version: string } }).memory.version : "";
+  assert.deepEqual(await commands.delete({ type: "memory.delete", file: memory.file, version: next }), { ok: true, body: { deleted: true } }, "a delete beside it");
+  assert.equal(probe.current()?.holder, "task", "the run still holds its lock after the commands");
+  assert.equal(probe.tryAcquire("scan"), false, "so a scan still cannot start");
+
+  hold.release("好了");
+  await until("the run to finish", () => t.finished());
+  assert.equal(probe.current(), undefined, "and the lock is free when the run ends");
 });
 
 test("the note about a run a restart cut short comes with the next message, is recorded after it, and is said only once", async () => {

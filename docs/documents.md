@@ -7,7 +7,7 @@ A document is a file Alfred delivered, known by its workspace path, with a versi
 - **The history** is a git repository whose git dir (`workbench/versions.git`, see [State and files](../README.md#state-and-files)) lies outside the workspace, so no tool reaches it, and the guard refuses any `.git` path segment. `versions.ts` decides what is versioned: text files, and any delivered file up to `VERSION_MAX_BYTES` (20 MB).
 - **A version** is a commit with a reason: `delivered`, `revised`, `changed` (the end of any other run, or the startup commit) or `undone`.
 - **Commits** happen at each delivery, at the end of every run that wrote files (a lost run commits nothing; a background subagent commits its own files when it ends), and at startup. Each gives the documents among its files a version.
-- **The owner's save of `ALFRED.md`** in the app is committed as `Edit ALFRED.md` and gives no document a version ([agent](agent.md#workspace-rules-alfredmd)).
+- **The owner's save of `ALFRED.md`** in the app is committed as `Edit ALFRED.md` and gives no document a version ([agent](agent.md#workspace-rules-alfredmd)). The owner's changes to a memory are committed the same way, as `Add`, `Edit` or `Delete memory/<file>` ([agent](agent.md#long-term-memory)).
 - **Delivering** (`deliverDocument`): `deliver` commits the file and registers it, with its kind from the extension and its title from the first level-1 or level-2 heading (Markdown), the `<title>` (HTML) or the file name. Delivering a path again adds a version; delivering it unchanged adds none. A file over 20 MB, or one that fails to commit or register, is sent as a plain file with no document. `move_file` moves the document, or each one under a moved directory.
 
 ## Revision

@@ -36,6 +36,44 @@ final class CommandFixtureTests: XCTestCase {
         XCTAssertEqual(save, .rulesSave(text: "# 规则\n", version: "3ca90a08"))
     }
 
+    func testMemoryCommandsCarryTheirFieldsAndEncodeTheContractsKeys() throws {
+        let create = try decodeCommand("commands/memory-create.json")
+        XCTAssertEqual(
+            create,
+            .memoryCreate(
+                name: "Metric units",
+                description: "Use kilometres and kilograms.",
+                kind: "preference",
+                body: "The owner thinks in metric units. Convert miles and pounds, and say what was converted."
+            )
+        )
+        let createJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(create)) as? [String: Any])
+        XCTAssertEqual(createJSON["type"] as? String, "memory.create")
+        XCTAssertEqual(createJSON["description"] as? String, "Use kilometres and kilograms.")
+        XCTAssertNil(createJSON["memoryDescription"], "the contract's key is description")
+        XCTAssertNil(createJSON["file"], "a new memory's file is Alfred's to name")
+
+        let update = try decodeCommand("commands/memory-update.json")
+        guard case let .memoryUpdate(file, version, name, description, kind, body) = update else {
+            return XCTFail("expected memory.update, got \(update)")
+        }
+        XCTAssertEqual(file, "prefer-short-answers.md")
+        XCTAssertEqual(version.count, 64)
+        XCTAssertEqual(name, "回答要简短")
+        XCTAssertEqual(description, "先给结论，再给理由，最多五行。")
+        XCTAssertEqual(kind, "preference")
+        XCTAssertTrue(body.hasPrefix("主人在手机上看回复"))
+
+        let delete = try decodeCommand("commands/memory-delete.json")
+        XCTAssertEqual(
+            delete,
+            .memoryDelete(
+                file: "do-not-guess-prices.md",
+                version: "0a9a360d1d71306b5314bb10cb7980c01d378e824def62f6fc79c9b3c8fdb2e9"
+            )
+        )
+    }
+
     func testQuestionAnswerCarriesTheQuestionIdAndItsAnswers() throws {
         let command = try decodeCommand("commands/question-answer.json")
         XCTAssertEqual(
