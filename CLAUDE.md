@@ -12,6 +12,10 @@ Developed with the `orchestrate` skill: issues are specs, implementers deliver o
 - CI (`.github/workflows/ci.yml`) runs `npm ci`, `npm run check` and `npm test` on every PR.
 - `npm run smoke` and `node scripts/handler-smoke.ts <scenario>` call the real model and cost money. They need `ALFRED_ANTHROPIC_API_KEY`. Point `ALFRED_STATE_DIR` and `ALFRED_WORKSPACE` at scratch directories for them.
 - Never run `npm start` against the deployed instance's state: a second Alfred on the same state dir would take over its command socket and run tasks on its sessions. Run locally with scratch `ALFRED_STATE_DIR` and `ALFRED_WORKSPACE` (see `scripts/app-dev.ts`).
+- Run `app-dev`, `smoke` and `handler-smoke` with `CLAUDE_CODE_ENTRYPOINT` unset: a Claude Code session passes it down, and the API then refuses the key's requests.
+- Run UI tests on a simulator that holds only the test build (`com.example.alfred`): a second Alfred build there adds a second share extension, and `ShareUITests` picks the wrong one. The share tests can fail on a new simulator's first run; rerun before blaming a change.
+- XCUITest calls a control hittable while it sits under the keyboard or in a sheet that is still resizing: tap once its frame holds still, as `tapWhenSettled` in `IdeasUITests` does.
+- The server image holds only `src/`, `plugin/` and the npm packages, so a merge that changes only `ios/` needs no redeploy (`deploy/update.sh` reports nothing to restart).
 
 ## Architecture in brief
 
