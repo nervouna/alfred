@@ -409,4 +409,63 @@ final class AlfredClientTests: XCTestCase {
         let entry = try XCTUnwrap(log.entries.first)
         try assertSameJSON(entry.body, fixture("commands/settings-update-ideas-off.json"))
     }
+
+    func testRulesFetchesTheTextItsVersionAndTheLimit() async throws {
+        let (client, log) = try makeClient { _ in StubReply(chunks: [(try? fixture("responses/rules.json")) ?? Data()]) }
+        let rules = try await client.rules()
+        XCTAssertTrue(rules.text.hasPrefix("# Workspace rules"))
+        XCTAssertEqual(rules.version, "3ca90a087679c144795ef3d87cd728ca2fc95886596e863550f376b76b61f10d")
+        XCTAssertEqual(rules.maxBytes, 8192)
+        let entry = try XCTUnwrap(log.entries.first)
+        XCTAssertEqual(entry.request.httpMethod, "GET")
+        XCTAssertEqual(try encodedPath(entry.request), "/api/rules")
+        assertCredentials(entry.request)
+    }
+
+    func testRulesFailsWithTheStatusAndMessageOfARefusal() async throws {
+        let (client, _) = try makeClient { _ in
+            StubReply(status: 413, chunks: [Data(#"{"error":"ALFRED.md is over 65536 bytes, too long to edit here."}"#.utf8)])
+        }
+        await assertFails(with: .http(status: 413, message: "ALFRED.md is over 65536 bytes, too long to edit here.")) {
+            _ = try await client.rules()
+        }
+    }
+
+    func testSaveRulesPostsTheCommandAndDecodesTheNewRules() async throws {
+        let newVersion = String(repeating: "a", count: 64)
+        let saved = Data(##"{"text":"# Workspace rules\n","version":"\##(newVersion)","maxBytes":8192}"##.utf8)
+        let (client, log) = try makeClient { _ in StubReply(chunks: [saved]) }
+        let command = try JSONDecoder().decode(Command.self, from: fixture("commands/rules-save.json"))
+        guard case let .rulesSave(text, version) = command else { return XCTFail("the fixture is not a rules.save: \(command)") }
+
+        let rules = try await client.saveRules(text: text, version: version)
+        XCTAssertEqual(rules.text, "# Workspace rules\n")
+        XCTAssertEqual(rules.version, newVersion)
+        XCTAssertEqual(rules.maxBytes, 8192)
+        let entry = try XCTUnwrap(log.entries.first)
+        XCTAssertEqual(entry.request.httpMethod, "POST")
+        XCTAssertEqual(try encodedPath(entry.request), "/api/commands")
+        XCTAssertEqual(entry.request.value(forHTTPHeaderField: "Content-Type"), "application/json")
+        try assertSameJSON(entry.body, fixture("commands/rules-save.json"))
+        assertCredentials(entry.request)
+    }
+
+    func testSaveRulesMapsAConflictAndARefusedTextToTheirStatusAndMessage() async throws {
+        let (stale, _) = try makeClient { _ in
+            StubReply(status: 409, chunks: [Data(#"{"error":"version: not the current version of ALFRED.md"}"#.utf8)])
+        }
+        await assertFails(with: .http(status: 409, message: "version: not the current version of ALFRED.md")) {
+            _ = try await stale.saveRules(text: "x", version: "old")
+        }
+
+        let (tooLong, _) = try makeClient { _ in
+            StubReply(status: 400, chunks: [Data(#"{"error":"text: must be at most 8192 bytes"}"#.utf8)])
+        }
+        await assertFails(with: .http(status: 400, message: "text: must be at most 8192 bytes")) {
+            _ = try await tooLong.saveRules(text: "x", version: "v")
+        }
+
+        let (unauthorized, _) = try makeClient { _ in StubReply(status: 401) }
+        await assertFails(with: .unauthorized) { _ = try await unauthorized.saveRules(text: "x", version: "v") }
+    }
 }

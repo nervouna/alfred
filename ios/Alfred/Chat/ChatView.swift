@@ -5,6 +5,7 @@ import SwiftUI
 struct ChatView: View {
     let model: AppModel
     @State private var confirmsUnpairing = false
+    @State private var showsProfile = false
 
     var body: some View {
         NavigationStack {
@@ -21,7 +22,11 @@ struct ChatView: View {
                 }
                 // Over the bar and the list, and not in the bar's content (see ChatHeader).
                 .overlay(alignment: .top) {
-                    ChatHeaderOverlay(state: AvatarState(isWorking: model.runningChatRun != nil), isConnected: model.isConnected)
+                    ChatHeaderOverlay(
+                        state: AvatarState(isWorking: model.runningChatRun != nil),
+                        isConnected: model.isConnected,
+                        openProfile: { showsProfile = true }
+                    )
                 }
                 .safeAreaInset(edge: .bottom, spacing: 0) {
                     Composer(model: model)
@@ -29,6 +34,9 @@ struct ChatView: View {
                 // The header is drawn by hand. The title stays for the back button of the screens this one opens.
                 .navigationTitle("对话")
                 .toolbar(.hidden, for: .navigationBar)
+                .navigationDestination(isPresented: $showsProfile) {
+                    ProfileView()
+                }
                 .confirmationDialog("取消配对？", isPresented: $confirmsUnpairing, titleVisibility: .visible) {
                     Button("取消配对", role: .destructive) { model.unpair() }
                 }
