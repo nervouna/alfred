@@ -1,0 +1,13 @@
+{
+  "type": "settings.update",
+  "reset": [
+    "model",
+    "dailyBudgetUsd",
+    "runBudgetUsd",
+    "sessionIdleHours",
+    "compactTokens",
+    "memoryScanMinutes",
+    "memoryScanBudgetUsd",
+    "ideasAt"
+  ]
+}

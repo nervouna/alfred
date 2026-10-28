@@ -1,0 +1,8 @@
+{
+  "type": "settings.update",
+  "model": "opus",
+  "dailyBudgetUsd": 30,
+  "reset": [
+    "runBudgetUsd"
+  ]
+}

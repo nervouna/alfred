@@ -23,12 +23,16 @@ public enum Command: Hashable, Sendable, Codable {
     case ideaReject(ideaId: String, reason: RejectionReason, note: String?)
     /// Asks Alfred to generate ideas now.
     case ideaGenerate
+    /// Changes settings. Only the settings `changes` sets are sent, and the ones it resets.
+    case settingsUpdate(SettingsChanges)
 
     private enum CodingKeys: String, CodingKey {
         case type, clientId, text, runId, files, questionId, answers
         case title, brief, schedule, model, budgetUsd, taskId, status
         case documentId, version, annotations
         case ideaId, reason, note
+        case dailyBudgetUsd, runBudgetUsd, sessionIdleHours, compactTokens, memoryScanMinutes, memoryScanBudgetUsd
+        case ideasAt, reset
     }
 
     public init(from decoder: any Decoder) throws {
@@ -98,6 +102,18 @@ public enum Command: Hashable, Sendable, Codable {
             )
         case "idea.generate":
             self = .ideaGenerate
+        case "settings.update":
+            self = .settingsUpdate(SettingsChanges(
+                model: try container.decodeIfPresent(TaskModel.self, forKey: .model),
+                dailyBudgetUsd: try container.decodeIfPresent(Double.self, forKey: .dailyBudgetUsd),
+                runBudgetUsd: try container.decodeIfPresent(Double.self, forKey: .runBudgetUsd),
+                sessionIdleHours: try container.decodeIfPresent(Double.self, forKey: .sessionIdleHours),
+                compactTokens: try container.decodeIfPresent(Int.self, forKey: .compactTokens),
+                memoryScanMinutes: try container.decodeIfPresent(Double.self, forKey: .memoryScanMinutes),
+                memoryScanBudgetUsd: try container.decodeIfPresent(Double.self, forKey: .memoryScanBudgetUsd),
+                ideasAt: try Self.decodeIdeasAt(container),
+                reset: try container.decodeIfPresent([SettingKey].self, forKey: .reset) ?? []
+            ))
         default:
             throw DecodingError.dataCorruptedError(
                 forKey: .type,
@@ -167,6 +183,33 @@ public enum Command: Hashable, Sendable, Codable {
             try container.encodeIfPresent(note, forKey: .note)
         case .ideaGenerate:
             try container.encode("idea.generate", forKey: .type)
+        case let .settingsUpdate(changes):
+            try container.encode("settings.update", forKey: .type)
+            try container.encodeIfPresent(changes.model, forKey: .model)
+            try container.encodeIfPresent(changes.dailyBudgetUsd, forKey: .dailyBudgetUsd)
+            try container.encodeIfPresent(changes.runBudgetUsd, forKey: .runBudgetUsd)
+            try container.encodeIfPresent(changes.sessionIdleHours, forKey: .sessionIdleHours)
+            try container.encodeIfPresent(changes.compactTokens, forKey: .compactTokens)
+            try container.encodeIfPresent(changes.memoryScanMinutes, forKey: .memoryScanMinutes)
+            try container.encodeIfPresent(changes.memoryScanBudgetUsd, forKey: .memoryScanBudgetUsd)
+            switch changes.ideasAt {
+            case .none:
+                break
+            case .off:
+                try container.encodeNil(forKey: .ideasAt)
+            case let .at(time):
+                try container.encode(time, forKey: .ideasAt)
+            }
+            if !changes.reset.isEmpty {
+                try container.encode(changes.reset, forKey: .reset)
+            }
         }
+    }
+
+    /// `ideasAt` as a change: absent leaves the time as it is, `null` turns the generation off, and a time sets it.
+    private static func decodeIdeasAt(_ container: KeyedDecodingContainer<CodingKeys>) throws -> SettingsChanges.IdeasAt? {
+        guard container.contains(.ideasAt) else { return nil }
+        if try container.decodeNil(forKey: .ideasAt) { return .off }
+        return .at(try container.decode(TimeOfDay.self, forKey: .ideasAt))
     }
 }

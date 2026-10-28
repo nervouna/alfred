@@ -119,8 +119,8 @@ public struct Timeline: Hashable, Sendable {
             if let index = questions.firstIndex(where: { $0.id == answered.id }) {
                 questions[index].state = answered.cancelled ? .cancelled : .answered(answered.answers)
             }
-        case .taskUpdated, .ideaUpdated:
-            // Tasks and ideas are not part of the chat's timeline.
+        case .taskUpdated, .ideaUpdated, .settingsUpdated:
+            // Tasks, ideas and settings are not part of the chat's timeline.
             break
         case .documentUpdated, .annotationUpdated:
             // Documents and their annotations are not part of the chat's timeline.
