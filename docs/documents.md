@@ -1,6 +1,6 @@
 # Documents
 
-A document is a file Alfred delivered, known by its workspace path, with a version for each change. Code: `src/documents/` (`versions.ts` the history, `store.ts` the only writer of `workbench/documents.json`, `register.ts` delivery, `commands.ts` revise and undo, `startup.ts`), `src/agent/revision.ts`, and the revision runs in `src/agent/handler.ts`. Command shapes are in `src/api/schema.ts`.
+A document is a file Alfred delivered, known by its workspace path, with a version for each change. Code: `src/documents/` (`versions.ts` the history, `store.ts` the only writer of `workbench/documents.json`, `register.ts` delivery, `commands.ts` revise and undo, `trash.ts` what deleting is, `startup.ts`), `src/agent/revision.ts`, and the revision runs in `src/agent/handler.ts`. Command shapes are in `src/api/schema.ts`.
 
 ## Versions
 
@@ -8,6 +8,14 @@ A document is a file Alfred delivered, known by its workspace path, with a versi
 - **A version** is a commit with a reason: `delivered`, `revised`, `changed` (the end of any other run, or the startup commit) or `undone`.
 - **Commits** happen at each delivery, at the end of every run that wrote files (a lost run commits nothing; a background subagent commits its own files when it ends), and at startup. Each gives the documents among its files a version.
 - **Delivering** (`deliverDocument`): `deliver` commits the file and registers it, with its kind from the extension and its title from the first level-1 or level-2 heading (Markdown), the `<title>` (HTML) or the file name. Delivering a path again adds a version; delivering it unchanged adds none. A file over 20 MB, or one that fails to commit or register, is sent as a plain file with no document. `move_file` moves the document, or each one under a moved directory.
+
+## Trashed documents
+
+Deleting is `move_file` into `.trash/`. A document is trashed when its path is under `.trash/` at the root of the workspace (`isTrashedPath`, `trash.ts`), and the store then treats it as absent: `list`, `get`, `byPath`, `versions`, `annotations` and `find` skip it, so a revision of it is refused as no such document. The entry, its versions and its annotations stay in `documents.json`, and only `move` sees it, so moving the file back out makes it the same document again.
+
+- **The workbench** reads `documents.json` apart from the store and applies the same rule: the list leaves a trashed document out and its detail is 404. `GET /api/files/` keeps serving what is on disk.
+- **The app is told** with `document.removed` when a move takes a document into `.trash/` from outside it, and with `document.updated` when one comes out; a move within `.trash/` sends nothing. The catalog drops the document and its annotations on `document.removed`, and only merges the lists it reads, so a replay from event 0 ends right: the removal follows the update that delivered the document.
+- **A run's file list** leaves out what the run moved into `.trash/`, which it did not write. `movedFrom` still holds the path it left, so the run's commit records the removal.
 
 ## Revision
 

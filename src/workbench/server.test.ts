@@ -769,6 +769,40 @@ test("GET /api/documents lists the documents, most recently updated first", asyn
   assert.equal(list.documents[0]?.version, aSecond);
 });
 
+test("GET /api/documents leaves out a trashed document and GET /api/documents/<id> answers 404 for it, until it is restored", async () => {
+  const store = newDocumentStore();
+  const keepVersion = await commitFile("docs/keep.md", "# Keep\n");
+  const keep = store.deliver({ path: "docs/keep.md", version: keepVersion, at: new Date("2031-05-01T00:00:00Z"), title: "Keep", kind: "markdown" });
+  const goneVersion = await commitFile("docs/old-draft.md", "# Old draft\n");
+  const gone = store.deliver({ path: "docs/old-draft.md", version: goneVersion, at: new Date("2031-05-02T00:00:00Z"), title: "Old draft", kind: "markdown" });
+  const [note] = store.submit({
+    documentId: gone.id,
+    version: goneVersion,
+    annotations: [{ target: { kind: "document" }, comment: "再核对" }],
+    runId: newRunId(),
+    at: new Date("2031-05-02T01:00:00Z"),
+  });
+  assert.ok(note);
+
+  const ids = async () => DocumentListSchema.parse(await (await fetch(`${open}/api/documents`, { headers: bearer(paired.token) })).json()).documents.map((d) => d.id);
+  const detail = (id: string) => fetch(`${open}/api/documents/${id}`, { headers: bearer(paired.token) });
+  assert.deepEqual(await ids(), [gone.id, keep.id]);
+
+  store.move("docs/old-draft.md", ".trash/old-draft.md", new Date("2031-05-03T00:00:00Z"));
+  assert.deepEqual(await ids(), [keep.id], "the list leaves it out");
+  const missing = await detail(gone.id);
+  assert.equal(missing.status, 404);
+  assert.deepEqual(await missing.json(), { error: "There is no such document." });
+  assert.equal((await detail(keep.id)).status, 200, "the others are served");
+
+  store.move(".trash/old-draft.md", "docs/old-draft.md", new Date("2031-05-04T00:00:00Z"));
+  assert.deepEqual(await ids(), [gone.id, keep.id], "a restore brings it back");
+  const back = DocumentDetailSchema.parse(await (await detail(gone.id)).json());
+  assert.equal(back.document.id, gone.id);
+  assert.deepEqual(back.versions.map((v) => v.version), [goneVersion]);
+  assert.deepEqual(back.annotations.map((a) => a.id), [note.id]);
+});
+
 test("GET /api/documents/<id> answers 404 with its message for an unknown id and a malformed one", async () => {
   fs.rmSync(DOCUMENTS_FILE, { force: true });
   for (const id of ["zzzzzz", "ABCDEF", "abc", "k7m2qa0", "k7m2q", ""]) {

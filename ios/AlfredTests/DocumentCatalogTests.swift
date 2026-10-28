@@ -86,6 +86,52 @@ final class DocumentCatalogTests: XCTestCase {
         XCTAssertEqual(catalog, before)
     }
 
+    // MARK: document.removed events
+
+    func testARemovedDocumentLeavesTheCatalog() throws {
+        var catalog = try catalog([
+            TestData.documentObject("aaaaaa", taskId: "tttttt", updatedAt: "2026-10-26T09:00:00.000Z"),
+            TestData.documentObject("bbbbbb", updatedAt: "2026-10-26T10:00:00.000Z"),
+        ])
+        catalog.apply(try TestData.streamEvent(TestData.documentRemovedEvent(5, id: "aaaaaa")))
+        XCTAssertEqual(catalog.documents.map(\.id), ["bbbbbb"])
+        XCTAssertNil(catalog.document(id: "aaaaaa"))
+        XCTAssertEqual(catalog.documents(taskId: "tttttt"), [])
+        catalog.apply(try TestData.streamEvent(TestData.documentRemovedEvent(6, id: "zzzzzz")))
+        XCTAssertEqual(catalog.documents.map(\.id), ["bbbbbb"], "an unknown document is nothing to remove")
+    }
+
+    func testRemovingADocumentDropsItsAnnotations() throws {
+        var catalog = try catalog([TestData.documentObject("aaaaaa"), TestData.documentObject("bbbbbb")])
+        catalog.apply(try TestData.streamEvent(TestData.annotationEvent(1, annotation: TestData.annotationObject("g7e4xr", documentId: "aaaaaa"))))
+        catalog.apply(try TestData.streamEvent(TestData.annotationEvent(2, annotation: TestData.annotationObject("m5t8bq", documentId: "bbbbbb"))))
+        catalog.apply(try TestData.streamEvent(TestData.documentRemovedEvent(3, id: "aaaaaa")))
+        XCTAssertEqual(catalog.annotations(of: "aaaaaa"), [])
+        XCTAssertEqual(catalog.annotations(of: "bbbbbb").map(\.id), ["m5t8bq"], "the other documents keep theirs")
+    }
+
+    func testADocumentUpdatedAfterItsRemovalIsBack() throws {
+        var catalog = try catalog([TestData.documentObject("aaaaaa", path: "notes/a.md", updatedAt: "2026-10-26T09:00:00.000Z")])
+        catalog.apply(try TestData.streamEvent(TestData.documentRemovedEvent(2, id: "aaaaaa")))
+        XCTAssertEqual(catalog.documents, [])
+
+        let restored = TestData.documentObject("aaaaaa", path: "notes/a.md", updatedAt: "2026-10-26T11:00:00.000Z")
+        catalog.apply(try TestData.streamEvent(TestData.documentEvent(3, document: restored)))
+        XCTAssertEqual(catalog.documents.map(\.id), ["aaaaaa"])
+        XCTAssertEqual(catalog.document(id: "aaaaaa"), try TestData.document("aaaaaa", path: "notes/a.md", updatedAt: "2026-10-26T11:00:00.000Z"))
+    }
+
+    func testReplayingAnUpdateThenItsRemovalFromAnEmptyCatalogLeavesItEmpty() throws {
+        var catalog = DocumentCatalog()
+        catalog.apply(try TestData.streamEvent(TestData.documentEvent(1, document: TestData.documentObject("aaaaaa", updatedAt: "2026-10-26T09:00:00.000Z"))))
+        catalog.apply(try TestData.streamEvent(TestData.annotationEvent(2, annotation: TestData.annotationObject("g7e4xr", documentId: "aaaaaa"))))
+        catalog.apply(try TestData.streamEvent(TestData.documentRemovedEvent(3, id: "aaaaaa")))
+        XCTAssertEqual(catalog.documents, [])
+        XCTAssertNil(catalog.document(id: "aaaaaa"))
+        XCTAssertEqual(catalog.annotations(of: "aaaaaa"), [])
+        XCTAssertEqual(catalog, DocumentCatalog(), "nothing is left of it")
+    }
+
     // MARK: A task's documents
 
     func testATasksDocumentsAreThoseThatNameItNewestFirst() throws {

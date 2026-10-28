@@ -10,6 +10,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
+import { isTrashedPath } from "./documents/trash.ts";
 import { type EventLog, sharedEventLog } from "./events.ts";
 import { describeError, log } from "./log.ts";
 import { STATE_DIR, readJson, writeJson } from "./store.ts";
@@ -299,11 +300,15 @@ export class RunRecorder {
     this.schedule();
   }
 
-  /** A file moved away: the old path leaves the list, and is kept in `movedFrom`. */
+  /**
+   * A file moved away: the old path leaves the list, and is kept in `movedFrom`. The new path joins the list unless it
+   * is under .trash/: a deleted file is not one the run wrote.
+   */
   moved(fromRel: string, toRel: string): void {
     this.file.files = this.file.files.filter((f) => f.path !== fromRel);
     this.movedAway.add(fromRel);
-    this.wrote(toRel, "move_file");
+    if (isTrashedPath(toRel)) this.schedule();
+    else this.wrote(toRel, "move_file");
   }
 
   update(patch: Partial<Pick<RunRecord, "title" | "model" | "role" | "sessionId" | "costUsd" | "modelCostUsd" | "agentId" | "costEstimated">>): void {

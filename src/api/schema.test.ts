@@ -9,6 +9,7 @@ import {
   AnnotationSchema,
   DocumentDetailSchema,
   DocumentListSchema,
+  DocumentRemovedSchema,
   DocumentResultSchema,
   DocumentVersionSchema,
   ErrorResponseSchema,
@@ -411,6 +412,17 @@ test("a document version is 40 lowercase hex characters, and a document id is si
     assert.deepEqual(revise({ version: bad }), { ok: false, error: "version: must be a 40-character commit id" }, bad);
   }
   assert.deepEqual(revise({ documentId: "r4f7m0" }), { ok: false, error: "documentId: must be a six-character document id" });
+});
+
+test("a document.removed event carries the document's id and nothing else the client needs", () => {
+  const fixture = JSON.parse(readFixture("events", "document-removed.json"));
+  const parsed = EventSchema.parse(fixture);
+  assert.equal(parsed.type, "document.removed");
+  assert.deepEqual(parsed.data, { id: "r4f7ma" });
+  assert.deepEqual(DocumentRemovedSchema.parse({ id: "r4f7ma" }), { id: "r4f7ma" });
+  for (const data of [{}, { id: "r4f7m0" }, { id: "R4F7MA" }, { id: "r4f7ma0" }]) {
+    assert.equal(EventSchema.safeParse({ ...fixture, data }).success, false, JSON.stringify(data));
+  }
 });
 
 test("a file a delivery registered names its document and version together, or neither", () => {

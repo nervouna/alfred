@@ -14,6 +14,7 @@ import path from "node:path";
 
 import type { HookCallbackMatcher } from "@anthropic-ai/claude-agent-sdk";
 
+import { TRASH_DIR } from "../documents/trash.ts";
 import { log } from "../log.ts";
 import { resolveInside } from "./guard.ts";
 import { SKILLS_DIR } from "./skills.ts";
@@ -21,8 +22,6 @@ import { SKILLS_DIR } from "./skills.ts";
 export const RULES_FILE = "ALFRED.md";
 /** Cap on the text of one rules file placed in the prompt or injected by the hook. */
 export const RULES_MAX_BYTES = 8 * 1024;
-/** Rules files under .trash/ were deleted and never apply. */
-const TRASH_DIR = ".trash";
 
 export const DEFAULT_RULES = `# Workspace rules
 

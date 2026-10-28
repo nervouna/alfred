@@ -65,7 +65,7 @@ import type { Annotation, DocumentRevise, IdeaGenerationAccepted, IdeaTrigger, Q
 import { InvalidAnswer, SerialQueue, outboundKind, recordInbound, recorded, workspaceRelative } from "../channels.ts";
 import type { Inbound, Intake, Outbound } from "../channels.ts";
 import type { Documents } from "../documents/register.ts";
-import { DocumentRefused } from "../documents/store.ts";
+import { DocumentRefused, TRASH_DIR } from "../documents/store.ts";
 import { type EventLog, sharedEventLog } from "../events.ts";
 import { firstLine, humanAge, localDate, localStamp } from "../files.ts";
 import { IdeaGenerationFailed, collectInputs, generateIdeas as askForIdeas, inputsLine } from "../ideas/generate.ts";
@@ -133,7 +133,7 @@ const RUN_TITLE_CHARS = 60;
 const IDEAS_RUN_TITLE = "想法";
 /** Built-in tools whose file_path a run creates or changes. */
 const FILE_WRITE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
-const WORKSPACE_SUBDIRS = ["inbox", "reports", "notes", "images", "memory", SKILLS_DIR, ".trash"];
+const WORKSPACE_SUBDIRS = ["inbox", "reports", "notes", "images", "memory", SKILLS_DIR, TRASH_DIR];
 /** Memories listed in the /memory reply; the full index is in memory/MEMORY.md. */
 const MEMORY_REPLY_LINES = 50;
 /** How often the tasks are asked which are due. */
