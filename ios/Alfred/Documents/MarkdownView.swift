@@ -45,9 +45,6 @@ private struct ChangedBar: View {
 private struct MarkdownBlockView: View {
     let block: MarkdownBlock
 
-    private static let markerWidth: CGFloat = 24
-    private static let indent: CGFloat = 20
-
     private var piece: AnchorText.Piece {
         AnchorText.Piece(block: block.id)
     }
@@ -66,45 +63,74 @@ private struct MarkdownBlockView: View {
                     .padding(10)
             }
             .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 8))
-            .modifier(Surroundings(block: block))
+            .documentBlock(block)
         case let .table(table):
             TableBlock(blockId: block.id, table: table)
         case let .heading(level):
             PassageText(piece: piece, text: block.text, style: .heading(level: level), color: color)
-                .modifier(Surroundings(block: block))
+                .documentBlock(block)
         case .paragraph:
             PassageText(piece: piece, text: block.text, color: color)
-                .modifier(Surroundings(block: block))
+                .documentBlock(block)
         }
     }
+}
 
-    /// The list indent and marker, and the quote bars, around a block.
-    private struct Surroundings: ViewModifier {
-        let block: MarkdownBlock
+private extension View {
+    /// A block of the document: its list indent, marker and quote bars, as wide as the document.
+    func documentBlock(_ block: MarkdownBlock) -> some View {
+        modifier(BlockSurroundings(block: block, colors: .document))
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
 
-        func body(content: Content) -> some View {
-            HStack(alignment: .top, spacing: 8) {
-                ForEach(0..<block.quoteDepth, id: \.self) { _ in
-                    RoundedRectangle(cornerRadius: 1.5)
-                        .fill(.secondary.opacity(0.5))
-                        .frame(width: 3)
-                }
-                if block.listDepth > 0 {
-                    HStack(alignment: .top, spacing: 4) {
-                        Text(block.marker ?? "")
-                            .frame(width: MarkdownBlockView.markerWidth, alignment: .trailing)
-                            .accessibilityHidden(block.marker == nil)
-                        content
-                    }
-                    .padding(.leading, CGFloat(block.listDepth - 1) * MarkdownBlockView.indent)
-                } else {
+/// The colours a block's surroundings are drawn in: the text and the list marker, the quoted text, and the quote bars.
+struct SurroundingsColors {
+    var text: AnyShapeStyle
+    var quotedText: AnyShapeStyle
+    var bars: AnyShapeStyle
+
+    /// The document viewer's: primary text, secondary quotes, and bars in the secondary level of the text beside them.
+    static var document: SurroundingsColors {
+        SurroundingsColors(
+            text: AnyShapeStyle(Color.primary),
+            quotedText: AnyShapeStyle(Color.secondary),
+            bars: AnyShapeStyle(HierarchicalShapeStyle.secondary.opacity(0.5))
+        )
+    }
+}
+
+/// The list indent and marker, and the quote bars, around a block. The document viewer and the chat's messages both
+/// draw them, in their own colours. The block is as wide as its content: a caller that wants it to fill the width
+/// frames it.
+struct BlockSurroundings: ViewModifier {
+    let block: MarkdownBlock
+    let colors: SurroundingsColors
+
+    private static let markerWidth: CGFloat = 24
+    private static let indent: CGFloat = 20
+
+    func body(content: Content) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            ForEach(0..<block.quoteDepth, id: \.self) { _ in
+                RoundedRectangle(cornerRadius: 1.5)
+                    .fill(colors.bars)
+                    .frame(width: 3)
+            }
+            if block.listDepth > 0 {
+                HStack(alignment: .top, spacing: 4) {
+                    Text(block.marker ?? "")
+                        .frame(width: Self.markerWidth, alignment: .trailing)
+                        .accessibilityHidden(block.marker == nil)
                     content
                 }
+                .padding(.leading, CGFloat(block.listDepth - 1) * Self.indent)
+            } else {
+                content
             }
-            .foregroundStyle(block.quoteDepth > 0 ? Color.secondary : Color.primary)
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .foregroundStyle(block.quoteDepth > 0 ? colors.quotedText : colors.text)
+        .fixedSize(horizontal: false, vertical: true)
     }
 }
 

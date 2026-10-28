@@ -160,9 +160,9 @@ final class ReplyScript: Sendable {
 }
 
 extension StubReply {
-    /// An event stream that stays open after sending `frames`.
+    /// An event stream that stays open after sending `frames` as its backlog, which the server ends with `caught-up`.
     static func stream(_ frames: [Data] = []) -> StubReply {
-        StubReply(headers: ["Content-Type": "text/event-stream"], chunks: frames, finish: false)
+        StubReply(headers: ["Content-Type": "text/event-stream"], chunks: frames + [Data("event: caught-up\ndata: {}\n\n".utf8)], finish: false)
     }
 }
 

@@ -196,14 +196,14 @@ final class PushUITests: XCTestCase {
 
     /// The identifiers of the stored messages on screen: `message.in.<id>` or `message.out.<id>`.
     private func messageIds(in app: XCUIApplication) -> [String] {
-        app.staticTexts.matching(NSPredicate(format: "identifier BEGINSWITH 'message.'"))
+        app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'message.'"))
             .allElementsBoundByIndex.map(\.identifier)
             .filter { $0.hasPrefix("message.in.") || $0.hasPrefix("message.out.") }
     }
 
     /// A stored message from Alfred that is not among `known`.
     private func newReply(_ known: [String], in app: XCUIApplication) -> XCUIElement {
-        app.staticTexts.matching(NSPredicate(format: "identifier BEGINSWITH 'message.out.' AND NOT (identifier IN %@)", known)).firstMatch
+        app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'message.out.' AND NOT (identifier IN %@)", known)).firstMatch
     }
 
     /// Polls `condition` until it holds or `timeout` passes.

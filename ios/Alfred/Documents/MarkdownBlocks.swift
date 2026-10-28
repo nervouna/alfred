@@ -37,14 +37,24 @@ struct MarkdownBlock: Identifiable, Equatable {
 /// every run says which blocks it belongs to (its `presentationIntent`: a paragraph in a list item in a list, a
 /// header, a code block, a table cell). The blocks come from grouping consecutive runs of the same innermost block.
 enum MarkdownDocument {
-    static func blocks(from markdown: String) -> [MarkdownBlock] {
+    /// `keepsLineBreaks` turns every soft break, a single newline inside a paragraph, a heading, a list item, a quote or
+    /// a table cell, into a `"\n"` instead of a space, as a chat message shows it. A document reads it as a space.
+    static func blocks(from markdown: String, keepsLineBreaks: Bool = false) -> [MarkdownBlock] {
         let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .full)
         guard let parsed = try? AttributedString(markdown: markdown, options: options) else {
             return markdown.isEmpty ? [] : [MarkdownBlock(id: 0, kind: .paragraph, text: AttributedString(markdown))]
         }
         var builder = Builder()
         for run in parsed.runs {
-            builder.add(AttributedString(parsed[run.range]), in: run.presentationIntent?.components ?? [])
+            var text = AttributedString(parsed[run.range])
+            if keepsLineBreaks, run.inlinePresentationIntent?.contains(.softBreak) == true {
+                text.characters.replaceSubrange(text.startIndex..<text.endIndex, with: "\n")
+                text.inlinePresentationIntent?.remove(.softBreak)
+                if text.inlinePresentationIntent?.isEmpty == true {
+                    text.inlinePresentationIntent = nil
+                }
+            }
+            builder.add(text, in: run.presentationIntent?.components ?? [])
         }
         return builder.finish()
     }

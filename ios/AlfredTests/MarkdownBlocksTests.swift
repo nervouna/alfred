@@ -131,6 +131,33 @@ final class MarkdownBlocksTests: XCTestCase {
         XCTAssertEqual(blocks("\n\n"), [])
     }
 
+    func testKeepingLineBreaksTurnsASoftBreakIntoANewline() {
+        func texts(_ markdown: String) -> [String] {
+            MarkdownDocument.blocks(from: markdown, keepsLineBreaks: true).map(\.text.plainText)
+        }
+        XCTAssertEqual(texts("第一行\n第二行"), ["第一行\n第二行"])
+        XCTAssertEqual(texts("- 甲\n  乙\n- 丙"), ["甲\n乙", "丙"])
+        XCTAssertEqual(texts("> 引\n> 用"), ["引\n用"])
+        XCTAssertEqual(texts("标题\n续\n==="), ["标题\n续"])
+        XCTAssertEqual(texts("*斜\n体*"), ["斜\n体"])
+        let paragraph = MarkdownDocument.blocks(from: "第一行\n第二行", keepsLineBreaks: true)[0]
+        XCTAssertFalse(paragraph.text.runs.contains { $0.inlinePresentationIntent?.contains(.softBreak) == true }, "the newline is no longer a soft break")
+    }
+
+    func testWithoutKeepingLineBreaksASoftBreakIsStillASpace() {
+        XCTAssertEqual(blocks("第一行\n第二行").map(\.text.plainText), ["第一行 第二行"])
+        XCTAssertEqual(blocks("- 甲\n  乙").map(\.text.plainText), ["甲 乙"])
+        let kept = MarkdownDocument.blocks(from: "第一行\n第二行", keepsLineBreaks: false)
+        XCTAssertEqual(kept, blocks("第一行\n第二行"))
+        XCTAssertTrue(kept[0].text.runs.contains { $0.inlinePresentationIntent?.contains(.softBreak) == true })
+    }
+
+    func testKeepingLineBreaksLeavesHardBreaksAndOtherBlocksAlone() {
+        XCTAssertEqual(MarkdownDocument.blocks(from: "一  \n二", keepsLineBreaks: true).map(\.text.plainText), ["一\n二"])
+        let markdown = "```\na\nb\n```\n\n| x | y |\n|---|---|\n| 1 | 2 |"
+        XCTAssertEqual(MarkdownDocument.blocks(from: markdown, keepsLineBreaks: true), blocks(markdown))
+    }
+
     func testBlocksCarryNoPresentationIntent() {
         for block in blocks() {
             XCTAssertNil(block.text.runs.first?.presentationIntent, "\(block.kind)")

@@ -44,7 +44,7 @@ final class ShareUITests: XCTestCase {
 
         // In the app the message is there once the stream has it, with the file.
         app.activate()
-        let message = app.staticTexts.matching(NSPredicate(format: "identifier BEGINSWITH 'message.in.' AND label == %@", marker)).firstMatch
+        let message = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'message.in.' AND label == %@", marker)).firstMatch
         XCTAssertTrue(message.waitForExistence(timeout: patience), "the shared message did not arrive\n\(app.debugDescription)")
         XCTAssertTrue(wait(timeout: patience) { fileChipIds(in: app).contains { !knownChips.contains($0) && $0.hasPrefix("file.chip.inbox/") } },
                       "the message has no file\n\(app.debugDescription)")
@@ -108,7 +108,7 @@ final class ShareUITests: XCTestCase {
 
     /// The identifiers of the stored messages on screen: `message.in.<id>` or `message.out.<id>`.
     private func messageIds(in app: XCUIApplication) -> [String] {
-        app.staticTexts.matching(NSPredicate(format: "identifier BEGINSWITH 'message.'"))
+        app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'message.'"))
             .allElementsBoundByIndex.map(\.identifier)
             .filter { $0.hasPrefix("message.in.") || $0.hasPrefix("message.out.") }
     }
