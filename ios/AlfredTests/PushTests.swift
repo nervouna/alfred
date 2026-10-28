@@ -14,6 +14,18 @@ final class FakePushSystem: PushSystem {
     }
 
     private(set) var calls: [Call] = []
+    /// What the owner has allowed, as the system answers when asked. Asking is not a call in `calls`.
+    var allowed: NotificationAuthorization = .notDetermined
+    /// How many times the app opened the system's notification settings.
+    private(set) var openedSettings = 0
+
+    func authorization() async -> NotificationAuthorization {
+        allowed
+    }
+
+    func openNotificationSettings() {
+        openedSettings += 1
+    }
 
     func requestAuthorization() {
         calls.append(.requestAuthorization)
