@@ -74,15 +74,69 @@ struct AvatarResources {
     }
 }
 
-/// One of the two players the clips take turns on. A player that is given a new item draws nothing until the item's first
-/// frame is ready, so a clip that follows another one plays on the other player, and the first one keeps its last frame
-/// on screen until then. A lane's layer is on screen only while it has a frame: it is transparent from the start and goes
-/// on screen when its layer says the first frame is ready, and it leaves the screen when the lane is cleared. A layer that
-/// is on screen without a frame would cover the picture under the video with nothing.
+/// Applies `changes` as one commit, with no implicit animation.
+private func immediately(_ changes: () -> Void) {
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    changes()
+    CATransaction.commit()
+}
+
+/// Whether a layer has really drawn its first frame. `isReadyForDisplay` can turn true before the frame has reached the
+/// screen (a layer that was hidden or transparent has nothing rendered when it becomes visible), so a layer counts as drawn
+/// only when it was seen ready at a display refresh and again at two more.
+struct AvatarDrawn {
+    /// The display refreshes a ready layer is given, after the one that first saw it ready.
+    static let refreshes = 2
+
+    /// The display refreshes in a row that saw the layer ready.
+    private var seen = 0
+
+    /// A display refresh happened, and the layer was `ready` for display or was not.
+    mutating func refresh(ready: Bool) {
+        seen = ready ? seen + 1 : 0
+    }
+
+    var hasDrawn: Bool {
+        seen > Self.refreshes
+    }
+}
+
+/// Calls its handler at each display refresh, on the main thread, until it is stopped.
+private final class RefreshLink: NSObject, @unchecked Sendable {
+    private var link: CADisplayLink?
+    private let handler: @MainActor () -> Void
+
+    @MainActor
+    init(_ handler: @escaping @MainActor () -> Void) {
+        self.handler = handler
+        super.init()
+        let link = CADisplayLink(target: self, selector: #selector(refresh))
+        link.add(to: .main, forMode: .common)
+        self.link = link
+    }
+
+    @MainActor @objc private func refresh() {
+        handler()
+    }
+
+    /// The link holds its target until it is invalidated, so every link that was made must be stopped.
+    func stop() {
+        Task { @MainActor in
+            link?.invalidate()
+            link = nil
+        }
+    }
+}
+
+/// One of the two players the clips take turns on, with its layer. A lane's layer is transparent and has no clip while it is
+/// cleared. A clip is attached at full opacity, so that the layer renders and can draw, and it is paused at its start: it
+/// plays only once the layer has really drawn (`hasDrawn`) and the cover over the lanes has come down.
 @MainActor
 final class AvatarLane {
     let player = AVPlayer()
     let layer: AVPlayerLayer
+    private var drawn = AvatarDrawn()
 
     init() {
         player.isMuted = true
@@ -94,61 +148,156 @@ final class AvatarLane {
         layer.opacity = 0
     }
 
-    /// Puts the layer on screen, once it has a frame.
-    func show() {
-        setOnScreen(true)
+    /// Whether the layer has drawn the clip's first frame, and not just reported it ready: `isReadyForDisplay` now, and
+    /// two display refreshes after the one that first saw it (`AvatarDrawn`).
+    var hasDrawn: Bool {
+        layer.isReadyForDisplay && drawn.hasDrawn
     }
 
-    /// Takes the clip away: the layer is off screen and draws nothing.
+    /// Attaches the clip at full opacity, paused at its start.
+    func prepare(_ item: AVPlayerItem) {
+        drawn = AvatarDrawn()
+        immediately { layer.opacity = 1 }
+        player.pause()
+        player.replaceCurrentItem(with: item)
+    }
+
+    func play() {
+        player.play()
+    }
+
+    /// Takes the clip away: the layer is transparent and has nothing to draw.
     func clear() {
-        setOnScreen(false)
+        immediately { layer.opacity = 0 }
         player.pause()
         player.replaceCurrentItem(with: nil)
+        drawn = AvatarDrawn()
     }
 
-    /// At once, not by the fade a layer's opacity would otherwise animate with.
-    private func setOnScreen(_ onScreen: Bool) {
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        layer.opacity = onScreen ? 1 : 0
-        CATransaction.commit()
+    /// Returns `true` once the layer has really drawn, `false` when the clip has failed or `timeout` has passed first (a
+    /// layer that is on no screen never draws). The display refreshes are counted here.
+    func draws(within timeout: Duration) async -> Bool {
+        let (refreshes, continuation) = AsyncStream<Void>.makeStream()
+        let link = RefreshLink { continuation.yield() }
+        let deadline = Task {
+            try? await Task.sleep(for: timeout)
+            continuation.finish()
+        }
+        defer {
+            link.stop()
+            deadline.cancel()
+            continuation.finish()
+        }
+        for await _ in refreshes {
+            drawn.refresh(ready: layer.isReadyForDisplay)
+            if hasDrawn { return true }
+            if player.currentItem?.status == .failed { return false }
+        }
+        return false
     }
 }
 
-/// Plays one clip at a time, muted, and keeps what is under it. The clips have no audio track, and nothing here touches
-/// the audio session, so music or a podcast from another app plays on undisturbed.
-///
-/// - **The video** is drawn by two players' layers, one over the other (`AvatarPlayerSurface` puts them in the view). A
-///   clip plays on the player that is not on screen, with its layer above the other's but off screen (transparent), so the
-///   clip before it, or the picture under the video, stays visible. Only once `isReadyForDisplay` says that the first frame
-///   is there does the layer go on screen, and in the same commit the old clip is taken away. A lane is on screen only with
-///   a frame: at no moment is there an empty layer over the picture, and at no moment neither a frame nor the picture.
-/// - **The picture under the video** is the pose the clip starts on while it plays (`still.png`, or `typing.png`), the
-///   pose it ended on when it has ended, and the still at rest. It shows only where the video does not: before the first
-///   clip, after a rest, and for a clip that cannot play. `AvatarClip.startPose` and `endPose` say which pose is which.
+/// The picture over both lanes: the pose the next clip starts on while it prepares, and the still at rest. It is opaque and
+/// the topmost layer of the avatar, so whatever a lane under it has or has not drawn does not show. It is a layer of the
+/// same view as the lanes and not a view of its own, so that it changes in the same commit as they do.
 @MainActor
-@Observable
+final class AvatarCover {
+    let layer = CALayer()
+    /// The picture it holds, which shows when it is up.
+    private(set) var picture = AvatarPicture.placeholder
+
+    /// The cover is up from the start: nothing has drawn yet.
+    init() {
+        layer.zPosition = 2
+        layer.masksToBounds = true
+        layer.contentsGravity = .resizeAspectFill
+        layer.minificationFilter = .trilinear
+        layer.backgroundColor = Self.navy.cgColor
+        hold(.placeholder)
+    }
+
+    var isUp: Bool {
+        layer.opacity == 1
+    }
+
+    /// Changes the picture, whether the cover is up or not.
+    func hold(_ picture: AvatarPicture) {
+        self.picture = picture
+        let image: UIImage
+        if case let .still(still) = picture { image = still } else { image = Self.placeholderImage }
+        immediately {
+            layer.contents = image.cgImage
+            layer.contentsScale = image.scale
+        }
+    }
+
+    func raise() {
+        immediately { layer.opacity = 1 }
+    }
+
+    func lower() {
+        immediately { layer.opacity = 0 }
+    }
+
+    private static let navy = UIColor(red: 0.08, green: 0.14, blue: 0.30, alpha: 1)
+
+    /// The navy circle with a person in it that stands in for a missing still.
+    private static let placeholderImage: UIImage = {
+        let side = AvatarMetrics.diameter
+        return UIGraphicsImageRenderer(size: CGSize(width: side, height: side)).image { context in
+            navy.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: side, height: side))
+            let configuration = UIImage.SymbolConfiguration(pointSize: side * 0.45)
+            if let person = UIImage(systemName: "person.fill", withConfiguration: configuration)?
+                .withTintColor(UIColor.white.withAlphaComponent(0.9), renderingMode: .alwaysOriginal)
+            {
+                person.draw(at: CGPoint(x: (side - person.size.width) / 2, y: (side - person.size.height) / 2))
+            }
+        }
+    }()
+}
+
+/// Plays one clip at a time, muted, and keeps an undrawn layer from ever being on top of the avatar. The clips have no
+/// audio track, and nothing here touches the audio session, so music or a podcast from another app plays on undisturbed.
+///
+/// - **The cover** is an opaque layer above both lanes (`AvatarCover`). At every change of clip it goes up with the picture
+///   of the pose the clip starts on, which matches the clip's first frame and the last frame of the clip before it, so it
+///   cannot be seen against either. A layer on the phone can report `isReadyForDisplay` before its frame has reached the
+///   screen, and a layer that is hidden or transparent may not render at all, so no layer is ever revealed to find out
+///   whether it draws.
+/// - **The video** is drawn by two players' layers (`AvatarLane`). A change goes in this order: the cover goes up; the clip
+///   that was on screen is cleared under it; the new clip is attached to the other lane at full opacity, rendering, and
+///   prerolled paused at its start; once the lane has really drawn (`AvatarLane.hasDrawn`) the cover comes down and the
+///   clip plays, in that order. A clip that never draws (a timeout, a failure) leaves the cover up and counts as a clip
+///   that cannot play, so an empty layer is never on top.
+/// - **At rest** the cover is up with the still, over lanes that have no clip.
+@MainActor
 final class AvatarPlayer {
     /// How long a clip that cannot play is stood in for: the director waits this long before it goes on.
     static let standIn = Duration.seconds(2)
-    /// How long a clip is given to draw its first frame. A layer that is not on a screen never does, and the clip then
-    /// takes the screen without having drawn (the one case in which a lane is on screen with no frame).
+    /// How long a clip is given to draw. A layer that is not on a screen never does, and the clip then counts as one that
+    /// cannot play.
     static let firstFrameTimeout = Duration.seconds(1)
 
-    /// The pose of the picture under the video.
+    /// The pose of the picture the cover holds.
     private(set) var pose = AvatarPose.standing
 
-    @ObservationIgnored private let resources: AvatarResources
-    @ObservationIgnored private let standIn: Duration
-    @ObservationIgnored private let firstFrameTimeout: Duration
-    @ObservationIgnored private var task: Task<Void, Never>?
-    @ObservationIgnored private var pictures: [AvatarClip: AvatarPicture] = [:]
-    @ObservationIgnored private var posePictures: [AvatarPose: AvatarPicture] = [:]
+    private let resources: AvatarResources
+    private let standIn: Duration
+    private let firstFrameTimeout: Duration
+    private var task: Task<Void, Never>?
+    private var pictures: [AvatarClip: AvatarPicture] = [:]
+    private var posePictures: [AvatarPose: AvatarPicture] = [:]
     /// The index in `lanes` of the player whose clip is on screen.
-    @ObservationIgnored private var onScreen = 0
+    private var onScreen = 0
 
     /// Made when the first view asks for them, so that a view built and dropped makes none.
-    @ObservationIgnored private(set) lazy var lanes = [AvatarLane(), AvatarLane()]
+    private(set) lazy var lanes = [AvatarLane(), AvatarLane()]
+    private(set) lazy var cover: AvatarCover = {
+        let cover = AvatarCover()
+        cover.hold(picture(of: .standing))
+        return cover
+    }()
 
     init(
         resources: AvatarResources = .bundled,
@@ -160,47 +309,47 @@ final class AvatarPlayer {
         self.firstFrameTimeout = firstFrameTimeout
     }
 
-    /// The two layers the video is drawn on, for `AvatarPlayerSurface`.
-    var layers: [AVPlayerLayer] {
-        lanes.map(\.layer)
+    /// The layers of the avatar, bottom to top: the two lanes and the cover, for `AvatarPlayerSurface`.
+    var layers: [CALayer] {
+        lanes.map { $0.layer as CALayer } + [cover.layer]
     }
 
-    /// The picture under the video.
-    var underlay: AvatarPicture {
-        let pose = self.pose
-        if let known = posePictures[pose] { return known }
-        let picture = resources.picture(of: pose)
-        posePictures[pose] = picture
-        return picture
-    }
-
-    /// Plays `clip` and calls `finished` when it ends. A clip whose file is missing or unreadable plays nothing: the
-    /// picture of the pose it starts on shows, and `finished` comes after the stand-in. Starting a clip ends the one in
-    /// progress without calling its `finished`.
+    /// Plays `clip` and calls `finished` when it ends. A clip whose file is missing or unreadable, or that never draws,
+    /// plays nothing: the cover shows the picture of the pose it starts on, and `finished` comes after the stand-in.
+    /// Starting a clip ends the one in progress without calling its `finished`.
     func play(_ clip: AvatarClip, finished: @escaping @MainActor () -> Void) {
         task?.cancel()
-        // Under the clip is the pose it starts on, whatever is drawn over it by now.
+        // Over whatever is drawn by now goes the pose the clip starts on, before anything else changes.
         pose = clip.startPose
+        putCoverUp(clip.startPose)
         task = Task {
-            let picture = await self.picture(for: clip)
+            let found = await self.picture(for: clip)
             guard !Task.isCancelled else { return }
-            if case let .clip(url) = picture {
-                await run(url)
-            } else {
-                clearLanes()
-                try? await Task.sleep(for: standIn)
+            var played = false
+            if case let .clip(url) = found {
+                played = await run(url)
             }
             guard !Task.isCancelled else { return }
+            if !played {
+                clearLanes()
+                try? await Task.sleep(for: standIn)
+                guard !Task.isCancelled else { return }
+            }
             pose = clip.endPose
+            cover.hold(picture(of: clip.endPose))
             finished()
         }
     }
 
-    /// Takes the video away and shows the still. A clip that ends on the resting pose and is not followed by another at
-    /// once leaves the last frame, the same pose, so the change cannot be seen.
+    /// Puts the cover up with the still and takes the video away under it. A clip that ends on the resting pose and is not
+    /// followed by another at once leaves the last frame, the same pose, so the change cannot be seen.
     func rest() {
-        clearLanes()
         pose = .standing
+        immediately {
+            cover.hold(picture(of: .standing))
+            cover.raise()
+            clearLanes()
+        }
     }
 
     /// Stops what plays, without calling its `finished`, and shows the still.
@@ -210,8 +359,23 @@ final class AvatarPlayer {
         rest()
     }
 
+    private func putCoverUp(_ pose: AvatarPose) {
+        immediately {
+            cover.hold(picture(of: pose))
+            cover.raise()
+        }
+    }
+
     private func clearLanes() {
         lanes.forEach { $0.clear() }
+    }
+
+    /// The picture of a pose, which the cover holds.
+    private func picture(of pose: AvatarPose) -> AvatarPicture {
+        if let known = posePictures[pose] { return known }
+        let picture = resources.picture(of: pose)
+        posePictures[pose] = picture
+        return picture
     }
 
     private func picture(for clip: AvatarClip) async -> AvatarPicture {
@@ -221,9 +385,10 @@ final class AvatarPlayer {
         return found
     }
 
-    /// Plays the file from the start on the player that is not on screen, puts it on screen once it has drawn its first
-    /// frame (until then whatever is under it shows), and returns when it has played to its end or has failed to.
-    private func run(_ url: URL) async {
+    /// Plays the file from the start on the lane that is not on screen: the cover is up, the clip before is cleared under
+    /// it, the new one prerolls paused, and once its lane has really drawn the cover comes down and it plays. Returns when
+    /// it has played to its end or has failed to, and `false` at once if it never drew.
+    private func run(_ url: URL) async -> Bool {
         let incoming = lanes[1 - onScreen]
         let outgoing = lanes[onScreen]
         let item = AVPlayerItem(url: url)
@@ -232,23 +397,25 @@ final class AvatarPlayer {
         let ends = center.notifications(named: AVPlayerItem.didPlayToEndTimeNotification, object: item)
         let failures = center.notifications(named: AVPlayerItem.failedToPlayToEndTimeNotification, object: item)
 
-        // The new clip's layer is above the old one but not on screen, so the old clip's last frame, or the picture under
-        // the video, shows until the new clip's first frame is ready.
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        incoming.layer.zPosition = 1
-        outgoing.layer.zPosition = 0
-        CATransaction.commit()
-        incoming.player.replaceCurrentItem(with: item)
-        incoming.player.play()
-        await firstFrame(of: incoming.layer)
-        guard !Task.isCancelled else { return }
-        // The new clip has a frame: it goes on screen, and the old one goes, in the same commit.
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        incoming.show()
-        outgoing.clear()
-        CATransaction.commit()
+        // The cover is up (`play` did that). Under it the clip before goes, and the new one is attached to the other lane
+        // at full opacity, so that its layer renders, paused at its start.
+        immediately {
+            cover.raise()
+            outgoing.clear()
+            outgoing.layer.zPosition = 0
+            incoming.layer.zPosition = 1
+            incoming.prepare(item)
+        }
+        let drew = await incoming.draws(within: firstFrameTimeout)
+        guard !Task.isCancelled else { return true }
+        guard drew else {
+            // It never drew: the cover stays up, and the lane is cleared under it.
+            incoming.clear()
+            return false
+        }
+        // The lane has really drawn: the cover comes down, and then the clip plays.
+        immediately { cover.lower() }
+        incoming.play()
         onScreen = 1 - onScreen
 
         await withTaskGroup(of: Void.self) { group in
@@ -257,44 +424,14 @@ final class AvatarPlayer {
             _ = await group.next()
             group.cancelAll()
         }
-    }
-
-    /// Returns once the layer has a frame to show, or when `firstFrameTimeout` has passed.
-    private func firstFrame(of layer: AVPlayerLayer) async {
-        let frames = AsyncStream<Void> { continuation in
-            let observation = FrameObservation(layer) { continuation.yield() }
-            continuation.onTermination = { _ in observation.stop() }
-        }
-        let timeout = firstFrameTimeout
-        await withTaskGroup(of: Void.self) { group in
-            group.addTask { for await _ in frames { return } }
-            group.addTask { try? await Task.sleep(for: timeout) }
-            _ = await group.next()
-            group.cancelAll()
-        }
+        return true
     }
 }
 
-/// Calls `ready` when a layer's `isReadyForDisplay` is true: at once if it is already.
-private final class FrameObservation: @unchecked Sendable {
-    private var observation: NSKeyValueObservation?
-
-    @MainActor
-    init(_ layer: AVPlayerLayer, ready: @escaping @Sendable () -> Void) {
-        observation = layer.observe(\.isReadyForDisplay, options: [.initial, .new]) { _, change in
-            if change.newValue == true { ready() }
-        }
-    }
-
-    func stop() {
-        observation?.invalidate()
-        observation = nil
-    }
-}
-
-/// The player's two layers, as a view: the video fills the square and the avatar's circle clips it.
+/// The player's layers, as a view: the two lanes' video and the cover over them fill the square, and the avatar's circle
+/// clips it.
 struct AvatarPlayerSurface: UIViewRepresentable {
-    let layers: [AVPlayerLayer]
+    let layers: [CALayer]
 
     func makeUIView(context: Context) -> LayerHostView {
         let view = LayerHostView()
