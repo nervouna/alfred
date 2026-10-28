@@ -19,7 +19,7 @@ Four tabs: 对话 (chat), 任务 (tasks and recent runs), 文档 (documents) and
 
 One QR code carries the server URL, the Cloudflare Access service token and the device token. Scan it (VisionKit, where there is a camera) or paste the pairing JSON with `粘贴配对信息`, the way in on the simulator and in UI tests; the whole `[pairing] {…}` line `app-dev` prints works. The app checks it with `GET /api/ping` and only then saves it. `取消配对` in the chat menu deletes it.
 
-The credentials are one keychain item (service `alfred`) in the group named by the `AlfredKeychainAccessGroup` Info.plist value, which the Share Extension reads too. The simulator's keychain refuses an unsigned app (-34018): build the app under test with the default signing, as the test commands do; `CODE_SIGNING_ALLOWED=NO` only checks that it compiles.
+The credentials are one keychain item (service `alfred`) in the group named by the `AlfredKeychainAccessGroup` Info.plist value, which the Share Extension reads too. The simulator's keychain refuses an unsigned app (`errSecMissingEntitlement`, -34018): build the app under test with the default signing, as the test commands do; `CODE_SIGNING_ALLOWED=NO` only checks that it compiles.
 
 ## Event stream, attachments, questions
 
@@ -86,7 +86,7 @@ xcodebuild test -project ios/Alfred.xcodeproj -scheme Alfred -destination 'id=<u
 TEST_RUNNER_ALFRED_PAIRING='{"version":1,…}' xcodebuild test -project ios/Alfred.xcodeproj -scheme Alfred -destination 'id=<udid>' -derivedDataPath ios/build -only-testing:AlfredUITests -collect-test-diagnostics never
 ```
 
-- **Plain `app-dev`:** `ChatUITests`, `RunsUITests`, `QuestionsUITests`, `TasksUITests`, `ChatHeaderUITests`, `PushUITests`, `ShareUITests`. Most run the model on haiku, a fraction of a cent per test; `ChatHeaderUITests` runs none.
+- **Plain `app-dev`:** `ChatUITests`, `RunsUITests`, `QuestionsUITests`, `TasksUITests`, `ChatHeaderUITests`, `PushUITests`, `ShareUITests`. Most run the model on haiku, a fraction of a cent per test; `ChatHeaderUITests` and `PushUITests` run none (`/status` is answered by Alfred itself).
 - **`--seed-documents`:** `DocumentsUITests` (no model) and `AnnotationsUITests` (its second test runs the model, a few cents).
 - **`--seed-ideas`:** `IdeasUITests` runs no model but uses up the seeded ideas, so each run needs a new `ALFRED_STATE_DIR` and `ALFRED_WORKSPACE`; its tests run in name order.
 - **`TEST_RUNNER_ALFRED_SHOTS`**, a directory, makes `ChatHeaderUITests`, `AnnotationsUITests` and `IdeasUITests` save screenshots there.

@@ -2,7 +2,7 @@
 
 An idea is a suggestion Alfred makes from memory and recent conversations, for the owner to take up as a task or turn down. Code: `src/ideas/` (the store, the only writer of `workbench/ideas.json`; commands; `generate.ts`; `schedule.ts`) and `generateIdeas` in `src/agent/handler.ts`. Command and list shapes are in `src/api/schema.ts`.
 
-- **States.** `open` until the owner accepts it (`accepted`, with the `taskId` it made), rejects it (`rejected`, with a reason and an optional note), or leaves it unanswered for 7 days (`archived`, swept hourly). Only an open idea can be answered. The store keeps every open idea and the 200 closed ones updated last. Rejections are never written to long-term memory.
+- **States.** `open` until the owner accepts it (`accepted`, with the `taskId` it made), rejects it (`rejected`, with a reason and an optional note), or leaves it unanswered for 7 days (`archived`, swept hourly). Only an open idea can be answered. The store keeps every open idea and the 200 closed ones updated last. Nothing in Alfred writes a rejection to long-term memory; only the owner telling the chat can.
 - **Accepting** makes a [task](tasks.md) with origin `idea` from the title, brief, model and budget the owner confirmed. Without a schedule it is a one-time task due 60 s later, so it starts within about a minute and a half (the task poll is 30 s). The check, the task's creation and the acceptance run with no `await` between them, so two accepts cannot make two tasks. A task the store refuses (a one-time time already past) leaves the idea open.
 
 ## Generation

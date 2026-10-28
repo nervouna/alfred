@@ -4,7 +4,7 @@
 
 ## Test
 
-- CI builds the app but does not run its unit or UI tests (`README.md`, Test). After an app change to a screen other tests pass through, run the whole `AlfredUITests` suite against `node scripts/app-dev.ts --seed-documents`.
+- CI builds the app but does not run its unit or UI tests (`README.md`, Test). After an app change to a screen other tests pass through, run the whole `AlfredUITests` suite, each group against the stack it needs (`README.md`, Test): plain `app-dev`, `--seed-documents`, and a fresh `--seed-ideas` for `IdeasUITests`.
 - If another `app-dev` holds port 8787, start yours with `--port <n>`; the pairing it prints carries the port.
 - Run UI tests on a simulator that holds only the test build (`com.example.alfred`): a second Alfred build there adds a second share extension, and `ShareUITests` picks the wrong one. The share tests can fail on a new simulator's first run; rerun before blaming a change.
 - `ChatUITests.testPairThenChat` can fail with no `/status` reply when it is the first test against a fresh `app-dev`; it passes on a rerun, so rerun before blaming a change.

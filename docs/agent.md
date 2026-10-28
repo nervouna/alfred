@@ -7,7 +7,7 @@ How the agent is set up: sessions, memory, workspace rules, skills, the sandbox 
 - **One session.** The owner has one active Claude Code session and every chat task resumes it. Its id is in `agent-state.json` under the key `owner`; the transcript is in the isolated config dir (`claude/` in the state dir). Scheduled task and revision runs use sessions of their own that are not kept.
 - **Idle rotation.** A task that starts more than `ALFRED_SESSION_IDLE_HOURS` after the previous one ended gets a new session, and Alfred says so first. That keeps an old transcript from being re-sent and re-billed after the prompt cache expired. Stopped and failed tasks count as activity.
 - **`/new` and `/resume`.** Both keep the retired session as the previous one; only one is kept. `/resume` swaps the two (a second one swaps back) and restarts the idle clock, or the next task would rotate the resumed session at once. Both are refused while a task runs, background subagents included.
-- **A session that cannot be resumed** is dropped, not kept for `/resume`; Alfred starts a new one and says so. Moving the workspace does it: the SDK keys transcripts by working directory.
+- **A session that cannot be resumed** is dropped, not kept for `/resume`; Alfred starts a new one and says so. Moving the workspace does it: transcripts are keyed by the working directory (`transcriptDirs` in `memory-scan.ts`).
 
 ## Long-term memory
 
@@ -34,8 +34,8 @@ Know-how too long for the system prompt lives in `SKILL.md` files, loaded the wa
 
 - **Baked skills** are the local plugin `alfred` in `plugin/`, changed through a PR. The `writer` role preloads `html-report`.
 - **The owner's skills** are `skills/<name>/SKILL.md` in the workspace, listed as `workspace:<name>`. They reach Claude Code through a plugin root outside the workspace that holds only a manifest and a `skills` symlink, so the agent can add skills but never hooks, MCP servers or agent types. Edits follow the `ALFRED.md` rule; subagents cannot write there.
-- **Nothing in a skill runs code.** Inline shell commands become placeholders (`disableSkillShellExecution`), hooks a skill or plugin declares never run (`disableAllHooks`; Alfred's own are SDK callbacks and keep working), and a skill's `allowed-tools` does not widen the fixed tool list.
-- **Only Alfred's skills.** The skills bundled with Claude Code are coding tools and stay off (`disableBundledSkills`). One line in the system prompt says to invoke a covering skill before starting; without it, smoke runs often wrote chart reports without `html-report`.
+- **Nothing in a skill runs code.** Inline shell commands become placeholders (`disableSkillShellExecution`), hooks a skill or plugin declares never run (`disableAllHooks`; Alfred's own are SDK callbacks and keep working), and a skill's `allowed-tools` only pre-approves tools the session already offers, because `tools` is an explicit list.
+- **Only Alfred's skills.** The skills bundled with Claude Code are coding tools and stay off (`disableBundledSkills`). One line in the system prompt tells the agent to invoke a covering skill before it starts (`html-report` before an HTML report).
 
 ## Agent sandbox
 
