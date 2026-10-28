@@ -8,6 +8,7 @@ enum AppTab: Hashable {
     case tasks
     case documents
     case ideas
+    case settings
 }
 
 /// What the app knows and does: whether it is paired, the stream of events from Alfred and the timeline they
@@ -95,6 +96,12 @@ final class AppModel {
     private(set) var rules: Rules?
     /// How many reads of the rules are out.
     private var rulesReads = 0
+    /// Alfred's settings: what the server says, with the owner's unsaved changes laid over them.
+    private(set) var settingsCatalog = SettingsCatalog()
+    /// Why the last read of the settings failed, until a read works.
+    private(set) var settingsFailure: String?
+    /// What the owner has allowed for notifications, once the system has said.
+    private(set) var notificationAuthorization: NotificationAuthorization?
     /// The ideas the owner has seen, kept on the phone.
     let seenIdeas: SeenIdeas
     /// The comments on documents that the owner wrote and has not submitted. They are kept on the phone.
@@ -135,6 +142,12 @@ final class AppModel {
     @ObservationIgnored private var ideaRefreshAfterGeneration: Task<Void, Never>?
     @ObservationIgnored private var ideaRefreshAgain = false
 
+    /// How long a settings stepper waits after a tap before it sends, so several taps make one command.
+    @ObservationIgnored private let settingsCoalescing: Duration
+    /// The wait that follows a tap on a stepper, and the calls that send what is staged, while either runs.
+    @ObservationIgnored private var settingsTimer: Task<Void, Never>?
+    @ObservationIgnored private var settingsSender: Task<Void, Never>?
+
     @ObservationIgnored private let store: any CredentialStore
     @ObservationIgnored private let session: URLSession
     @ObservationIgnored private let makeClientId: () -> String
@@ -164,12 +177,14 @@ final class AppModel {
         pushEnvironment: PushEnvironment? = nil,
         draftFile: DraftFile? = nil,
         seenIdeas: SeenIdeas = SeenIdeas(),
+        settingsCoalescing: Duration = .milliseconds(500),
         makeClientId: @escaping () -> String = { "c-" + UUID().uuidString.lowercased() },
         openStream: @escaping StreamOpener = AppModel.openEventStream
     ) {
         self.store = store
         annotationDrafts = DraftStore(file: draftFile)
         self.seenIdeas = seenIdeas
+        self.settingsCoalescing = settingsCoalescing
         self.session = session
         self.push = push
         self.pushEnvironment = pushEnvironment
@@ -263,6 +278,10 @@ final class AppModel {
         ideaFailure = nil
         ideaRefreshAgain = false
         rules = nil
+        settingsCatalog = SettingsCatalog()
+        settingsFailure = nil
+        settingsTimer?.cancel()
+        settingsTimer = nil
         seenIdeas.clear()
         composerText = ""
         taskOpenRequest = nil
@@ -301,6 +320,8 @@ final class AppModel {
         isForeground = true
         startStreamIfNeeded()
         noteIdeasSeen()
+        // The owner may have changed the permission in the system's settings.
+        Task { await refreshNotificationState() }
     }
 
     /// The scene went to the background: drop the stream. The timeline keeps its place for the next `foreground`.
@@ -375,6 +396,7 @@ final class AppModel {
         taskCatalog.apply(event)
         documentCatalog.apply(event)
         ideaCatalog.apply(event)
+        settingsCatalog.apply(event)
         // How a generation went is in the list, not in its run: read it again now that the run has ended.
         if IdeaCatalog.endsGeneration(event) { refreshIdeasAfterGeneration() }
         trackItem(of: event)
@@ -632,6 +654,93 @@ final class AppModel {
     func discuss(_ idea: AlfredIdea) {
         composerText = IdeaPresentation.discussion(of: idea, after: composerText)
         selectedTab = .chat
+    }
+
+    // MARK: Settings
+
+    /// Reads the settings and today's spend (`GET /api/settings`). The tab asks for it when it appears and on pull to
+    /// refresh. A failure is kept in `settingsFailure`.
+    func refreshSettings() async {
+        guard let client, let credentials else { return }
+        let revision = settingsCatalog.revision
+        do {
+            let detail = try await client.settings()
+            // The pairing may have changed while the request was out.
+            guard self.credentials == credentials else { return }
+            settingsCatalog.load(detail, requestedAt: revision)
+            settingsFailure = nil
+        } catch where LoadFailure.isCancellation(error) {
+            return
+        } catch {
+            guard self.credentials == credentials else { return }
+            settingsFailure = LoadFailure.message(for: error)
+        }
+    }
+
+    /// Changes settings and waits for Alfred's answer. The catalog shows the new values at once; if the call fails they go
+    /// back to what the settings said, and `actionFailure` says why. What is staged by `adjustSettings` goes with it.
+    func updateSettings(_ changes: SettingsChanges) async {
+        settingsCatalog.stage(changes)
+        await sendStagedSettings()
+    }
+
+    /// Changes settings for a control the owner taps repeatedly. The catalog shows the new values at once; they are sent
+    /// once the owner has stopped for `settingsCoalescing`, as one command with the last value of each.
+    func adjustSettings(_ changes: SettingsChanges) {
+        settingsCatalog.stage(changes)
+        settingsTimer?.cancel()
+        settingsTimer = Task {
+            try? await Task.sleep(for: settingsCoalescing)
+            guard !Task.isCancelled else { return }
+            settingsTimer = nil
+            await sendStagedSettings()
+        }
+    }
+
+    /// Sends what is staged. One call is out at a time, so the answers come back in the order the changes were made; what
+    /// is staged meanwhile follows in the same run.
+    private func sendStagedSettings() async {
+        settingsTimer?.cancel()
+        settingsTimer = nil
+        if let running = settingsSender {
+            await running.value
+            return
+        }
+        let sender = Task {
+            while let batch = settingsCatalog.beginSending() {
+                await send(batch)
+            }
+            settingsSender = nil
+        }
+        settingsSender = sender
+        await sender.value
+    }
+
+    private func send(_ batch: SettingsChanges) async {
+        guard let credentials else {
+            settingsCatalog.finishSending()
+            return
+        }
+        let revision = settingsCatalog.revision
+        do {
+            try await perform({ try await $0.updateSettings(batch) }, then: { settingsCatalog.confirm($0, requestedAt: revision) })
+            settingsCatalog.finishSending()
+        } catch {
+            // The pairing may have changed while the call was out, and the catalog with it.
+            guard self.credentials == credentials else { return }
+            settingsCatalog.finishSending()
+            actionFailure = SettingsPresentation.saveFailure(error)
+        }
+    }
+
+    /// Reads what the owner has allowed for notifications from the system.
+    func refreshNotificationState() async {
+        notificationAuthorization = await push.authorization()
+    }
+
+    /// Opens the system's settings for Alfred's notifications.
+    func openNotificationSettings() {
+        push.openNotificationSettings()
     }
 
     // MARK: Documents
