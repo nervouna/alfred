@@ -22,7 +22,7 @@ enum MarkdownChanges {
 
     /// The same for two Markdown texts.
     static func changedBlockIds(previous: String?, current: String) -> Set<Int> {
-        changedBlockIds(previous: previous.map(MarkdownDocument.blocks(from:)), current: MarkdownDocument.blocks(from: current))
+        changedBlockIds(previous: previous.map { MarkdownDocument.blocks(from: $0) }, current: MarkdownDocument.blocks(from: current))
     }
 
     /// What two blocks must share to be the same block: their kind and their text.
