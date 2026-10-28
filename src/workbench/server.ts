@@ -20,13 +20,26 @@ import { memoryList } from "../agent/memory-edit.ts";
 import { loadMemories } from "../agent/memory.ts";
 import { RULES_READ_MAX_BYTES, readRulesForOwner } from "../agent/rules.ts";
 import { DocumentDetailSchema, PushRegistrationSchema, RunSchema, StepSchema } from "../api/schema.ts";
-import type { DocumentDetail, DocumentList, Run, RunDetail, TaskDetail } from "../api/schema.ts";
+import type { DocumentDetail, DocumentList, Run, RunDetail, SettingsDetail, TaskDetail } from "../api/schema.ts";
 import { apiSocketPath } from "../api/server.ts";
 import { isTrashedPath, readDocumentFile } from "../documents/store.ts";
 import { VERSIONS_GIT_DIR, Versions } from "../documents/versions.ts";
 import { describeError, log } from "../log.ts";
 import type { AccessVerifier } from "./access.ts";
-import { allRuns, alfredStatus, listSessions, readIdeaList, readTaskList, readTranscript, runDetail, spendByDay, tailLog } from "./data.ts";
+import {
+  allRuns,
+  alfredStatus,
+  listSessions,
+  localDay,
+  readIdeaList,
+  readSettings,
+  readTaskList,
+  readTranscript,
+  runDetail,
+  spendByDay,
+  spendOnDay,
+  tailLog,
+} from "./data.ts";
 import { DeviceStore } from "./devices.ts";
 import { forwardCommand, forwardEvents, forwardUpload, jsonError, jsonReply, readBody } from "./forward.ts";
 import { html, trusted } from "./html.ts";
@@ -381,6 +394,23 @@ function ideaListReply(): Response {
 }
 
 /**
+ * GET /api/settings: the effective settings Alfred mirrors for the workbench, and what the owner has spent today, by the
+ * overview page's rule for "today" (the runs that started on the local day, subagents left out). The mirror is missing
+ * until Alfred first starts; one that cannot be read or does not fit is answered the same way, 503, and logged.
+ */
+function settingsReply(): Response {
+  let settings: SettingsDetail["settings"];
+  try {
+    settings = readSettings();
+  } catch (err) {
+    log.error(`GET /api/settings: ${describeError(err)}`);
+    return jsonError(503, "The settings are not available yet.");
+  }
+  const body: SettingsDetail = { settings, spentTodayUsd: spendOnDay(allRuns(), localDay(new Date().toISOString())) };
+  return jsonReply(200, body);
+}
+
+/**
  * GET /api/documents: the documents the store keeps in documents.json, most recently updated first, those in .trash/
  * left out. A missing file is an empty list; a file that does not fit fails the request, and is logged.
  */
@@ -568,6 +598,7 @@ async function apiRoute(req: http.IncomingMessage, url: URL, ctx: ApiContext): P
   if (p === "/api/ideas") return only("GET", () => ideaListReply());
   if (p === "/api/rules") return only("GET", () => rulesReply(ctx.workspace));
   if (p === "/api/memories") return only("GET", () => memoryListReply(ctx.workspace));
+  if (p === "/api/settings") return only("GET", () => settingsReply());
   if (p === "/api/push") return only("POST", () => pushRegistrationReply(req, device.id, ctx.devices));
   const run = RUN_PATH.exec(p)?.[1];
   if (run) return only("GET", () => runDetailReply(run));

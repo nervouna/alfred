@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { after, before, mock, test } from "node:test";
 
-import type { IdeaList, TaskList } from "../api/schema.ts";
+import type { IdeaList, Settings, TaskList } from "../api/schema.ts";
 
 // store.ts reads these at import time, so set them before loading the modules under test.
 const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "alfred-workbench-")));
@@ -22,7 +22,8 @@ const { EventLog } = await import("../events.ts");
 const { DOCUMENTS_FILE, DocumentStore } = await import("../documents/store.ts");
 const { VERSIONS_GIT_DIR, Versions } = await import("../documents/versions.ts");
 const { IDEAS_FILE } = await import("../ideas/store.ts");
-const { DocumentDetailSchema, DocumentListSchema, ErrorResponseSchema, IdeaListSchema, MemoryListSchema, RulesSchema, RunDetailSchema, RunListSchema, TaskDetailSchema, TaskListSchema } = await import("../api/schema.ts");
+const { SETTINGS_MIRROR_FILE } = await import("../settings/store.ts");
+const { DocumentDetailSchema, DocumentListSchema, ErrorResponseSchema, IdeaListSchema, MemoryListSchema, RulesSchema, RunDetailSchema, RunListSchema, SettingsDetailSchema, TaskDetailSchema, TaskListSchema } = await import("../api/schema.ts");
 const { AccessVerifier } = await import("./access.ts");
 const { DeviceStore } = await import("./devices.ts");
 const { REPORT_CSP, createHandler, inlineImages, startWorkbench } = await import("./server.ts");
@@ -850,6 +851,94 @@ test("an ideas file that does not fit answers 500 on the route, and the log name
   }
   const logged = lines.mock.calls.map((call) => String(call.arguments[0]));
   assert.ok(logged.some((line) => line.includes(IDEAS_FILE)), "the log names the file");
+});
+
+// --- /api/settings -----------------------------------------------------------
+
+const settingsMirror = JSON.parse(fs.readFileSync(new URL("../../fixtures/api/responses/settings-detail.json", import.meta.url), "utf8")).settings as Settings;
+
+/** The mirror file the settings store writes, from the fixture's settings or `settings`. */
+function writeMirror(settings: unknown = settingsMirror): void {
+  fs.mkdirSync(path.dirname(SETTINGS_MIRROR_FILE), { recursive: true });
+  fs.writeFileSync(SETTINGS_MIRROR_FILE, typeof settings === "string" ? settings : JSON.stringify(settings));
+}
+
+/** A finished run of `kind` that started `ago` ms ago and cost `costUsd`. */
+function spendRun(kind: RunRecord["kind"], costUsd: number, ago = 0): RunRecord {
+  const at = new Date(Date.now() - ago).toISOString();
+  return { ...taskRun(undefined, `${kind} run`, Date.now() - ago), kind, costUsd, startedAt: at, endedAt: at };
+}
+
+async function settingsDetail(): Promise<{ settings: Settings; spentTodayUsd: number }> {
+  const res = await fetch(`${open}/api/settings`, { headers: bearer(paired.token) });
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("content-type"), "application/json; charset=utf-8");
+  assert.equal(res.headers.get("cache-control"), "no-store");
+  return SettingsDetailSchema.parse(await res.json());
+}
+
+test("GET /api/settings gives the settings of the mirror as the store wrote them, with today's spend", async () => {
+  writeMirror();
+  const body = await settingsDetail();
+  assert.deepEqual(body.settings, settingsMirror);
+  assert.ok(body.spentTodayUsd >= 0);
+  assert.equal(body.spentTodayUsd, Math.round(body.spentTodayUsd * 1e9) / 1e9, "a plain number of USD");
+});
+
+test("GET /api/settings follows the mirror: a rewritten file is the next answer, with values beyond the write ranges", async () => {
+  writeMirror();
+  const changed = { ...settingsMirror, dailyBudgetUsd: 150, ideasAt: "06:30", overridden: ["ideasAt"] };
+  writeMirror(changed);
+  assert.deepEqual((await settingsDetail()).settings, changed);
+});
+
+test("GET /api/settings counts the runs that started today in the owner's day, by the overview page's rule: subagents leave out", async () => {
+  writeMirror();
+  const before = (await settingsDetail()).spentTodayUsd;
+  for (const run of [
+    spendRun("task", 1.25),
+    spendRun("scan", 0.5),
+    spendRun("ideas", 0.25),
+    spendRun("subagent", 7), // its cost is part of the run that started it
+    spendRun("task", 3, 36 * 3_600_000), // yesterday, or the day before
+  ]) {
+    appendRunLog(run);
+  }
+  const after = (await settingsDetail()).spentTodayUsd;
+  assert.equal(after - before, 2, "1.25 + 0.5 + 0.25");
+
+  // The overview page shows the same sum.
+  const page = await (await fetch(`${open}/`)).text();
+  assert.ok(page.includes(`今天 $${after.toFixed(2)}`) || page.includes(`今天 $${after.toFixed(3)}`), page.match(/今天[^<]*/)?.[0]);
+});
+
+test("GET /api/settings needs a device token, and refuses other methods with 405", async () => {
+  writeMirror();
+  await assertApiError(await fetch(`${open}/api/settings`), 401, "without a token");
+  await assertApiError(await fetch(`${guarded}/api/settings`), 403, "on the tunnel without Access");
+  const wrong = await fetch(`${open}/api/settings`, { method: "POST", headers: bearer(paired.token), body: "{}" });
+  assert.equal(wrong.status, 405);
+  assert.equal(wrong.headers.get("allow"), "GET");
+});
+
+test("GET /api/settings answers 503 with an error body when there is no mirror, or one that cannot be read or does not fit", async () => {
+  const lines = mock.method(console, "error", () => {});
+  try {
+    fs.rmSync(SETTINGS_MIRROR_FILE, { force: true });
+    await assertApiError(await fetch(`${open}/api/settings`, { headers: bearer(paired.token) }), 503, "missing");
+    for (const body of ["{ not json", JSON.stringify({ model: "gpt" }), JSON.stringify({ ...settingsMirror, overridden: ["nope"] }), "[]"]) {
+      writeMirror(body);
+      await assertApiError(await fetch(`${open}/api/settings`, { headers: bearer(paired.token) }), 503, body);
+    }
+    fs.rmSync(SETTINGS_MIRROR_FILE, { force: true });
+    fs.mkdirSync(SETTINGS_MIRROR_FILE); // a directory cannot be read as a file
+    await assertApiError(await fetch(`${open}/api/settings`, { headers: bearer(paired.token) }), 503, "unreadable");
+  } finally {
+    lines.mock.restore();
+    fs.rmSync(SETTINGS_MIRROR_FILE, { recursive: true, force: true });
+  }
+  const logged = lines.mock.calls.map((call) => String(call.arguments[0]));
+  assert.ok(logged.some((line) => line.includes(SETTINGS_MIRROR_FILE)), "the log names the file");
 });
 
 // --- /api/documents and /api/files at a version -----------------------------

@@ -1,7 +1,7 @@
 // The command API: the owner's commands in, Alfred's events out, over a Unix
 // socket (no TCP listener). A process on the same host posts message.send,
-// run.stop, question.answer, the task, document, idea, rules and memory commands to /commands, uploads files to /uploads (into the
-// workspace's inbox, for a message to name) and follows /events as server-sent
+// run.stop, question.answer, the task, document, idea, rules, memory and settings commands to /commands, uploads files to /uploads
+// (into the workspace's inbox, for a message to name) and follows /events as server-sent
 // events, resuming by event id. Every command is validated here by parseCommand.
 // Live events (reply text as it is written, the steps of a run) go out as frames
 // without an id and are never replayed.
@@ -38,6 +38,8 @@ import type {
   RevisionAccepted,
   Rules,
   RulesSave,
+  Settings,
+  SettingsUpdate,
   Task,
   TaskCreate,
   TaskUpdate,
@@ -115,6 +117,14 @@ export interface MemoryCommands {
   delete(command: MemoryDelete): MemoryReply<{ deleted: true }> | Promise<MemoryReply<{ deleted: true }>>;
 }
 
+/** A settings command's answer: the settings as they now are, or the status and the reason it was refused. */
+export type SettingsReply = { ok: true; settings: Settings } | { ok: false; status: 400; error: string };
+
+export interface SettingsCommands {
+  /** Changes the settings and answers with the whole of them, or refuses the change. */
+  update(command: SettingsUpdate): SettingsReply | Promise<SettingsReply>;
+}
+
 export interface ApiOptions {
   /** Path of the Unix socket. */
   socket: string;
@@ -131,6 +141,8 @@ export interface ApiOptions {
   rules?: RulesCommands;
   /** Where memory commands go, once the memory service is wired in; without it every memory command answers 503. */
   memory?: MemoryCommands;
+  /** Where settings commands go, once the settings store is wired in; without it every settings command answers 503. */
+  settings?: SettingsCommands;
   /** Interval between pings on an event stream; 30 s by default. */
   heartbeatMs?: number;
   /** Events read per page of a stream's backlog. */
@@ -270,7 +282,7 @@ function receiveUpload(req: http.IncomingMessage, file: string): Promise<number 
 
 /** Start the API; resolves to a function that closes it. */
 export async function startApi(opts: ApiOptions): Promise<() => Promise<void>> {
-  const { socket, handler, events, tasks, documents, ideas, rules, memory } = opts;
+  const { socket, handler, events, tasks, documents, ideas, rules, memory, settings } = opts;
   const heartbeatMs = opts.heartbeatMs ?? HEARTBEAT_MS;
   const pageSize = opts.pageSize ?? BACKLOG_PAGE;
 
@@ -378,8 +390,13 @@ export async function startApi(opts: ApiOptions): Promise<() => Promise<void>> {
       if (!reply.ok) return sendJson(res, reply.status, { error: reply.error });
       return sendJson(res, 200, reply.body);
     }
-    // A settings command never reaches the message path either. Until settings are wired in it is refused with 503.
-    if (command.type === "settings.update") return sendJson(res, 503, { error: "settings are not available" });
+    // A settings command never reaches the message path either. Without a settings store it is refused with 503.
+    if (command.type === "settings.update") {
+      if (!settings) return sendJson(res, 503, { error: "settings are not available" });
+      const reply = await settings.update(command);
+      if (!reply.ok) return sendJson(res, reply.status, { error: reply.error });
+      return sendJson(res, 200, { settings: reply.settings });
+    }
     // A message's files are checked before anything is submitted: one that is not in the inbox refuses the message.
     const files = command.files ?? [];
     const missing = files.findIndex((file) => !inboxFile(file.path));
