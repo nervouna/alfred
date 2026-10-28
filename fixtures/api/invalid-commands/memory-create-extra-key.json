@@ -1,0 +1,8 @@
+{
+  "type": "memory.create",
+  "name": "Metric units",
+  "description": "Use kilometres and kilograms.",
+  "kind": "preference",
+  "body": "The owner thinks in metric units.",
+  "updated": "2026-10-29"
+}

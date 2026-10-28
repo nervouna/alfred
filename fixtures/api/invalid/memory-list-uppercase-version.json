@@ -1,0 +1,14 @@
+{
+  "memories": [
+    {
+      "file": "prefer-short-answers.md",
+      "name": "回答要简短",
+      "description": "先给结论，再给理由。",
+      "kind": "preference",
+      "updated": "2026-10-28",
+      "body": "主人在手机上看回复。第一行给结论，后面用几行短句说明理由。",
+      "version": "1F3C78403C0A8C52064FBC17D0ECB2923F27D40E665CA61F52F72D8E0127E4E0"
+    }
+  ],
+  "promptCount": 1
+}

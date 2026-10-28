@@ -3,7 +3,7 @@
 // device. It opens the workspace's history and the document store as `run` does, so deliveries become documents and the
 // app's revisions and undos run. It prints the pairing to paste into the app, then every event as it happens: [event] for
 // stored ones, [live] for message deltas and steps. Ctrl-C or SIGTERM stops everything; it exits 0.
-// usage: node scripts/app-dev.ts [--port <port>] [--model <sonnet|opus|haiku>] [--repair] [--seed-documents] [--seed-ideas] [--ideas-at <HH:MM>]
+// usage: node scripts/app-dev.ts [--port <port>] [--model <sonnet|opus|haiku>] [--repair] [--seed-documents] [--seed-ideas] [--seed-memories] [--ideas-at <HH:MM>]
 //   --port            the workbench's loopback port (default 8787)
 //   --model           the model the owner's messages run on (default haiku)
 //   --repair          revoke the simulator's device and pair a new one. A device's token is shown once and
@@ -14,6 +14,9 @@
 //   --seed-ideas      before Alfred starts, write three open ideas (one once, two recurring), one rejected idea and a last
 //                     generation that added none, with a note, into ideas.json, for the app's ideas. An ideas file that
 //                     already exists is left alone.
+//   --seed-memories   before Alfred starts, write four long-term memories into the workspace's memory/, one of each kind
+//                     with its own date, one of them with a Chinese name, for the app's memory tab. A memory that is
+//                     already there is left alone.
 //   --ideas-at        start the daily generation of ideas at this local time (HH:MM). Without it the stack never generates
 //                     ideas on its own, so it spends nothing on them; the app's button (idea.generate) works either way and
 //                     calls the model (Sonnet, at most $0.20 a generation).
@@ -27,6 +30,8 @@ import path from "node:path";
 import qrcode from "qrcode-terminal";
 
 import { envSettings, isModelKey, parseIdeasAt } from "../src/agent/config.ts";
+import { memoryCommands } from "../src/agent/memory-edit.ts";
+import { MEMORY_DIR, formatMemory, syncMemoryIndex } from "../src/agent/memory.ts";
 import { rulesCommands } from "../src/agent/rules.ts";
 import { describeEvent } from "../src/api/client.ts";
 import type { LiveEvent } from "../src/api/schema.ts";
@@ -53,7 +58,8 @@ import { startWorkbench } from "../src/workbench/server.ts";
 import { createLocalHandler } from "./local-stack.ts";
 
 const REQUIRED = ["ALFRED_STATE_DIR", "ALFRED_WORKSPACE", "ALFRED_ANTHROPIC_API_KEY"];
-const USAGE = "usage: node scripts/app-dev.ts [--port <port>] [--model <sonnet|opus|haiku>] [--repair] [--seed-documents] [--seed-ideas] [--ideas-at <HH:MM>]";
+const USAGE =
+  "usage: node scripts/app-dev.ts [--port <port>] [--model <sonnet|opus|haiku>] [--repair] [--seed-documents] [--seed-ideas] [--seed-memories] [--ideas-at <HH:MM>]";
 const DEVICE_NAME = "simulator";
 /** Placeholder Access values for the pairing. Nothing checks them: the workbench runs here without the Access check. */
 const ACCESS_CLIENT_ID = "app-dev.access";
@@ -64,12 +70,13 @@ interface Options {
   repair: boolean;
   seedDocuments: boolean;
   seedIdeas: boolean;
+  seedMemories: boolean;
   /** The local time (HH:MM) of the daily generation of ideas; none means the stack never generates them on its own. */
   ideasAt?: string;
 }
 
 function parseArgs(args: string[]): Options {
-  const options: Options = { port: 8787, model: "haiku", repair: false, seedDocuments: false, seedIdeas: false };
+  const options: Options = { port: 8787, model: "haiku", repair: false, seedDocuments: false, seedIdeas: false, seedMemories: false };
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     const value = args[i + 1];
@@ -79,6 +86,8 @@ function parseArgs(args: string[]): Options {
       options.seedDocuments = true;
     } else if (arg === "--seed-ideas") {
       options.seedIdeas = true;
+    } else if (arg === "--seed-memories") {
+      options.seedMemories = true;
     } else if (arg === "--ideas-at" && value !== undefined) {
       let time: string | undefined;
       try {
@@ -327,6 +336,65 @@ function seedIdeas(): void {
   log.info(`app-dev: seeded ${added.length} ideas and a last generation that added none into ${IDEAS_FILE}`);
 }
 
+/**
+ * The seed memories: one of each kind, each with its own date, the user's under a Chinese name, so its file has the shape
+ * the app's create gives such a name (memory-<YYYYMMDD>-<4 characters>). The newest is the last.
+ */
+const SEED_MEMORIES: { file: string; name: string; description: string; type: string; updated: string; body: string }[] = [
+  {
+    file: "memory-20261026-4k2p.md",
+    name: "住在上海，做独立开发",
+    description: "主人住在上海，一个人做独立开发。",
+    type: "user",
+    updated: "2026-10-26",
+    body: "主人住在上海，一个人做独立开发，白天写代码，晚上看报告。",
+  },
+  {
+    file: "prefer-short-answers.md",
+    name: "Short answers first",
+    description: "Lead with the answer, then the reasons.",
+    type: "preference",
+    updated: "2026-10-27",
+    body: "The owner reads replies on a phone. Give the answer in the first line, then the reasons in a few short lines.",
+  },
+  {
+    file: "works-on-alfred.md",
+    name: "Alfred project",
+    description: "The owner builds Alfred, a personal agent with an iOS app.",
+    type: "project",
+    updated: "2026-10-28",
+    body: "The owner builds Alfred: a Node backend on the Claude Agent SDK and a SwiftUI app. Reports go to the app, not to chat.",
+  },
+  {
+    file: "do-not-guess-prices.md",
+    name: "Do not guess prices",
+    description: "Never quote a price that was not read from a source.",
+    type: "correction",
+    updated: "2026-10-29",
+    body: "The owner corrected a reply that quoted a VPS price from memory. Quote a price only from a page read in this task, with its link.",
+  },
+];
+
+/**
+ * Writes the seed memories into the workspace's memory/ and rebuilds the index. A memory that is already there is left
+ * alone, so a stack that is started again keeps what it has, and what the owner changed in it.
+ */
+function seedMemories(): void {
+  const dir = path.join(WORKSPACE_DIR, MEMORY_DIR);
+  fs.mkdirSync(dir, { recursive: true });
+  let written = 0;
+  for (const { file, ...memory } of SEED_MEMORIES) {
+    try {
+      fs.writeFileSync(path.join(dir, file), formatMemory(memory), { flag: "wx" });
+      written++;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    }
+  }
+  syncMemoryIndex(WORKSPACE_DIR);
+  log.info(`app-dev: seeded ${written} of ${SEED_MEMORIES.length} memories into ${dir}`);
+}
+
 async function main(options: Options): Promise<void> {
   const server = `http://127.0.0.1:${options.port}`;
   // Set here whatever the shell says, so the workbench forwards to this stack's command API and to no other.
@@ -349,6 +417,7 @@ async function main(options: Options): Promise<void> {
   try {
     if (options.seedDocuments) await seedDocuments();
     if (options.seedIdeas) seedIdeas();
+    if (options.seedMemories) seedMemories();
     // Wired as `run` wires them: the one history and document store (opened after the seed, so it finds the seeded
     // documents and imports nothing), the one task store behind the handler, which runs the tasks, the one idea store,
     // and the commands of both stores.
@@ -374,6 +443,7 @@ async function main(options: Options): Promise<void> {
         tasks: taskCommands(tasks, handler),
         ideas: ideaCommands(ideas, tasks, { generate: (trigger) => handler.generateIdeas(trigger) }),
         rules: rulesCommands({ workspace: WORKSPACE_DIR, versions: documents?.versions }),
+        memory: memoryCommands(handler, { workspace: WORKSPACE_DIR, versions: documents?.versions }),
         ...(documents ? { documents: documentCommands(handler, documents) } : {}),
       }),
     );

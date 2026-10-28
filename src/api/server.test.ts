@@ -18,6 +18,10 @@ import type {
   IdeaGenerationAccepted,
   IdeaReject,
   IdeaResult,
+  MemoryCreate,
+  MemoryDelete,
+  MemoryResult,
+  MemoryUpdate,
   Run,
   RevisionAccepted,
   Rules,
@@ -28,7 +32,7 @@ import type {
   TaskResult,
   TaskUpdate,
 } from "./schema.ts";
-import type { DocumentCommands, DocumentReply, IdeaCommands, IdeaReply, RulesCommands, RulesReply, SettingsCommands, SettingsReply, TaskCommands, TaskReply } from "./server.ts";
+import type { DocumentCommands, DocumentReply, IdeaCommands, IdeaReply, MemoryCommands, MemoryReply, RulesCommands, RulesReply, SettingsCommands, SettingsReply, TaskCommands, TaskReply } from "./server.ts";
 import type { Inbound } from "../channels.ts";
 import type { EventLog as EventLogType } from "../events.ts";
 
@@ -116,7 +120,7 @@ let fixtures = 0;
 /** An API on a socket of its own, with a stub handler and an event log of its own. */
 async function start(
   t: TestContext,
-  opts: { heartbeatMs?: number; pageSize?: number; tasks?: TaskCommands; documents?: DocumentCommands; ideas?: IdeaCommands; rules?: RulesCommands; settings?: SettingsCommands } = {},
+  opts: { heartbeatMs?: number; pageSize?: number; tasks?: TaskCommands; documents?: DocumentCommands; ideas?: IdeaCommands; rules?: RulesCommands; memory?: MemoryCommands; settings?: SettingsCommands } = {},
 ) {
   const dir = path.join(tmp, `t${fixtures++}`);
   const socket = path.join(dir, "api", "a.sock");
@@ -736,6 +740,129 @@ test("the real rules service saves with the version it read, and refuses the old
   assert.equal((await post(socket, { type: "rules.save", text: "a\0b", version: sha256("# one\n") })).status, 400);
   assert.equal((await post(socket, { type: "rules.save", text: "a".repeat(8193), version: sha256("# one\n") })).status, 400);
   assert.equal((await post(socket, { type: "rules.save", text: "# two\n", version: sha256("# one\n") })).status, 200);
+});
+
+// --- Memory commands ----------------------------------------------------------
+
+const memoryResult = JSON.parse(fixture("responses", "memory-result.json")) as MemoryResult;
+
+/** Stands in for the memory service: records the commands it is given, and refuses with `refuse` when it is set. */
+function stubMemory() {
+  const memory = {
+    calls: [] as (MemoryCreate | MemoryUpdate | MemoryDelete)[],
+    refuse: undefined as Extract<MemoryReply<unknown>, { ok: false }> | undefined,
+    async create(command: MemoryCreate): Promise<MemoryReply<MemoryResult>> {
+      memory.calls.push(command);
+      return memory.refuse ?? { ok: true, body: memoryResult };
+    },
+    async update(command: MemoryUpdate): Promise<MemoryReply<MemoryResult>> {
+      memory.calls.push(command);
+      return memory.refuse ?? { ok: true, body: memoryResult };
+    },
+    async delete(command: MemoryDelete): Promise<MemoryReply<{ deleted: true }>> {
+      memory.calls.push(command);
+      return memory.refuse ?? { ok: true, body: { deleted: true } };
+    },
+  };
+  return memory;
+}
+
+const MEMORY_COMMAND_FIXTURES = ["memory-create.json", "memory-update.json", "memory-delete.json"];
+
+test("the memory commands get 503 until memory is wired in, and never reach the handler", async (t) => {
+  const { socket, handler } = await start(t);
+  for (const name of MEMORY_COMMAND_FIXTURES) {
+    const reply = await post(socket, fixture("commands", name));
+    assert.equal(reply.status, 503, name);
+    assert.deepEqual(reply.json(), { error: "memory is not available" }, name);
+  }
+  assert.equal(handler.submitted.length, 0, "a memory command never reaches the message path");
+  assert.deepEqual(handler.stopped, []);
+  assert.deepEqual(handler.answered, []);
+});
+
+test("memory.create answers 201 with a MemoryResult, memory.update 200 with one and memory.delete 200 with { deleted: true }", async (t) => {
+  const memory = stubMemory();
+  const { socket, handler } = await start(t, { memory });
+  const created = await post(socket, fixture("commands", "memory-create.json"));
+  assert.equal(created.status, 201);
+  assert.deepEqual(created.json(), memoryResult);
+  const updated = await post(socket, fixture("commands", "memory-update.json"));
+  assert.equal(updated.status, 200);
+  assert.deepEqual(updated.json(), memoryResult);
+  const deleted = await post(socket, fixture("commands", "memory-delete.json"));
+  assert.equal(deleted.status, 200);
+  assert.deepEqual(deleted.json(), { deleted: true });
+
+  assert.deepEqual(memory.calls, MEMORY_COMMAND_FIXTURES.map(parsedCommand), "each reached the memory service as the parsed command");
+  assert.equal(handler.submitted.length, 0, "a memory command never reaches the message path");
+});
+
+test("a memory reply that is not ok answers its status and its error", async (t) => {
+  const memory = stubMemory();
+  const { socket } = await start(t, { memory });
+  for (const [status, error] of [
+    [404, "no memory prefer-short-answers.md"],
+    [409, "version: not the current version of prefer-short-answers.md"],
+    [409, "Alfred is tidying memory right now; try again shortly."],
+    [400, "name: must be at most 80 characters"],
+  ] as const) {
+    memory.refuse = { ok: false, status, error };
+    for (const name of MEMORY_COMMAND_FIXTURES) {
+      const reply = await post(socket, fixture("commands", name));
+      assert.equal(reply.status, status, name);
+      assert.deepEqual(reply.json(), { error }, name);
+    }
+  }
+});
+
+test("a memory command that does not fit the schema gets 400 and never reaches the memory service", async (t) => {
+  const memory = stubMemory();
+  const { socket } = await start(t, { memory });
+  const names = fs.readdirSync(new URL("../../fixtures/api/invalid-commands/", import.meta.url)).filter((name) => name.startsWith("memory-"));
+  assert.ok(names.length >= 6, "a case for each rule: kind, name, version, file, one line and the extra key");
+  for (const name of names) assert.equal((await post(socket, fixture("invalid-commands", name))).status, 400, name);
+  assert.deepEqual(memory.calls, []);
+});
+
+test("the real memory service creates, updates and deletes through the API, and a stale version is 409", async (t) => {
+  const { memoryCommands } = await import("../agent/memory-edit.ts");
+  const { socket } = await start(t, {
+    memory: memoryCommands({ withMemoryLock: async (job) => ({ locked: true, value: job() }) }, { workspace }),
+  });
+  const dir = path.join(workspace, "memory");
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.rmSync(path.join(workspace, ".trash"), { recursive: true, force: true });
+  t.after(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(path.join(workspace, ".trash"), { recursive: true, force: true });
+  });
+  const index = () => fs.readFileSync(path.join(dir, "MEMORY.md"), "utf8");
+
+  const created = await post(socket, { type: "memory.create", name: "Metric units", description: "Use kilometres.", kind: "preference", body: "Convert miles." });
+  assert.equal(created.status, 201);
+  const first = (created.json() as MemoryResult).memory;
+  assert.deepEqual([first.file, first.name, first.kind, first.updated], ["metric-units.md", "Metric units", "preference", localDate()]);
+  assert.match(index(), /\[Metric units\]\(metric-units\.md\) — Use kilometres\./);
+
+  const edit = { type: "memory.update", file: first.file, version: first.version, name: "Metric", description: "", kind: "user", body: "Changed." };
+  const updated = await post(socket, edit);
+  assert.equal(updated.status, 200);
+  const second = (updated.json() as MemoryResult).memory;
+  assert.notEqual(second.version, first.version);
+  assert.match(index(), /\[Metric\]\(metric-units\.md\)/);
+
+  const stale = await post(socket, edit);
+  assert.equal(stale.status, 409, "the old version");
+  assert.match((stale.json() as { error: string }).error, /^version: /);
+  assert.equal((await post(socket, { ...edit, file: "nothing.md" })).status, 404);
+
+  const deleted = await post(socket, { type: "memory.delete", file: first.file, version: second.version });
+  assert.equal(deleted.status, 200);
+  assert.deepEqual(deleted.json(), { deleted: true });
+  assert.ok(fs.existsSync(path.join(workspace, ".trash", "memory", "metric-units.md")));
+  assert.doesNotMatch(index(), /metric-units\.md/);
+  assert.equal((await post(socket, { type: "memory.delete", file: first.file, version: second.version })).status, 404);
 });
 
 // --- Idea commands ------------------------------------------------------------

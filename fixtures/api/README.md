@@ -4,12 +4,12 @@ JSON examples of the client API defined in `src/api/schema.ts`. Alfred's tests (
 
 - `events/`: events Alfred stores and emits, one file per shape the client decodes, `question.asked` and `question.answered` (answered and cancelled), `task.updated`, `document.updated`, `document.removed`, `annotation.updated`, `idea.updated` and `settings.updated` among them. Each file is a whole `Event`.
 - `live/`: live events, streamed as they happen and never stored. Each file is a whole `LiveEvent`.
-- `commands/`: one valid command per command shape, including a `message.send` with files, a `question.answer`, the three task commands, the two document commands, the three idea commands, the settings command and `rules.save`.
-- `responses/`: bodies of the app API: `UploadResult`, `RunList`, `RunDetail`, `TaskResult`, `TaskList`, `TaskDetail`, `DocumentResult`, `DocumentList`, `DocumentDetail`, `RevisionAccepted`, `IdeaResult`, `IdeaAccepted`, `IdeaGenerationAccepted`, `IdeaList`, `Rules`, `SettingsResult`, `SettingsDetail` and `ErrorResponse`. Each file is named after the schema it parses with.
+- `commands/`: one valid command per command shape, including a `message.send` with files, a `question.answer`, the three task commands, the two document commands, the three idea commands, the settings command, `rules.save` and the three memory commands.
+- `responses/`: bodies of the app API: `UploadResult`, `RunList`, `RunDetail`, `TaskResult`, `TaskList`, `TaskDetail`, `DocumentResult`, `DocumentList`, `DocumentDetail`, `RevisionAccepted`, `IdeaResult`, `IdeaAccepted`, `IdeaGenerationAccepted`, `IdeaList`, `Rules`, `MemoryList`, `MemoryResult`, `SettingsResult`, `SettingsDetail` and `ErrorResponse`. Each file is named after the schema it parses with.
 - `requests/`: bodies the client sends outside the command API: `PushRegistration`.
 - `pairing/`: the payload of the pairing QR code, a `Pairing`. Its values are made up.
 - `invalid-commands/`: commands that `parseCommand` must reject.
-- `invalid/`: off-schema files that the schema their name starts with must reject. Each is named `<schema>-<case>.json`, where `<schema>` is `pairing`, `push-registration`, `upload-result`, `run-list`, `run-detail`, `task-result`, `task-list`, `task-detail`, `document-result`, `document-list`, `document-detail`, `revision-accepted`, `idea-result`, `idea-accepted`, `idea-list`, `settings-result`, `settings-detail` or `error`.
+- `invalid/`: off-schema files that the schema their name starts with must reject. Each is named `<schema>-<case>.json`, where `<schema>` is `pairing`, `push-registration`, `upload-result`, `run-list`, `run-detail`, `task-result`, `task-list`, `task-detail`, `document-result`, `document-list`, `document-detail`, `revision-accepted`, `idea-result`, `idea-accepted`, `idea-list`, `memory-list`, `memory-result`, `settings-result`, `settings-detail` or `error`.
 - `future/`: events a newer Alfred might send: one with an unknown `type`, one known event with an extra field, and one live event with an unknown `type`.
 
 Every file is pretty-printed JSON with a 2-space indent and a trailing newline. The files in `events/`, `live/`, `commands/`, `responses/`, `requests/` and `pairing/` contain only fields the schema defines, in the schema's key order; `invalid-commands/`, `invalid/` and `future/` are off-schema on purpose.
@@ -79,6 +79,19 @@ The owner reads and edits the root `ALFRED.md`, the workspace rules, in the app.
 - The errors are `ErrorResponse`: 400 for a text over `maxBytes` of UTF-8 or with a NUL, and 409 for a version that is not the file's current one, or when `ALFRED.md` is a symlink, not a regular file or over 65 536 bytes: Alfred never replaces those. `rules.save` is answered 503 until Alfred has the rules service.
 
 The `commands/rules-save.json` fixture saves an edit of the text of `responses/rules.json`, against its version.
+
+## Memory
+
+Alfred's long-term memories are Markdown files in the workspace's `memory/`, one fact each. The owner lists, adds, edits and deletes them in the app. `GET /api/memories` is a `MemoryList`.
+
+- A `Memory` has `file` (its name in `memory/`), `name`, `description`, `kind`, `updated`, `body` and `version`. `kind` is the memory's type as a plain string: `user`, `preference`, `project` or `correction`, or, for a file written before the kinds were fixed, any other string or "". `updated` is the local date the file was last written, `YYYY-MM-DD`, or "" when it has none. `version` is the lowercase hex sha256 of the file's bytes: an update or a delete names the version the owner read.
+- A `MemoryList` has the `memories`, most recently updated first (a tie by name, a memory with no date last), in the order of the index in Alfred's system prompt, and `promptCount`: how many of the first memories fit that index under its caps (200 lines or 8 KB). Those are in Alfred's prompt and the rest are not, so `promptCount` is at most the number of memories. A file in `memory/` that is not kebab-case ASCII (the agent may write one) is listed, and cannot be updated or deleted from the app.
+- `memory.create` takes `name` (1 to 80 characters), `description` (0 to 200), `kind` (`user`, `preference`, `project` or `correction`) and `body` (at most 8192 bytes of UTF-8, no NUL). `name` and `description` are one line: trimmed, with no control character. Alfred names the file from the name: its lowercase ASCII letters and digits with hyphens between, or `memory-<YYYYMMDD>-<4 characters>` when it has none (a Chinese name, for one), and `-2`, `-3` and on when the file exists. It answers 201 with a `MemoryResult`: the `memory` as its file now holds it.
+- `memory.update` takes the `file` (a name of the form above), the `version` read, and the four fields as `memory.create` takes them. It rewrites the file, dates it today, and keeps the five known fields and no other. It answers 200 with a `MemoryResult`.
+- `memory.delete` takes the `file` and the `version` read, and moves the file to `.trash/memory/`. It answers 200 with `{ "deleted": true }`. Nothing removes a file for good.
+- The errors are `ErrorResponse`: 400 for a value the contract refuses, 404 for an unknown `file`, and 409 for a `version` that is not the file's current one (the client reads again) and when Alfred is tidying memory: a memory scan holds the memory lock for more than 3 seconds, and the client tries again shortly. The commands are answered 503 until Alfred has the memory service.
+
+`commands/memory-update.json` edits the first memory of `responses/memory-list.json` against its version, and `responses/memory-result.json` is its answer. `commands/memory-delete.json` deletes the fourth. The list's `promptCount` is smaller than its length, and its last memory has an older kind and no date.
 
 ## Settings
 
