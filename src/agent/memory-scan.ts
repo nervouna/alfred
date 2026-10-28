@@ -16,7 +16,7 @@ import { z } from "zod";
 import { localDate, uniquePath } from "../files.ts";
 import { describeError, log } from "../log.ts";
 import { STATE_DIR, readJson, writeJson } from "../store.ts";
-import { AGENT_CONFIG_DIR, AGENT_SETTINGS, MEMORY_SCAN_BUDGET_USD, MODELS, agentEnv } from "./config.ts";
+import { AGENT_CONFIG_DIR, AGENT_SETTINGS, MODELS, agentEnv, setting } from "./config.ts";
 import {
   MEMORY_DIR,
   MEMORY_FILE_RE,
@@ -446,8 +446,8 @@ export interface ScanOptions {
   stateFile?: string;
   budgetUsd?: number;
   signal?: AbortSignal;
-  /** Replaces the model call; for tests. */
-  extractFn?: (prompt: string) => Promise<{ candidates: Candidate[]; costUsd: number }>;
+  /** Replaces the model call, and is told the budget the call would have had; for tests. */
+  extractFn?: (prompt: string, budgetUsd: number) => Promise<{ candidates: Candidate[]; costUsd: number }>;
 }
 
 /**
@@ -506,11 +506,11 @@ export async function scanTranscripts(opts: ScanOptions): Promise<ScanReport> {
   const today = localDate();
   const prompt = extractionPrompt(loadMemories(opts.workspace), messages, today);
   const signal = opts.signal ?? AbortSignal.timeout(SCAN_TIMEOUT_MS);
+  // Read now, so a change of the owner's applies to the next scan.
+  const budgetUsd = opts.budgetUsd ?? setting("memoryScanBudgetUsd");
   let extracted: { candidates: Candidate[]; costUsd: number };
   try {
-    extracted = opts.extractFn
-      ? await opts.extractFn(prompt)
-      : await extract(prompt, opts.budgetUsd ?? MEMORY_SCAN_BUDGET_USD, signal);
+    extracted = opts.extractFn ? await opts.extractFn(prompt, budgetUsd) : await extract(prompt, budgetUsd, signal);
   } catch (err) {
     // Only retries of exactly the same batch count; new entries reset the count.
     const count = state.failed && sameOffsets(state.failed.ends, offsets) ? state.failed.count + 1 : 1;
@@ -556,13 +556,30 @@ export class MemoryScanScheduler {
   }
 
   start(intervalMs: number): void {
-    this.timer = setInterval(() => this.request("timer"), intervalMs);
-    this.timer.unref();
+    this.arm(intervalMs);
     this.request("startup");
   }
 
   stop(): void {
     clearInterval(this.timer);
+    this.timer = undefined;
+  }
+
+  /**
+   * Gives the timer a new interval, for a change of the setting while Alfred runs; 0 stops it. A timer that was running
+   * asks for no scan; one that was off starts as start() does, with the first scan.
+   */
+  restart(intervalMs: number): void {
+    const running = this.timer !== undefined;
+    this.stop();
+    if (!(intervalMs > 0)) return;
+    if (running) this.arm(intervalMs);
+    else this.start(intervalMs);
+  }
+
+  private arm(intervalMs: number): void {
+    this.timer = setInterval(() => this.request("timer"), intervalMs);
+    this.timer.unref();
   }
 
   request(reason: string): void {

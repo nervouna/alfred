@@ -29,6 +29,12 @@ public struct AlfredDocument: Decodable, Identifiable, Hashable, Sendable {
         createdAt = try container.decodeTimestamp(forKey: .createdAt)
         updatedAt = try container.decodeTimestamp(forKey: .updatedAt)
     }
+
+    /// Whether the document is under `.trash/` at the root of the workspace, where the agent's deletions go. Alfred
+    /// serves none of such a document (`isTrashedPath`, `src/documents/trash.ts`).
+    public var isTrashed: Bool {
+        path.hasPrefix(".trash/")
+    }
 }
 
 /// One version of a document: a commit of the workspace, and what made it.

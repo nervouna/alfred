@@ -1,0 +1,10 @@
+{
+  "memory": {
+    "file": "prefer-short-answers.md",
+    "name": "回答要简短",
+    "description": "先给结论，再给理由，最多五行。",
+    "kind": "preference",
+    "updated": "2026-10-29",
+    "body": "主人在手机上看回复。第一行给结论，后面最多四行短句说明理由。"
+  }
+}

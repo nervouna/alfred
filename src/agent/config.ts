@@ -1,7 +1,8 @@
 import path from "node:path";
 
-import type { AgentDefinition, Settings } from "@anthropic-ai/claude-agent-sdk";
+import type { AgentDefinition, Settings as ClaudeCodeSettings } from "@anthropic-ai/claude-agent-sdk";
 
+import type { Settings } from "../api/schema.ts";
 import { STATE_DIR } from "../store.ts";
 import { rulesPromptSection } from "./rules.ts";
 import type { RulesFile } from "./rules.ts";
@@ -20,87 +21,177 @@ export function isModelKey(value: string): value is ModelKey {
 }
 
 export const MAX_TURNS = 60;
-/**
- * Spend cap per query, background subagents included; the SDK stops the query
- * with error_max_budget_usd when exceeded. A query stays open while background
- * subagents run, so this is a brake on a runaway query; the daily cap below is
- * the budget.
- */
-export const MAX_BUDGET_USD = Number(process.env.ALFRED_MAX_BUDGET_USD ?? "10");
-const DAILY_BUDGET_SETTING = process.env.ALFRED_DAILY_BUDGET_USD?.trim() || "20";
-/** Spend per day in the owner's time zone; once reached, no new task or subagent starts that day. */
-export const DAILY_BUDGET_USD = Number(DAILY_BUDGET_SETTING);
 /** Background subagents that may run at once; more are queued until a slot frees. */
 export const MAX_BACKGROUND_RUNS = 2;
 
-/** Fail at startup on a daily cap that would never or always stop work. */
-export function checkDailyBudget(): void {
-  if (!Number.isFinite(DAILY_BUDGET_USD) || DAILY_BUDGET_USD <= 0) {
-    throw new Error(`ALFRED_DAILY_BUDGET_USD must be a finite number of USD > 0, got "${DAILY_BUDGET_SETTING}"`);
-  }
-}
-const IDLE_HOURS_SETTING = process.env.ALFRED_SESSION_IDLE_HOURS?.trim() || "4";
-/** A task that starts after this many idle hours gets a new session; 0 disables rotation. */
-export const SESSION_IDLE_HOURS = Number(IDLE_HOURS_SETTING);
+type Env = Record<string, string | undefined>;
 
-/** Fail at startup on an idle threshold that would silently disable or break rotation. */
-export function checkSessionIdleHours(): void {
-  if (!Number.isFinite(SESSION_IDLE_HOURS) || SESSION_IDLE_HOURS < 0) {
-    throw new Error(`ALFRED_SESSION_IDLE_HOURS must be a finite number of hours >= 0 (0 disables), got "${IDLE_HOURS_SETTING}"`);
-  }
-}
-
-const COMPACT_TOKENS_SETTING = process.env.ALFRED_COMPACT_TOKENS?.trim() || "100000";
 /**
- * Context size in tokens at which Claude Code compacts the session, in place of its own window for the model; 0 leaves
- * that window alone. Claude Code's minimum is 100000, so a smaller value compacts as if it were 100000.
+ * The settings the environment supplies: each variable, or the built-in default when it is unset or blank. They are
+ * the second layer of a setting, under the owner's override (src/settings/store.ts); `ideasAt` is null when the daily
+ * generation is off. The ranges the app may write (src/api/schema.ts) do not bind the environment.
  */
-export const COMPACT_TOKENS = Number(COMPACT_TOKENS_SETTING);
+export type EnvSettings = Omit<Settings, "model" | "overridden">;
 
-/** Fail at startup on a compaction size that is neither 0 nor a whole number of at least 20000 tokens. */
-export function checkCompactTokens(): void {
-  if (!Number.isSafeInteger(COMPACT_TOKENS) || (COMPACT_TOKENS !== 0 && COMPACT_TOKENS < 20_000)) {
-    throw new Error(`ALFRED_COMPACT_TOKENS must be a whole number of tokens, at least 20000, or 0 (Claude Code's default), got "${COMPACT_TOKENS_SETTING}"`);
-  }
+/** The variable's trimmed value; undefined when it is unset or blank. */
+function envValue(env: Env, name: string): string | undefined {
+  return env[name]?.trim() || undefined;
 }
 
-const SCAN_MINUTES_SETTING = process.env.ALFRED_MEMORY_SCAN_MINUTES?.trim() || "60";
-/** Background memory extraction runs this often; 0 turns it off (`cli.ts memory-scan` still works). */
-export const MEMORY_SCAN_MINUTES = Number(SCAN_MINUTES_SETTING);
-const SCAN_BUDGET_SETTING = process.env.ALFRED_MEMORY_SCAN_BUDGET_USD?.trim() || "0.1";
-/** Spend cap for one extraction scan. */
-export const MEMORY_SCAN_BUDGET_USD = Number(SCAN_BUDGET_SETTING);
-/** setInterval cannot wait longer than 2^31 - 1 ms (about 24.8 days). */
-const MAX_SCAN_MINUTES = Math.floor((2 ** 31 - 1) / 60_000);
-
-/** Fail at startup on memory scan settings that would silently misbehave. */
-export function checkMemoryScanSettings(): void {
-  if (!Number.isFinite(MEMORY_SCAN_MINUTES) || MEMORY_SCAN_MINUTES < 0 || MEMORY_SCAN_MINUTES > MAX_SCAN_MINUTES) {
-    throw new Error(`ALFRED_MEMORY_SCAN_MINUTES must be a number of minutes from 0 (off) to ${MAX_SCAN_MINUTES}, got "${SCAN_MINUTES_SETTING}"`);
-  }
-  if (!Number.isFinite(MEMORY_SCAN_BUDGET_USD) || MEMORY_SCAN_BUDGET_USD <= 0) {
-    throw new Error(`ALFRED_MEMORY_SCAN_BUDGET_USD must be a finite number > 0, got "${SCAN_BUDGET_SETTING}"`);
-  }
+/**
+ * Spend cap per query, background subagents included; the SDK stops the query with error_max_budget_usd when exceeded.
+ * A query stays open while background subagents run, so this is a brake on a runaway query; the daily cap is the
+ * budget.
+ */
+function parseRunBudget(env: Env): number {
+  const text = envValue(env, "ALFRED_MAX_BUDGET_USD") ?? "10";
+  const value = Number(text);
+  if (!Number.isFinite(value) || value <= 0) throw new Error(`ALFRED_MAX_BUDGET_USD must be a finite number of USD > 0, got "${text}"`);
+  return value;
 }
 
-/** Spend cap for one generation of ideas. A typical one costs $0.05 to $0.10; the 1-hour cache write makes $0.10 too tight. */
-export const IDEAS_BUDGET_USD = 0.2;
-/** Unset means 08:00; empty turns the daily generation off. */
-const IDEAS_AT_SETTING = (process.env.ALFRED_IDEAS_AT ?? "08:00").trim();
+/** Spend per day in the owner's time zone; once reached, no new task or subagent starts that day. */
+function parseDailyBudget(env: Env): number {
+  const text = envValue(env, "ALFRED_DAILY_BUDGET_USD") ?? "20";
+  const value = Number(text);
+  if (!Number.isFinite(value) || value <= 0) throw new Error(`ALFRED_DAILY_BUDGET_USD must be a finite number of USD > 0, got "${text}"`);
+  return value;
+}
 
-/** The time of day (HH:MM) a setting names; undefined for an empty one, which turns the daily generation off. Anything else throws. */
-export function parseIdeasAt(setting: string): string | undefined {
-  const value = setting.trim();
-  if (value === "") return undefined;
-  if (!/^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(value)) {
-    throw new Error(`ALFRED_IDEAS_AT must be a 24-hour time as HH:MM, or empty to turn the daily generation off, got "${setting}"`);
+/** A task that starts after this many idle hours gets a new session; 0 disables rotation. */
+function parseSessionIdleHours(env: Env): number {
+  const text = envValue(env, "ALFRED_SESSION_IDLE_HOURS") ?? "4";
+  const value = Number(text);
+  if (!Number.isFinite(value) || value < 0) {
+    throw new Error(`ALFRED_SESSION_IDLE_HOURS must be a finite number of hours >= 0 (0 disables), got "${text}"`);
   }
   return value;
 }
 
-/** When the day's ideas are generated, in the owner's time zone: HH:MM from ALFRED_IDEAS_AT, undefined when it is off. Fails on an invalid setting. */
-export function ideasAt(): string | undefined {
-  return parseIdeasAt(IDEAS_AT_SETTING);
+/**
+ * Context size in tokens at which Claude Code compacts the session, in place of its own window for the model; 0 leaves
+ * that window alone. Claude Code's minimum is 100000, so a smaller value compacts as if it were 100000.
+ */
+function parseCompactTokens(env: Env): number {
+  const text = envValue(env, "ALFRED_COMPACT_TOKENS") ?? "100000";
+  const value = Number(text);
+  if (!Number.isSafeInteger(value) || (value !== 0 && value < 20_000)) {
+    throw new Error(`ALFRED_COMPACT_TOKENS must be a whole number of tokens, at least 20000, or 0 (Claude Code's default), got "${text}"`);
+  }
+  return value;
+}
+
+/** setInterval cannot wait longer than 2^31 - 1 ms (about 24.8 days). */
+const MAX_SCAN_MINUTES = Math.floor((2 ** 31 - 1) / 60_000);
+
+/** Background memory extraction runs this often; 0 turns it off (`cli.ts memory-scan` still works). */
+function parseMemoryScanMinutes(env: Env): number {
+  const text = envValue(env, "ALFRED_MEMORY_SCAN_MINUTES") ?? "60";
+  const value = Number(text);
+  if (!Number.isFinite(value) || value < 0 || value > MAX_SCAN_MINUTES) {
+    throw new Error(`ALFRED_MEMORY_SCAN_MINUTES must be a number of minutes from 0 (off) to ${MAX_SCAN_MINUTES}, got "${text}"`);
+  }
+  return value;
+}
+
+/** Spend cap for one extraction scan. */
+function parseMemoryScanBudget(env: Env): number {
+  const text = envValue(env, "ALFRED_MEMORY_SCAN_BUDGET_USD") ?? "0.1";
+  const value = Number(text);
+  if (!Number.isFinite(value) || value <= 0) throw new Error(`ALFRED_MEMORY_SCAN_BUDGET_USD must be a finite number > 0, got "${text}"`);
+  return value;
+}
+
+/** Spend cap for one generation of ideas. A typical one costs $0.05 to $0.10; the 1-hour cache write makes $0.10 too tight. */
+export const IDEAS_BUDGET_USD = 0.2;
+
+/** The time of day (HH:MM) a setting names; undefined for an empty one, which turns the daily generation off. Anything else throws. */
+export function parseIdeasAt(text: string): string | undefined {
+  const value = text.trim();
+  if (value === "") return undefined;
+  if (!/^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(value)) {
+    throw new Error(`ALFRED_IDEAS_AT must be a 24-hour time as HH:MM, or empty to turn the daily generation off, got "${text}"`);
+  }
+  return value;
+}
+
+/** When the day's ideas are generated: unset means 08:00, empty turns the daily generation off (null). */
+function parseIdeasAtVariable(env: Env): string | null {
+  return parseIdeasAt(env.ALFRED_IDEAS_AT ?? "08:00") ?? null;
+}
+
+const ENV_PARSERS: { [K in keyof EnvSettings]: (env: Env) => EnvSettings[K] } = {
+  dailyBudgetUsd: parseDailyBudget,
+  runBudgetUsd: parseRunBudget,
+  sessionIdleHours: parseSessionIdleHours,
+  compactTokens: parseCompactTokens,
+  memoryScanMinutes: parseMemoryScanMinutes,
+  memoryScanBudgetUsd: parseMemoryScanBudget,
+  ideasAt: parseIdeasAtVariable,
+};
+
+/** The settings the environment supplies, with the built-in defaults for what it leaves unset. A malformed variable throws, naming it. */
+export function envSettings(env: Env = process.env): EnvSettings {
+  return {
+    dailyBudgetUsd: ENV_PARSERS.dailyBudgetUsd(env),
+    runBudgetUsd: ENV_PARSERS.runBudgetUsd(env),
+    sessionIdleHours: ENV_PARSERS.sessionIdleHours(env),
+    compactTokens: ENV_PARSERS.compactTokens(env),
+    memoryScanMinutes: ENV_PARSERS.memoryScanMinutes(env),
+    memoryScanBudgetUsd: ENV_PARSERS.memoryScanBudgetUsd(env),
+    ideasAt: ENV_PARSERS.ideasAt(env),
+  };
+}
+
+/** Where the settings are read from while Alfred runs: the owner's store, once the handler has been given one. */
+export interface SettingsSource {
+  get(): Settings;
+}
+
+let installed: SettingsSource | undefined;
+
+/**
+ * Makes `source` the one every reader of the settings asks (the agent handler installs the store it is given); undefined
+ * leaves none. With none installed, as in scripts and in tests that build a handler without one, a setting is what the
+ * environment and the built-in defaults say. Returns a function that removes `source` again, unless another has been
+ * installed since.
+ */
+export function installSettings(source: SettingsSource | undefined): () => void {
+  installed = source;
+  return () => {
+    if (installed === source) installed = undefined;
+  };
+}
+
+/** A setting's value now, read at the point of use: the owner's override, else the environment, else the built-in default. */
+export function setting<K extends keyof EnvSettings>(key: K): EnvSettings[K] {
+  return installed ? installed.get()[key] : ENV_PARSERS[key](process.env);
+}
+
+/** Fail at startup on a run cap that would never or always stop a query. */
+export function checkRunBudget(): void {
+  parseRunBudget(process.env);
+}
+
+/** Fail at startup on a daily cap that would never or always stop work. */
+export function checkDailyBudget(): void {
+  parseDailyBudget(process.env);
+}
+
+/** Fail at startup on an idle threshold that would silently disable or break rotation. */
+export function checkSessionIdleHours(): void {
+  parseSessionIdleHours(process.env);
+}
+
+/** Fail at startup on a compaction size that is neither 0 nor a whole number of at least 20000 tokens. */
+export function checkCompactTokens(): void {
+  parseCompactTokens(process.env);
+}
+
+/** Fail at startup on memory scan settings that would silently misbehave. */
+export function checkMemoryScanSettings(): void {
+  parseMemoryScanMinutes(process.env);
+  parseMemoryScanBudget(process.env);
 }
 
 const WORKBENCH_URL_SETTING = process.env.ALFRED_WORKBENCH_URL?.trim() ?? "";
@@ -233,6 +324,7 @@ const API_KEY_VAR = "ALFRED_ANTHROPIC_API_KEY";
 export function agentEnv(): Record<string, string> {
   const apiKey = process.env[API_KEY_VAR];
   if (!apiKey) throw new Error(`${API_KEY_VAR} must be set`);
+  const compactTokens = setting("compactTokens");
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (value === undefined || key === API_KEY_VAR || key.startsWith("CLAUDE") || key.startsWith("ANTHROPIC_")) continue;
@@ -245,7 +337,8 @@ export function agentEnv(): Record<string, string> {
     CLAUDE_AGENT_SDK_CLIENT_APP: "alfred/0.1.0",
     // The prompt cache lasts an hour, so a message after a pause reads the prompt back instead of writing it again.
     ENABLE_PROMPT_CACHING_1H: "1",
-    ...(COMPACT_TOKENS ? { CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(COMPACT_TOKENS) } : {}),
+    // Read on each call, so a change of the owner's takes effect with the next run.
+    ...(compactTokens ? { CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(compactTokens) } : {}),
   };
 }
 
@@ -262,7 +355,7 @@ export function agentEnv(): Record<string, string> {
  *   become placeholders, and hooks they declare never run. Alfred's own hooks
  *   are SDK callbacks, which disableAllHooks leaves alone.
  */
-export const AGENT_SETTINGS: Settings = {
+export const AGENT_SETTINGS: ClaudeCodeSettings = {
   autoMemoryEnabled: false,
   disableBundledSkills: true,
   enabledPlugins: { "cc-plugin-plugin-authoring@builtin": false },

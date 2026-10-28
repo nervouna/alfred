@@ -113,6 +113,20 @@ final class ChatHeaderUITests: XCTestCase {
         XCTAssertTrue(app.buttons["取消配对"].waitForExistence(timeout: patience), "no 取消配对 in the menu\n\(app.debugDescription)")
     }
 
+    /// Choosing 状态 in the menu sends `/status`, and Alfred answers it in the conversation. Nothing else is typed.
+    @MainActor
+    func testTheMenuSendsStatus() throws {
+        let app = try launchPaired()
+        let menu = element("chat.header.menu", in: app)
+        XCTAssertTrue(menu.waitForExistence(timeout: patience), "no menu button\n\(app.debugDescription)")
+        let known = messageIds(in: app)
+        menu.tap()
+        let status = app.buttons["状态"]
+        XCTAssertTrue(status.waitForExistence(timeout: patience), "no 状态 in the menu\n\(app.debugDescription)")
+        status.tap()
+        XCTAssertTrue(newReply(known, in: app).waitForExistence(timeout: patience), "no /status reply\n\(app.debugDescription)")
+    }
+
     /// With enough messages that the list scrolls, the first one, at the top of the list, is below the avatar and can be
     /// tapped: the list starts under the avatar's lower edge.
     @MainActor

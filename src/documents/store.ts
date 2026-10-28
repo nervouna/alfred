@@ -1,8 +1,9 @@
 // The owner's documents, in $STATE_DIR/workbench/documents.json, which only this store writes. A document is a file
 // Alfred delivered, known by its workspace path. It has versions (commits of the workspace, newest first), the
 // annotations the owner submitted on it and the replies of its revision runs. Every change is written at once and
-// appended to the event log as document.updated or annotation.updated with the whole object. Nothing here runs an
-// agent or makes a commit: the callers say which version a change is at.
+// appended to the event log as document.updated or annotation.updated with the whole object; a document the agent
+// deletes (moves into .trash/) is announced as document.removed. Nothing here runs an agent or makes a commit: the
+// callers say which version a change is at.
 
 import path from "node:path";
 
@@ -22,8 +23,12 @@ import { type EventLog, sharedEventLog } from "../events.ts";
 import { log } from "../log.ts";
 import { WORKBENCH_STATE_DIR, newRunId } from "../runs.ts";
 import { readJson, writeJson } from "../store.ts";
+import { TRASH_DIR, isTrashedPath } from "./trash.ts";
 
 export const DOCUMENTS_FILE = path.join(WORKBENCH_STATE_DIR, "documents.json");
+
+// A document whose path is under .trash/ is trashed (see trash.ts).
+export { TRASH_DIR, isTrashedPath };
 
 /** The most characters of a reply, as AnnotationReplySchema in src/api/schema.ts allows. */
 const MAX_REPLY_CHARS = 4000;
@@ -235,9 +240,12 @@ export class DocumentStore {
     this.allAnnotations = loaded.annotations;
   }
 
-  /** The documents, most recently updated first. */
+  /** The documents, most recently updated first. A trashed document is left out, here and in the reads below. */
   list(): Document[] {
-    return this.entries.map((entry) => entry.document).sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+    return this.entries
+      .filter((entry) => !isTrashedPath(entry.document.path))
+      .map((entry) => entry.document)
+      .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
   }
 
   get(id: string): Document | undefined {
@@ -245,7 +253,7 @@ export class DocumentStore {
   }
 
   byPath(workspacePath: string): Document | undefined {
-    return this.entries.find((entry) => entry.document.path === workspacePath)?.document;
+    return isTrashedPath(workspacePath) ? undefined : this.entries.find((entry) => entry.document.path === workspacePath)?.document;
   }
 
   /** The versions of a document, newest first; undefined when there is no such document. */
@@ -256,6 +264,7 @@ export class DocumentStore {
 
   /** The annotations of a document, newest first. */
   annotations(id: string): Annotation[] {
+    if (this.find(id) === undefined) return [];
     return this.allAnnotations.filter((annotation) => annotation.documentId === id);
   }
 
@@ -277,7 +286,8 @@ export class DocumentStore {
     const stamp = at.toISOString();
     const entry = this.entries.find((other) => other.document.path === workspacePath);
     if (!entry) {
-      const id = newRunId((candidate) => this.find(candidate) !== undefined);
+      // A trashed document keeps its id, so it counts here though find() does not serve it.
+      const id = newRunId((candidate) => this.entries.some((other) => other.document.id === candidate));
       const document = DocumentSchema.parse({
         id,
         path: workspacePath,
@@ -338,11 +348,12 @@ export class DocumentStore {
   /**
    * Moves the document at `from`, and each document under it as a directory, to the same place under `to`. Its kind
    * follows the new name. A document whose new path another document has stays where it is and is logged. Returns the
-   * documents that moved.
+   * documents that moved. It sees trashed documents too, so a restore finds them. A document moved into .trash/ is
+   * announced as document.removed, one moved out of it as document.updated, and one moved within it not at all.
    */
   move(from: string, to: string, at = this.now()): Document[] {
     const stamp = at.toISOString();
-    const moved: Document[] = [];
+    const moved: { document: Document; was: Document }[] = [];
     let next = this.entries;
     for (const entry of this.entries) {
       const current = entry.document.path;
@@ -356,12 +367,32 @@ export class DocumentStore {
       // The kind is the file's, so a move to another extension changes it.
       const document = DocumentSchema.parse({ ...entry.document, path: target, kind: documentKind(target), updatedAt: stamp });
       next = next.map((other) => (other === entry ? { ...other, document } : other));
-      moved.push(document);
+      moved.push({ document, was: entry.document });
     }
     if (moved.length === 0) return [];
     this.save(next, this.allAnnotations);
-    for (const document of moved) this.events.append("document.updated", document);
-    return moved;
+    for (const { document, was } of moved) {
+      const trashed = isTrashedPath(document.path);
+      if (trashed && !isTrashedPath(was.path)) this.events.append("document.removed", { id: document.id });
+      else if (!trashed) this.events.append("document.updated", document);
+    }
+    return moved.map(({ document }) => document);
+  }
+
+  /**
+   * Drops the trashed documents at these workspace paths, or under them as directories, with their versions and
+   * annotations: the purge of .trash/ removed their files. A document outside .trash/ is never dropped, and no event is
+   * sent, since the app dropped the documents when they were trashed.
+   */
+  forget(paths: string[]): void {
+    const gone = (entry: DocumentEntry) =>
+      isTrashedPath(entry.document.path) && paths.some((p) => entry.document.path === p || entry.document.path.startsWith(`${p}/`));
+    const dropped = new Set(this.entries.filter(gone).map((entry) => entry.document.id));
+    if (dropped.size === 0) return;
+    this.save(
+      this.entries.filter((entry) => !dropped.has(entry.document.id)),
+      this.allAnnotations.filter((annotation) => !dropped.has(annotation.documentId)),
+    );
   }
 
   /**
@@ -461,8 +492,10 @@ export class DocumentStore {
     return returned;
   }
 
+  /** The entry of a document that is not trashed. */
   private find(id: string): DocumentEntry | undefined {
-    return this.entries.find((entry) => entry.document.id === id);
+    const entry = this.entries.find((other) => other.document.id === id);
+    return entry !== undefined && !isTrashedPath(entry.document.path) ? entry : undefined;
   }
 
   /** Checks the whole file, writes it atomically, and only then keeps the new state. */

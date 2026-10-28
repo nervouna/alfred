@@ -347,26 +347,37 @@ final class AppModel {
             Task { await refreshTasks() }
             Task { await refreshIdeas() }
         case let .received(event):
-            timeline.apply(event)
-            taskCatalog.apply(event)
-            documentCatalog.apply(event)
-            ideaCatalog.apply(event)
+            apply(event)
             noteIdeasSeen()
-            // How a generation went is in the list, not in its run: read it again now that the run has ended.
-            if IdeaCatalog.endsGeneration(event) { refreshIdeasAfterGeneration() }
-            trackItem(of: event)
-            if case let .event(stored) = event, case let .messageCreated(message) = stored.payload, let clientId = message.clientId {
-                failedClientIds.remove(clientId)
-                if let sent = outgoingAttachments.removeValue(forKey: clientId) {
-                    AttachmentStaging.discard(sent)
-                }
-            }
+            forgetClosedQuestions()
+        case let .backlog(events):
+            // One pass with no suspension, so the views see the list go from what it was to the whole backlog in one
+            // update, not grow by an event at a time.
+            for event in events { apply(event) }
+            noteIdeasSeen()
             forgetClosedQuestions()
         case .disconnected:
             isConnected = false
         case let .stopped(error):
             isConnected = false
             streamFailure = error
+        }
+    }
+
+    /// What one stream event changes. The work that only needs doing once per update is left to `handle`.
+    private func apply(_ event: StreamEvent) {
+        timeline.apply(event)
+        taskCatalog.apply(event)
+        documentCatalog.apply(event)
+        ideaCatalog.apply(event)
+        // How a generation went is in the list, not in its run: read it again now that the run has ended.
+        if IdeaCatalog.endsGeneration(event) { refreshIdeasAfterGeneration() }
+        trackItem(of: event)
+        if case let .event(stored) = event, case let .messageCreated(message) = stored.payload, let clientId = message.clientId {
+            failedClientIds.remove(clientId)
+            if let sent = outgoingAttachments.removeValue(forKey: clientId) {
+                AttachmentStaging.discard(sent)
+            }
         }
     }
 

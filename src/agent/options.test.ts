@@ -166,7 +166,7 @@ test("the reply rules are for the app: HTML reports are sent as they are, a PDF 
 });
 
 test("an unattended run, such as a scheduled task's, keeps no session, has its own budget, offers no questions and may not write memory, rules or skills", async () => {
-  const { MAX_BUDGET_USD } = await import("./config.ts");
+  const { setting } = await import("./config.ts");
   prepareWorkspace();
   const options = agentOptions({ out: appOutbound(), model: "haiku", task: { budgetUsd: 0.5 } });
   assert.equal(options.persistSession, false);
@@ -178,7 +178,7 @@ test("an unattended run, such as a scheduled task's, keeps no session, has its o
 
   const chat = agentOptions({ out: appOutbound(), model: "haiku" });
   assert.equal(chat.persistSession, undefined);
-  assert.equal(chat.maxBudgetUsd, MAX_BUDGET_USD);
+  assert.equal(chat.maxBudgetUsd, setting("runBudgetUsd"));
 });
 
 /** The tools of Alfred's in-process MCP server in these options, by name. */

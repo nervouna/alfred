@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
 
-import { systemPrompt } from "./config.ts";
+import { envSettings, installSettings, systemPrompt } from "./config.ts";
 import {
   MemoryScanScheduler,
   applyCandidates,
@@ -15,7 +15,7 @@ import {
   transcriptDirs,
 } from "./memory-scan.ts";
 import type { Candidate } from "./memory-scan.ts";
-import { MemoryLock, capIndex, formatMemory, loadMemories, looksLikeSecret, parseMemory, syncMemoryIndex } from "./memory.ts";
+import { MemoryLock, capIndex, formatMemory, loadMemories, looksLikeSecret, parseMemory, syncMemoryIndex, writeFileAtomic } from "./memory.ts";
 
 const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "alfred-memory-")));
 after(() => fs.rmSync(tmp, { recursive: true, force: true }));
@@ -251,6 +251,36 @@ test("scan extracts once per new entry, merges into memory and skips when nothin
   assert.equal(offset(), fs.statSync(transcript).size);
 });
 
+test("a scan's spend cap is read when the scan starts: the environment's, the owner's override once there is one, and a scan's own", async () => {
+  const ws = workspace();
+  const configDir = path.join(tmp, `config-${seq}`);
+  const projectDir = path.join(configDir, "projects", ws.replace(/[^a-zA-Z0-9]/g, "-"));
+  fs.mkdirSync(projectDir, { recursive: true });
+  const transcript = path.join(projectDir, "s1.jsonl");
+  const stateFile = path.join(tmp, `scan-budget-state-${seq}.json`);
+  const budgets: number[] = [];
+  const scan = async (budgetUsd?: number) => {
+    fs.appendFileSync(transcript, `${taskLines(`任务 ${budgets.length}`, "好。", `m${budgets.length}`).join("\n")}\n`);
+    await scanTranscripts({ workspace: ws, configDir, stateFile, budgetUsd, extractFn: async (_prompt, budget) => (budgets.push(budget), { candidates: [], costUsd: 0 }) });
+  };
+  try {
+    delete process.env.ALFRED_MEMORY_SCAN_BUDGET_USD;
+    await scan();
+    process.env.ALFRED_MEMORY_SCAN_BUDGET_USD = "0.2";
+    await scan();
+    let owners = 0.7;
+    installSettings({ get: () => ({ ...envSettings({}), model: "sonnet", overridden: ["memoryScanBudgetUsd"], memoryScanBudgetUsd: owners }) });
+    await scan();
+    owners = 0.3;
+    await scan();
+    await scan(0.05);
+  } finally {
+    installSettings(undefined);
+    delete process.env.ALFRED_MEMORY_SCAN_BUDGET_USD;
+  }
+  assert.deepEqual(budgets, [0.1, 0.2, 0.7, 0.3, 0.05]);
+});
+
 test("transcript reader streams in bounded chunks, skips oversized lines and stops at the character budget", () => {
   const file = path.join(tmp, "stream.jsonl");
   const huge = JSON.stringify({ type: "user", toolUseResult: {}, message: { role: "user", content: [{ type: "tool_result", content: "x".repeat(5000) }] } });
@@ -398,4 +428,95 @@ test("memory lock: a waiting task gives up when it is stopped", async () => {
   scan.release();
   assert.equal(await task.acquire("task", 1_000), true);
   task.release();
+});
+
+/** A scheduler whose scans do nothing and are counted, with the reason each was asked for. */
+function countingScheduler(name: string) {
+  const reasons: string[] = [];
+  const scheduler = new MemoryScanScheduler({
+    lock: new MemoryLock(path.join(tmp, `${name}.lock`)),
+    isBusy: () => false,
+    scan: async () => ({ files: 0, messages: 0, applied: [], costUsd: 0, skipped: "test" }),
+  });
+  const request = scheduler.request.bind(scheduler);
+  scheduler.request = (reason: string) => {
+    reasons.push(reason);
+    request(reason);
+  };
+  return { scheduler, reasons };
+}
+const settle = () => new Promise((resolve) => setImmediate(resolve));
+const MINUTE_MS = 60_000;
+
+test("restart gives the scan timer a new interval without asking for a scan at once, and the old interval no longer fires", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const { scheduler, reasons } = countingScheduler("restart");
+  scheduler.start(60 * MINUTE_MS);
+  assert.deepEqual(reasons, ["startup"], "start asks for the first scan");
+  t.mock.timers.tick(60 * MINUTE_MS);
+  await settle();
+  assert.deepEqual(reasons, ["startup", "timer"], "the first interval fired");
+
+  scheduler.restart(10 * MINUTE_MS);
+  assert.deepEqual(reasons, ["startup", "timer"], "a restart of a running timer asks for no scan");
+  t.mock.timers.tick(10 * MINUTE_MS);
+  await settle();
+  assert.equal(reasons.filter((r) => r === "timer").length, 2, "the new interval fires");
+  t.mock.timers.tick(50 * MINUTE_MS);
+  await settle();
+  assert.equal(reasons.filter((r) => r === "timer").length, 7, "five more in the span of one old interval, and the old interval itself never");
+  scheduler.stop();
+});
+
+test("restart with 0 stops the scan timer, and a restart after that starts it again with the usual first scan", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const { scheduler, reasons } = countingScheduler("restart-zero");
+  scheduler.start(5 * MINUTE_MS);
+  scheduler.restart(0);
+  t.mock.timers.tick(60 * MINUTE_MS);
+  await settle();
+  assert.deepEqual(reasons, ["startup"], "off means no timer scan");
+
+  scheduler.restart(0);
+  assert.deepEqual(reasons, ["startup"], "off again changes nothing");
+  scheduler.restart(2 * MINUTE_MS);
+  assert.deepEqual(reasons, ["startup", "startup"], "going from off to on asks for the first scan");
+  t.mock.timers.tick(2 * MINUTE_MS);
+  await settle();
+  assert.deepEqual(reasons, ["startup", "startup", "timer"]);
+  scheduler.stop();
+  t.mock.timers.tick(60 * MINUTE_MS);
+  await settle();
+  assert.equal(reasons.filter((r) => r === "timer").length, 1, "stop ends it");
+  scheduler.restart(2 * MINUTE_MS);
+  assert.equal(reasons.filter((r) => r === "startup").length, 3, "a stopped timer restarts with a first scan");
+  scheduler.stop();
+});
+
+test("a scheduler that was never started stays off when restarted with 0, and starts with a first scan otherwise", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const { scheduler, reasons } = countingScheduler("restart-cold");
+  scheduler.restart(0);
+  t.mock.timers.tick(10 * MINUTE_MS);
+  await settle();
+  assert.deepEqual(reasons, []);
+  scheduler.restart(MINUTE_MS);
+  assert.deepEqual(reasons, ["startup"]);
+  scheduler.stop();
+});
+
+test("writeFileAtomic replaces the file whole, and a failed write leaves no temporary file", () => {
+  const dir = path.join(tmp, "atomic");
+  fs.mkdirSync(dir);
+  const file = path.join(dir, "a.md");
+  writeFileAtomic(file, "one");
+  writeFileAtomic(file, "two");
+  assert.deepEqual(fs.readdirSync(dir), ["a.md"]);
+  assert.equal(fs.readFileSync(file, "utf8"), "two");
+
+  // A rename onto a directory fails after the temporary file was written.
+  const blocked = path.join(dir, "blocked");
+  fs.mkdirSync(path.join(blocked, "inside"), { recursive: true });
+  assert.throws(() => writeFileAtomic(blocked, "x"));
+  assert.deepEqual(fs.readdirSync(dir).sort(), ["a.md", "blocked"]);
 });

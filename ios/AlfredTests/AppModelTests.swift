@@ -355,6 +355,96 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(streams.opened.count, 2)
     }
 
+    func testABacklogLeavesTheSameStateAsTheEventsOneByOne() async throws {
+        let at = "2026-10-26T08:00:00.000Z"
+        var echo = TestData.messageEvent(1, id: "m1", direction: "in", text: "你好", at: at)
+        echo["data"] = (echo["data"] as? [String: Any] ?? [:]).merging(["clientId": "c-test-1"]) { $1 }
+        let asked: [String: Any] = [
+            "id": "q-1", "runId": "cccccc",
+            "questions": [[
+                "question": "报告用哪种格式？", "header": "问题", "multiSelect": false,
+                "options": [["label": "短表格", "description": "选 短表格"], ["label": "长文章", "description": "选 长文章"]],
+            ]],
+        ]
+        let events = try [
+            echo,
+            TestData.messageEvent(2, id: "m2", direction: "out", text: "先问一下", at: at),
+            ["id": 3, "at": at, "type": "question.asked", "data": asked],
+            TestData.runEvent(4, run: TestData.runObject("cccccc", status: "running", startedAt: at), at: at),
+            TestData.taskEvent(5, task: TestData.taskObject("t1")),
+            TestData.messageEvent(6, id: "m3", direction: "out", text: "好了", at: at),
+            TestData.runEvent(7, run: TestData.runObject("cccccc", status: "done", startedAt: at, endedAt: at), at: at),
+        ].map(TestData.streamEvent)
+
+        /// Delivers the events to a model that sent "你好" and is waiting for the echo, then reads what it holds.
+        func outcome(asBacklog: Bool) async throws -> Outcome {
+            let streams = ScriptedStreams()
+            let server = StubServer { $0.url?.path == "/api/commands" ? StubReply(status: 202) : StubReply(status: 204) }
+            let model = AppModel(
+                store: InMemoryCredentialStore(try server.credentials()),
+                session: server.session,
+                makeClientId: { "c-test-1" },
+                openStream: streams.open
+            )
+            addTeardownBlock { @MainActor in
+                model.background()
+                withExtendedLifetime(server) {}
+            }
+            model.foreground()
+            await eventually { streams.opened.count == 1 }
+            let stream = try XCTUnwrap(streams.opened.first)
+            stream.continuation.yield(.connected)
+            await eventually { model.isConnected }
+            await model.send("你好")
+            XCTAssertEqual(model.timeline.pending.map(\.clientId), ["c-test-1"])
+
+            if asBacklog {
+                stream.continuation.yield(.backlog(events))
+                await eventually { model.timeline.lastEventId > 0 }
+                XCTAssertEqual(model.timeline.lastEventId, 7, "the whole backlog is there the first time the model changes")
+            } else {
+                for event in events { stream.continuation.yield(.received(event)) }
+                await eventually { model.timeline.lastEventId == 7 }
+            }
+            model.openChat(for: NotificationTarget(eventId: 3, runId: nil))
+            return Outcome(
+                timeline: model.timeline,
+                tasks: model.taskCatalog,
+                failed: model.failedClientIds,
+                questionRow: model.revealRequest?.itemId
+            )
+        }
+
+        let oneByOne = try await outcome(asBacklog: false)
+        let backlog = try await outcome(asBacklog: true)
+
+        XCTAssertEqual(backlog, oneByOne)
+        XCTAssertEqual(backlog.timeline.messages.map(\.text), ["你好", "先问一下", "好了"])
+        XCTAssertTrue(backlog.timeline.pending.isEmpty, "the echo replaced the pending message")
+        XCTAssertEqual(backlog.timeline.questions.map(\.state), [.ended], "the run ended with the question open")
+        XCTAssertEqual(backlog.tasks.task(id: "t1")?.title, "每日简报")
+        XCTAssertEqual(backlog.questionRow, "q-q-1", "the question's event is tracked for a notification tap")
+    }
+
+    func testAnEmptyBacklogChangesNothing() async throws {
+        let streams = ScriptedStreams()
+        let server = StubServer { _ in StubReply(status: 204) }
+        let model = AppModel(store: InMemoryCredentialStore(try server.credentials()), session: server.session, openStream: streams.open)
+        addTeardownBlock { @MainActor in
+            model.background()
+            withExtendedLifetime(server) {}
+        }
+        model.foreground()
+        await eventually { streams.opened.count == 1 }
+        let stream = try XCTUnwrap(streams.opened.first)
+        stream.continuation.yield(.connected)
+        stream.continuation.yield(.backlog([]))
+        stream.continuation.yield(.received(try storedMessage(id: 1, text: "第一条")))
+        await eventually { model.timeline.lastEventId == 1 }
+        XCTAssertTrue(model.isConnected)
+        XCTAssertEqual(model.timeline.messages.map(\.text), ["第一条"])
+    }
+
     func testARefusedSendShowsTheAccessError() async throws {
         let (model, _, _) = try makeModel(credentials: true, replies: ["/api/commands": [StubReply(status: 401)]])
         await model.send("你好")
@@ -546,6 +636,15 @@ final class AppModelTests: XCTestCase {
         let value = Bundle.main.object(forInfoDictionaryKey: "AlfredKeychainAccessGroup")
         XCTAssertTrue(value is String, "Info.plist has no AlfredKeychainAccessGroup string")
     }
+}
+
+/// What a model holds once the events of a test are in.
+@MainActor
+private struct Outcome: Equatable {
+    let timeline: Timeline
+    let tasks: TaskCatalog
+    let failed: Set<String>
+    let questionRow: String?
 }
 
 /// Streams that a test opens by hand. Each one stays open until the test finishes it, so the task reading it is held

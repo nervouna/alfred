@@ -1,0 +1,50 @@
+{
+  "memories": [
+    {
+      "file": "prefer-short-answers.md",
+      "name": "回答要简短",
+      "description": "先给结论，再给理由。",
+      "kind": "preference",
+      "updated": "2026-10-28",
+      "body": "主人在手机上看回复。第一行给结论，后面用几行短句说明理由。",
+      "version": "1f3c78403c0a8c52064fbc17d0ecb2923f27d40e665ca61f52f72d8e0127e4e0"
+    },
+    {
+      "file": "works-on-alfred.md",
+      "name": "Alfred project",
+      "description": "The owner builds Alfred, a personal agent with an iOS app.",
+      "kind": "project",
+      "updated": "2026-10-27",
+      "body": "The owner builds Alfred: a Node backend on the Claude Agent SDK and a SwiftUI app.",
+      "version": "de14def6a55f925c51c9f17e1223b9037e2a976ed2bffc96da05ceb6cf5c3d29"
+    },
+    {
+      "file": "memory-20261025-4k2p.md",
+      "name": "住在上海",
+      "description": "主人住在上海。",
+      "kind": "user",
+      "updated": "2026-10-25",
+      "body": "主人住在上海，一个人做独立开发。",
+      "version": "7f0ca38ab3c4798eb31a0f17eca850eaf274314333b97d5f64885e8df0deaa2d"
+    },
+    {
+      "file": "do-not-guess-prices.md",
+      "name": "Do not guess prices",
+      "description": "Never quote a price that was not read from a source.",
+      "kind": "correction",
+      "updated": "2026-10-20",
+      "body": "The owner corrected a reply that quoted a VPS price from memory. Quote a price only from a page read in this task, with its link.",
+      "version": "0a9a360d1d71306b5314bb10cb7980c01d378e824def62f6fc79c9b3c8fdb2e9"
+    },
+    {
+      "file": "standup-notes.md",
+      "name": "Standup notes",
+      "description": "",
+      "kind": "feedback",
+      "updated": "",
+      "body": "Standup is at 10:00 on weekdays.",
+      "version": "3c8863f75643eca471aaef6e68e396108ec9beee20d3ea72a021ad0017799195"
+    }
+  ],
+  "promptCount": 3
+}
