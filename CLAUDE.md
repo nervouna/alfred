@@ -35,3 +35,4 @@ Developed with the `orchestrate` skill: issues are specs, implementers deliver o
 - Commit messages and PR titles are plain imperative sentences ("Add …", "Keep …"), no type prefixes, no attribution lines.
 - The repo is public. Never describe an exploit, a sandbox escape, or host details (server names, co-hosted services, secrets) in commits, PRs or issues.
 - Deployment (`deploy/`, the `deploy` skill in `.claude/skills/`) is the orchestrator's job, not an implementer's.
+- After a PR is merged, remove its implementer's worktree and local branch (`git worktree remove --force <path>`, then `git branch -D <branch>`: git never counts a squash merge as merged). Touch only the ones of PRs you dispatched; other sessions' worktrees under `.claude/worktrees/` may be in use.
