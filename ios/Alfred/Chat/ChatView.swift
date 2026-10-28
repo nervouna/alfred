@@ -51,13 +51,23 @@ struct ChatView: View {
 }
 
 /// The conversation: stored messages in timeline order, then the owner's pending ones, then what Alfred is
-/// writing. The list keeps to the bottom as content arrives.
+/// writing. The list keeps to the bottom as content arrives, as long as it follows: it stops following when the owner
+/// scrolls up, and a button above the composer takes it back to the newest message.
 private struct MessageList: View {
     let model: AppModel
     /// Space above the first message, for the avatar that hangs over the top of the list.
     let topMargin: CGFloat
     /// The rows at least half on screen, by id.
     @State private var visibleIds: Set<String> = []
+    /// Whether new content takes the list to its end, and the button is hidden. True at first. Only the owner's own
+    /// scrolling, the button, the owner sending and a reveal change it: content that arrives, or a container that changes
+    /// size (the keyboard, the composer), moves the list's end away from the screen without the owner having left it.
+    @State private var follows = true
+    /// Whether the list is near its end now, from its geometry. It is kept up to date, and copied into `follows` only at the
+    /// moments listed there.
+    @State private var isNearEnd = true
+    /// Whether the owner's finger is on the list, or the list coasts from a flick.
+    @State private var isOwnerScrolling = false
     private let bottom = "bottom"
 
     /// How often, and how many times, a tapped notification's row is scrolled to until it is seen.
@@ -95,13 +105,56 @@ private struct MessageList: View {
             .scrollEdgeEffectStyle(.soft, for: .top)
             .scrollDismissesKeyboard(.interactively)
             .onScrollTargetVisibilityChange(idType: String.self, threshold: 0.5) { visibleIds = Set($0) }
-            .onChange(of: contentSignature) {
+            .onScrollGeometryChange(for: Bool.self, of: ListEnd.isNear) { _, isNear in
+                isNearEnd = isNear
+                if isOwnerScrolling { follows = isNear }
+            }
+            .onScrollPhaseChange { old, new, context in
+                isOwnerScrolling = new.isOwners
+                // The owner's scroll starts or ends (a drag, a flick's coasting): where the list is says whether it follows.
+                // A scroll the app makes, the button's or a reveal's, is not one.
+                if new.isOwners || old.isOwners { follows = ListEnd.isNear(context.geometry) }
+            }
+            .onScrollGeometryChange(for: [CGFloat].self, of: { [$0.containerSize.height, $0.contentInsets.bottom] }) { _, _ in
+                // The keyboard or the composer changed the room the list has: a list that follows keeps its end in view.
+                guard follows, !isOwnerScrolling, model.revealRequest == nil else { return }
+                proxy.scrollTo(bottom, anchor: .bottom)
+            }
+            .onChange(of: contentSignature) { old, new in
+                // The owner sent a message: it is shown, and what comes after it is followed.
+                if new.pending > old.pending { follows = true }
                 // A tapped notification's row is being shown: new content must not take the list away from it.
                 guard model.revealRequest == nil else { return }
+                guard follows else { return }
                 proxy.scrollTo(bottom, anchor: .bottom)
             }
             .task(id: model.revealRequest) {
                 await reveal(model.revealRequest, using: proxy)
+            }
+            .task {
+                await followWhenTheOwnerSends()
+            }
+            .overlay(alignment: .bottom) {
+                ZStack {
+                    if !follows {
+                        Button {
+                            follows = true
+                            withAnimation { proxy.scrollTo(bottom, anchor: .bottom) }
+                        } label: {
+                            // The glass style pads its label by 7 pt on every side: 30 + 14 is the 44 pt circle.
+                            Image(systemName: "arrow.down")
+                                .font(.body.weight(.semibold))
+                                .frame(width: 30, height: 30)
+                        }
+                        .buttonStyle(.glass)
+                        .buttonBorderShape(.circle)
+                        .padding(.bottom, 12)
+                        .transition(.scale.combined(with: .opacity))
+                        .accessibilityLabel("回到最新")
+                        .accessibilityIdentifier("chat.latest")
+                    }
+                }
+                .animation(.snappy(duration: 0.25), value: follows)
             }
         }
     }
@@ -126,22 +179,58 @@ private struct MessageList: View {
             // A newer request, or the list going away, ends this one; the model keeps a request that was not seen.
             if Task.isCancelled { return }
         }
+        // The row is where the owner wanted it, which is not the end of the list if it is an old one.
+        follows = isNearEnd
         model.revealHandled(request)
     }
 
-    /// Changes whenever something is added to the list or grows.
-    private var contentSignature: [Int] {
-        let live = model.liveReplies
-        return [
-            model.timeline.messages.count,
-            model.timeline.questions.count,
-            model.timeline.openQuestions.count,
-            model.answerFailures.count,
-            model.timeline.pending.count,
-            live.count,
-            live.reduce(0) { $0 + ($1.text?.utf8.count ?? 0) + ($1.stepText?.utf8.count ?? 0) },
-        ]
+    /// Sets `follows` when the owner sends a message. The pending message and its echo can both come before the list draws
+    /// again, and the list then sees only the echo, so the pending messages are watched as the model changes, not when the
+    /// list draws. The list scrolls once it draws what was sent.
+    private func followWhenTheOwnerSends() async {
+        var count = model.timeline.pending.count
+        for await now in Observations({ model.timeline.pending.count }) {
+            if now > count { follows = true }
+            count = now
+        }
     }
+
+    /// Changes whenever something is added to the list or grows.
+    private var contentSignature: ContentSignature {
+        let live = model.liveReplies
+        return ContentSignature(
+            pending: model.timeline.pending.count,
+            rest: [
+                model.timeline.messages.count,
+                model.timeline.questions.count,
+                model.timeline.openQuestions.count,
+                model.answerFailures.count,
+                live.count,
+                live.reduce(0) { $0 + ($1.text?.utf8.count ?? 0) + ($1.stepText?.utf8.count ?? 0) },
+            ]
+        )
+    }
+
+    /// What `contentSignature` compares: the owner's pending messages apart, since a new one is the owner sending.
+    private struct ContentSignature: Equatable {
+        let pending: Int
+        let rest: [Int]
+    }
+}
+
+/// Where the end of the list is.
+private enum ListEnd {
+    /// Whether the end of the content is at most a quarter of the visible height below the bottom of the visible area.
+    /// The visible area is the container inside the bars' insets: `visibleRect` reaches under them.
+    static func isNear(_ geometry: ScrollGeometry) -> Bool {
+        let bottomOfVisibleArea = geometry.visibleRect.maxY - geometry.contentInsets.bottom
+        return geometry.contentSize.height - bottomOfVisibleArea <= geometry.containerSize.height / 4
+    }
+}
+
+private extension ScrollPhase {
+    /// The phases of the owner's own scrolling: dragging, and coasting after a flick. Not a scroll the app made.
+    var isOwners: Bool { self == .interacting || self == .decelerating }
 }
 
 private struct Bubble: View {
