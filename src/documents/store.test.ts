@@ -462,6 +462,36 @@ test("a new document never takes the id of a trashed one", () => {
   }
 });
 
+test("forget drops a purged document with its versions and annotations, for a purged file and for a purged directory, and nothing else", () => {
+  const { file, events, store } = open();
+  const gone = essay(store, "notes/a.md");
+  const inDir = essay(store, "notes/sub/b.md");
+  const keep = essay(store, "reports/c.md");
+  const [goneNote] = store.submit({ documentId: gone.id, version: commit(1), annotations: [draft("改")], runId: RUN_B, at: START });
+  const [keepNote] = store.submit({ documentId: keep.id, version: commit(1), annotations: [draft("好")], runId: RUN_C, at: START });
+  if (!goneNote || !keepNote) throw new Error("each batch has one annotation");
+
+  store.forget(["notes/a.md", "notes/sub", "reports/c.md"]);
+  assert.equal(readDocumentFile(file).documents.length, 3, "a document that is not trashed is never forgotten");
+
+  store.move("notes/a.md", ".trash/a.md", at("2026-10-26T05:00:00Z"));
+  store.move("notes/sub", ".trash/sub", at("2026-10-26T05:00:00Z"));
+  const before = events.readSince(0).length;
+
+  store.forget([".trash/a.md"]);
+  let held = readDocumentFile(file);
+  assert.deepEqual(held.documents.map((entry) => entry.document.id).sort(), [inDir.id, keep.id].sort());
+  assert.deepEqual(held.annotations.map((annotation) => annotation.id), [keepNote.id]);
+
+  store.forget([".trash/sub"]);
+  held = readDocumentFile(file);
+  assert.deepEqual(held.documents.map((entry) => entry.document.id), [keep.id]);
+  assert.deepEqual(held.annotations.map((annotation) => annotation.id), [keepNote.id]);
+  assert.equal(events.readSince(0).length, before, "no event: the app dropped the documents when they were trashed");
+  assert.deepEqual(store.annotations(keep.id).map((annotation) => annotation.id), [keepNote.id], "a document outside .trash/ is untouched");
+  assert.equal(store.get(keep.id)?.path, "reports/c.md");
+});
+
 test("submit refuses an unknown document, a version that is not current, a second revision and passages on HTML", () => {
   const { store } = open();
   const md = essay(store);
