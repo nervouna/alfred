@@ -11,8 +11,14 @@ enum AvatarMetrics {
 /// he works on a chat run. Over the clips is a cover with the picture of the pose each one starts on (the still, or the
 /// typing pose), which stays up until the clip has drawn; without the clips that picture is what shows, and without it a
 /// navy circle with a person.
+///
+/// It is `diameter` across: 72 pt in the chat's header, bigger on the profile page. It takes touches like any view; the
+/// chat's header wraps it in a button.
 struct AvatarView: View {
     let state: AvatarState
+    var diameter = AvatarMetrics.diameter
+    /// The accessibility identifier, which the UI tests tell the chat's avatar and the profile's by.
+    var identifier = "chat.header.avatar"
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
     @State private var conductor = AvatarConductor()
@@ -23,15 +29,13 @@ struct AvatarView: View {
 
     var body: some View {
         AvatarPlayerSurface(layers: conductor.player.layers)
-            .frame(width: AvatarMetrics.diameter, height: AvatarMetrics.diameter)
+            .frame(width: diameter, height: diameter)
             .clipShape(.circle)
             .overlay {
                 Circle()
                     .strokeBorder(.white.opacity(0.55), lineWidth: 1)
             }
             .shadow(color: .black.opacity(0.25), radius: 8, y: 3)
-            // It is only to be looked at: a drag that starts on it scrolls the messages under it.
-            .allowsHitTesting(false)
             .onAppear { conductor.apply(input) }
             .onChange(of: input) { _, input in conductor.apply(input) }
             // Off the screen nothing plays; coming back starts the cycle again.
@@ -39,7 +43,7 @@ struct AvatarView: View {
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("Alfred")
             .accessibilityValue(state == .working ? "工作中" : "待命")
-            .accessibilityIdentifier("chat.header.avatar")
+            .accessibilityIdentifier(identifier)
     }
 }
 

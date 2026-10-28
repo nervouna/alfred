@@ -12,20 +12,31 @@ struct MarkdownView: View {
 
     var body: some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 12) {
-                ForEach(blocks) { block in
-                    MarkdownBlockView(block: block)
-                        .overlay(alignment: .leading) {
-                            if changed.contains(block.id) {
-                                ChangedBar()
-                            }
-                        }
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding()
+            MarkdownBlocksView(blocks: blocks, changed: changed)
+                .padding()
         }
         .accessibilityIdentifier("viewer.markdown")
+    }
+}
+
+/// The blocks of `MarkdownView` one under another, without a scroll view or a margin of their own, for a screen that
+/// scrolls them with other content.
+struct MarkdownBlocksView: View {
+    let blocks: [MarkdownBlock]
+    var changed: Set<Int> = []
+
+    var body: some View {
+        LazyVStack(alignment: .leading, spacing: 12) {
+            ForEach(blocks) { block in
+                MarkdownBlockView(block: block)
+                    .overlay(alignment: .leading) {
+                        if changed.contains(block.id) {
+                            ChangedBar()
+                        }
+                    }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

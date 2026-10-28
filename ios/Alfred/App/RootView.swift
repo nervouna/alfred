@@ -42,6 +42,9 @@ struct RootView: View {
                     IdeasView()
                 }
                 .badge(model.unseenIdeaCount)
+                Tab("设置", systemImage: "gearshape", value: AppTab.settings) {
+                    SettingsView()
+                }
             }
             .environment(model)
         }

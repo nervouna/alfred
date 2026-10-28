@@ -84,22 +84,32 @@ struct ChatHeader: View {
 
 /// Alfred's avatar over the top of the chat, centred, with its lower third below the bar's bottom edge; under it, while
 /// the stream is not connected, a capsule that says so. It is a layer of the chat above the bar and the list, not part of
-/// the bar, and takes no touches, so a drag that starts on it scrolls the list.
+/// the bar.
+///
+/// The avatar is a button that opens Alfred's profile, and it is all of the overlay that takes touches: the capsule does
+/// not, and neither does the space around them. A drag that starts on the avatar does not scroll the list under it any
+/// more, since the touch is the button's.
 struct ChatHeaderOverlay: View {
     let state: AvatarState
     let isConnected: Bool
+    /// Opens Alfred's profile.
+    let openProfile: () -> Void
 
     var body: some View {
         // An overlay is laid out inside the safe area, so its top is the bar's top edge: the avatar is placed from there.
         VStack(spacing: 6) {
-            AvatarView(state: state)
+            Button(action: openProfile) {
+                AvatarView(state: state)
+                    .contentShape(.circle)
+            }
+            .buttonStyle(.plain)
             if !isConnected {
                 ConnectingCapsule()
+                    .allowsHitTesting(false)
             }
         }
         .frame(maxWidth: .infinity, alignment: .top)
         .padding(.top, ChatHeader.avatarOffset)
-        .allowsHitTesting(false)
     }
 }
 
