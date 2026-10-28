@@ -10,11 +10,13 @@ Developed with the `orchestrate` skill: issues are specs, implementers deliver o
 - `npm run check` type-checks (`tsc --noEmit`, strict, `noUncheckedIndexedAccess`, `erasableSyntaxOnly`: no enums, no parameter properties, no namespaces).
 - `npm test` runs `node --test` over `src/**/*.test.ts`. Tests use `node:test` and `node:assert/strict`. Modules that read `STATE_DIR` at import time are imported after the test sets `ALFRED_STATE_DIR` to a temp dir (see `src/runs.test.ts`).
 - CI (`.github/workflows/ci.yml`) runs `npm ci`, `npm run check` and `npm test` on every PR.
+- `.github/workflows/ios.yml` runs AlfredKit's `swift test` and only builds the app; the app's unit and UI tests run locally (`ios/README.md`, Test). After an app change to a screen other tests pass through, run the whole `AlfredUITests` suite against `node scripts/app-dev.ts --seed-documents`.
 - `npm run smoke` and `node scripts/handler-smoke.ts <scenario>` call the real model and cost money. They need `ALFRED_ANTHROPIC_API_KEY`. Point `ALFRED_STATE_DIR` and `ALFRED_WORKSPACE` at scratch directories for them.
 - Never run `npm start` against the deployed instance's state: a second Alfred on the same state dir would take over its command socket and run tasks on its sessions. Run locally with scratch `ALFRED_STATE_DIR` and `ALFRED_WORKSPACE` (see `scripts/app-dev.ts`).
 - Run `app-dev`, `smoke` and `handler-smoke` with `CLAUDE_CODE_ENTRYPOINT` unset: a Claude Code session passes it down, and the API then refuses the key's requests.
 - Run UI tests on a simulator that holds only the test build (`com.example.alfred`): a second Alfred build there adds a second share extension, and `ShareUITests` picks the wrong one. The share tests can fail on a new simulator's first run; rerun before blaming a change.
 - XCUITest calls a control hittable while it sits under the keyboard or in a sheet that is still resizing: tap once its frame holds still, as `tapWhenSettled` in `IdeasUITests` does.
+- A row under the glass navigation bar or tab bar also counts as hittable, but the tap lands on the bar: scroll it between the bars first (`scrollBetweenBars` in `TasksUITests` and `IdeasUITests`).
 - The server image holds only `src/`, `plugin/` and the npm packages, so a merge that changes only `ios/` needs no redeploy (`deploy/update.sh` reports nothing to restart).
 - To time something on the real path from a phone, put temporary `print`s in a Release build (never commit them), install it, and run `xcrun devicectl device process launch --console --terminate-existing --device <name> io.damao.alfred`. A warm start is launching `com.apple.Preferences`, waiting, then launching Alfred again without `--terminate-existing`.
 
@@ -25,6 +27,7 @@ Developed with the `orchestrate` skill: issues are specs, implementers deliver o
 - `src/runs.ts` records runs (one execution of the agent) under `$STATE_DIR/workbench/`; `src/workbench/` serves them read-only.
 - The workbench's `/api/` is the app's way in: `devices.ts` pairs devices and keeps only the SHA-256 of each token, every `/api/` request needs a device token, and `forward.ts` passes only the command set (checked with `parseCommand`) and the event stream and uploads on to Alfred's socket.
 - The workspace (`ALFRED_WORKSPACE`) is the only place the agent may read and write; `src/agent/guard.ts` enforces it per tool call.
+- `src/documents/` keeps delivered files as documents: `versions.ts` commits the workspace to a git dir outside it (`$STATE_DIR/workbench/versions.git`), `store.ts` keeps `documents.json` (versions, annotations), and `commands.ts` runs revise and undo in one lane. The guard refuses any `.git` path segment.
 - `ios/` (from #27) holds the native client.
 - A streaming endpoint must write a byte right after its headers (the event stream sends `: ping` on open). Cloudflare holds response headers until the first body byte, and the app counts the stream as connected on the headers. A cold start resumes from event 0 and gets the backlog at once; a warm start has none, so without the opening ping it waited a whole heartbeat.
 
