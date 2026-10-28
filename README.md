@@ -64,6 +64,8 @@ One task runs at a time, and a message sent during it steers it ([docs/api.md](d
 | `/status` | model, session age, spend against the daily cap, current and queued runs, active tasks with their next run |
 | `/help` | command list |
 
+The app's chat menu offers `/new`, `/resume`, `/model`, `/status` and `/memory` as items, each sending the same text.
+
 Alfred can also ask a question mid-run, with a few options, instead of guessing. Recurring work is set up as tasks ([docs/tasks.md](docs/tasks.md)), and Alfred suggests tasks of its own as ideas ([docs/ideas.md](docs/ideas.md)).
 
 ## Command API

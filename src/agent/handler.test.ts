@@ -26,6 +26,7 @@ Object.assign(process.env, {
 });
 
 const { createAgentHandler } = await import("./handler.ts");
+const { readRulesForOwner, saveRules } = await import("./rules.ts");
 const { EventLog, isLiveEvent } = await import("../events.ts");
 const { readRunFile } = await import("../runs.ts");
 const { InvalidAnswer, appOutbound } = await import("../channels.ts");
@@ -580,6 +581,63 @@ test("the notice for rules a run changed is recorded with the run that changed t
   const notice = t.messages().find((m) => m.text.startsWith("已新建"));
   assert.equal(notice?.channel, "app");
   assert.equal(notice?.runId, t.runs()[0]?.id, "the notice belongs to the run that changed the rules");
+});
+
+/** The owner saves the root ALFRED.md in the app, as the rules.save command does: against the version they read. */
+function ownerSavesRules(text: string): void {
+  const workspace = path.join(tmp, "workspace");
+  const current = readRulesForOwner(workspace);
+  assert.ok(current, "the file is within the read cap");
+  assert.equal(saveRules(workspace, { type: "rules.save", text, version: current.version }).ok, true);
+}
+
+/** Texts the app got that announce a change of rules or skills. */
+const rulesNotices = (texts: string[]): string[] => texts.filter((text) => /^已(新建|更新|移除) /.test(text));
+
+test("an owner's save of ALFRED.md while a run is live is not reported as the run's change", async () => {
+  let runs = 0;
+  const t = setup({
+    turn: async (prompt) => {
+      if (runs++ === 0) ownerSavesRules("# 主人在 app 里改的规则\n");
+      return `echo: ${prompt}`;
+    },
+  });
+  await t.send("跑着的时候我改了规则");
+  await until("the first run to finish", () => t.finished());
+  // A second run starts only once the first has ended, notice included, so its reply comes after any notice of the first.
+  await t.send("再来一个");
+  await until("the second run to finish", () => t.finished(2));
+
+  assert.equal(fs.readFileSync(path.join(tmp, "workspace", "ALFRED.md"), "utf8"), "# 主人在 app 里改的规则\n");
+  assert.deepEqual(rulesNotices(t.app.texts), []);
+  assert.ok(t.app.texts.includes("echo: 跑着的时候我改了规则"));
+});
+
+test("a run that also changes ALFRED.md after the owner's save still reports it, and so does one that changes it alone", async () => {
+  const rulesFile = path.join(tmp, "workspace", "ALFRED.md");
+  const afterOwner = setup({
+    turn: async () => {
+      ownerSavesRules("# 主人的规则\n");
+      fs.writeFileSync(rulesFile, "# Alfred 又改了一次\n");
+      return "写好了";
+    },
+  });
+  await afterOwner.send("先让主人改，再自己改");
+  await until("the run to finish", () => afterOwner.finished());
+  await until("the notice", () => afterOwner.app.texts.length === 2);
+  assert.deepEqual(afterOwner.app.texts, ["写好了", "已更新 ALFRED.md"]);
+  assert.equal(afterOwner.messages().find((m) => m.text === "已更新 ALFRED.md")?.runId, afterOwner.runs()[0]?.id);
+
+  const alone = setup({
+    turn: async () => {
+      fs.writeFileSync(rulesFile, "# 只有 Alfred 改了\n");
+      return "写好了";
+    },
+  });
+  await alone.send("自己改");
+  await until("the run to finish", () => alone.finished());
+  await until("the notice", () => alone.app.texts.length === 2);
+  assert.deepEqual(alone.app.texts, ["写好了", "已更新 ALFRED.md"]);
 });
 
 test("the note about a run a restart cut short comes with the next message, is recorded after it, and is said only once", async () => {

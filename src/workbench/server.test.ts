@@ -22,7 +22,7 @@ const { EventLog } = await import("../events.ts");
 const { DOCUMENTS_FILE, DocumentStore } = await import("../documents/store.ts");
 const { VERSIONS_GIT_DIR, Versions } = await import("../documents/versions.ts");
 const { IDEAS_FILE } = await import("../ideas/store.ts");
-const { DocumentDetailSchema, DocumentListSchema, ErrorResponseSchema, IdeaListSchema, RunDetailSchema, RunListSchema, TaskDetailSchema, TaskListSchema } = await import("../api/schema.ts");
+const { DocumentDetailSchema, DocumentListSchema, ErrorResponseSchema, IdeaListSchema, RulesSchema, RunDetailSchema, RunListSchema, TaskDetailSchema, TaskListSchema } = await import("../api/schema.ts");
 const { AccessVerifier } = await import("./access.ts");
 const { DeviceStore } = await import("./devices.ts");
 const { REPORT_CSP, createHandler, inlineImages, startWorkbench } = await import("./server.ts");
@@ -563,6 +563,60 @@ test("the run and file routes need a device token, and refuse other methods with
   }
   const ping = await fetch(`${open}/api/ping`, { method: "POST", headers: bearer(paired.token), body: "{}" });
   assert.equal(ping.headers.get("allow"), "GET", "POST /api/ping");
+});
+
+// --- /api/rules -------------------------------------------------------------
+
+const rulesFile = path.join(workspace, "ALFRED.md");
+const sha256 = (data: string | Buffer) => crypto.createHash("sha256").update(data).digest("hex");
+
+/** GET /api/rules with the paired device's token, with ALFRED.md as `put` makes it; the file is gone again afterwards. */
+async function getRules(put: () => void = () => {}, base = open): Promise<Response> {
+  fs.rmSync(rulesFile, { force: true });
+  put();
+  try {
+    return await fetch(`${base}/api/rules`, { headers: bearer(paired.token) });
+  } finally {
+    // A body that is still to be read is already in the response: the file is not needed for it.
+    fs.rmSync(rulesFile, { force: true });
+  }
+}
+
+test("GET /api/rules gives the root ALFRED.md's text as it is, the sha256 of its bytes and the size cap", async () => {
+  const text = "  # 规则\r\n\n- 报告开头先写摘要 😀\n\n";
+  const res = await getRules(() => fs.writeFileSync(rulesFile, text));
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("content-type"), "application/json; charset=utf-8");
+  assert.equal(res.headers.get("cache-control"), "no-store");
+  assert.deepEqual(RulesSchema.parse(await res.json()), { text, version: sha256(Buffer.from(text)), maxBytes: 8192 });
+});
+
+test("GET /api/rules reads a missing file and a symlink as empty text", async () => {
+  const empty = { text: "", version: sha256(""), maxBytes: 8192 };
+  const missing = await getRules();
+  assert.equal(missing.status, 200);
+  assert.deepEqual(RulesSchema.parse(await missing.json()), empty);
+
+  const link = await getRules(() => fs.symlinkSync(path.join(workspace, "notes", "a.md"), rulesFile));
+  assert.equal(link.status, 200);
+  assert.deepEqual(RulesSchema.parse(await link.json()), empty, "the note the link points to is not shown");
+});
+
+test("GET /api/rules reads a file of 65536 bytes whole and answers 413 for a longer one", async () => {
+  const exact = await getRules(() => fs.writeFileSync(rulesFile, "a".repeat(65_536)));
+  assert.equal(exact.status, 200);
+  assert.equal(RulesSchema.parse(await exact.json()).text.length, 65_536);
+
+  await assertApiError(await getRules(() => fs.writeFileSync(rulesFile, "a".repeat(65_537))), 413, "over the read cap");
+});
+
+test("GET /api/rules needs a device token, and refuses other methods with 405", async () => {
+  await assertApiError(await fetch(`${open}/api/rules`), 401, "without a token");
+  await assertApiError(await fetch(`${guarded}/api/rules`), 403, "on the tunnel without Access");
+  const wrong = await fetch(`${open}/api/rules`, { method: "POST", headers: bearer(paired.token), body: "{}" });
+  assert.equal(wrong.status, 405);
+  assert.equal(wrong.headers.get("allow"), "GET");
+  assert.equal(fs.existsSync(rulesFile), false, "a refused request writes nothing");
 });
 
 // --- /api/tasks -------------------------------------------------------------

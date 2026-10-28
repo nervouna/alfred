@@ -667,6 +667,17 @@ export const IdeaListSchema = z.object({
   lastGeneration: IdeaGenerationSchema.optional(),
 });
 
+/**
+ * The body of GET /api/rules and of a successful rules.save: the text of the root ALFRED.md, empty when there is none, and
+ * its `version`, the lowercase hex sha256 of the file's bytes (of the empty string when there is no file). `maxBytes` is
+ * the most a save may hold, in UTF-8 bytes: what of the file reaches the agent's system prompt.
+ */
+export const RulesSchema = z.object({
+  text: z.string(),
+  version: z.string().regex(/^[0-9a-f]{64}$/, "must be a 64-character lowercase hex sha256"),
+  maxBytes: z.int().positive(),
+});
+
 /** The body of POST /api/uploads: the file Alfred saved under inbox/. */
 export const UploadResultSchema = z.object({
   file: FileRefSchema.safeExtend({ path: InboxPathSchema, kind: FileKindSchema }),
@@ -827,6 +838,17 @@ export const IdeaRejectSchema = z.strictObject({
 /** Asks Alfred to generate ideas now. */
 export const IdeaGenerateSchema = z.strictObject({ type: z.literal("idea.generate") });
 
+/**
+ * Replaces the root ALFRED.md with `text`, stored as sent. `version` is the one the owner read, the `version` of the `Rules`
+ * they edited: a save against any other string is a conflict (409), so no schema check is made on its shape. Over
+ * `maxBytes` of UTF-8 or a NUL in `text` is refused by Alfred (400), after the schema.
+ */
+export const RulesSaveSchema = z.strictObject({
+  type: z.literal("rules.save"),
+  text: z.string(),
+  version: z.string(),
+});
+
 // A setting's new value is within the range the owner may choose. A deployment's environment may set a value beyond it.
 const DailyBudgetSchema = z
   .number()
@@ -898,6 +920,7 @@ export const CommandSchema = z.discriminatedUnion("type", [
   IdeaAcceptSchema,
   IdeaRejectSchema,
   IdeaGenerateSchema,
+  RulesSaveSchema,
   SettingsUpdateSchema,
 ]);
 
@@ -947,6 +970,8 @@ export type IdeaList = z.infer<typeof IdeaListSchema>;
 export type IdeaAccept = z.infer<typeof IdeaAcceptSchema>;
 export type IdeaReject = z.infer<typeof IdeaRejectSchema>;
 export type IdeaGenerate = z.infer<typeof IdeaGenerateSchema>;
+export type Rules = z.infer<typeof RulesSchema>;
+export type RulesSave = z.infer<typeof RulesSaveSchema>;
 export type SettingKey = z.infer<typeof SettingKeySchema>;
 export type Settings = z.infer<typeof SettingsSchema>;
 export type SettingsResult = z.infer<typeof SettingsResultSchema>;

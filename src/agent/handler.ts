@@ -112,7 +112,7 @@ import { MemoryLock, capIndex, loadMemories, syncMemoryIndex } from "./memory.ts
 import { QUESTION_TOOL, answersFromReply, denyPermissionPrompts, questionHook } from "./questions.ts";
 import type { AskOwner, QuestionOutcome } from "./questions.ts";
 import { revisionMessage, revisionPrompt, revisionSettings, revisionsSection } from "./revision.ts";
-import { RULES_FILE, RulesTracker, rulesChangeNotice, rulesDisclosure, seedRules, snapshotRules } from "./rules.ts";
+import { RULES_FILE, type RulesWatch, RulesTracker, rulesDisclosure, seedRules, watchRules } from "./rules.ts";
 import { NO_SESSION, accountModels, accountRun, resumePrevious, retire, rotationDueAt, shouldRotate } from "./session.ts";
 import type { RetireReason } from "./session.ts";
 import { SKILLS_DIR, prepareWorkspacePlugin, skillPlugins } from "./skills.ts";
@@ -503,9 +503,12 @@ export function prepareWorkspace(): void {
   prepareWorkspacePlugin(WORKSPACE_DIR);
 }
 
-/** Reply listing the ALFRED.md files and skills a run created, changed or removed, so such changes never go unnoticed. */
-async function notifyRuleChanges(out: Outbound, before: Map<string, string>): Promise<void> {
-  const notice = rulesChangeNotice(before, snapshotRules(WORKSPACE_DIR));
+/**
+ * Reply listing the ALFRED.md files and skills a run created, changed or removed, so such changes never go unnoticed.
+ * The owner's own save of the root ALFRED.md in the app, while the run was live, is not one of them.
+ */
+async function notifyRuleChanges(out: Outbound, watch: RulesWatch): Promise<void> {
+  const notice = watch.notice();
   if (!notice) return;
   log.info(`workspace rules or skills changed: ${notice.replace(/\n/g, "; ")}`);
   await out.text(notice).catch((err) => log.warn(`rules notice failed: ${describeError(err)}`));
@@ -1065,7 +1068,8 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
     let status: Exclude<RunStatus, "running" | "queued"> = "done";
     let failure: string | undefined;
     rt.run = run;
-    const rulesBefore = snapshotRules(WORKSPACE_DIR);
+    // Live until the run's end: an owner's save of ALFRED.md meanwhile is folded into this snapshot.
+    const rulesWatch = watchRules(WORKSPACE_DIR);
     startTurn(run);
 
     let locked = false;
@@ -1199,7 +1203,8 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
         log.error(`saving the lost runs failed: ${describeError(err)}`);
       }
       // Also after a stop or an error: the run may have changed rules before it ended.
-      if (!run.shutdown) await notifyRuleChanges(run.out, rulesBefore);
+      if (!run.shutdown) await notifyRuleChanges(run.out, rulesWatch);
+      rulesWatch.close();
       endTurn(run);
       rt.run = undefined;
       // Last, so that no reply and no notice waits for it.

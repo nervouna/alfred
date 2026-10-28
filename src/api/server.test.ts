@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
@@ -19,11 +20,13 @@ import type {
   IdeaResult,
   Run,
   RevisionAccepted,
+  Rules,
+  RulesSave,
   TaskCreate,
   TaskResult,
   TaskUpdate,
 } from "./schema.ts";
-import type { DocumentCommands, DocumentReply, IdeaCommands, IdeaReply, TaskCommands, TaskReply } from "./server.ts";
+import type { DocumentCommands, DocumentReply, IdeaCommands, IdeaReply, RulesCommands, RulesReply, TaskCommands, TaskReply } from "./server.ts";
 import type { Inbound } from "../channels.ts";
 import type { EventLog as EventLogType } from "../events.ts";
 
@@ -111,7 +114,7 @@ let fixtures = 0;
 /** An API on a socket of its own, with a stub handler and an event log of its own. */
 async function start(
   t: TestContext,
-  opts: { heartbeatMs?: number; pageSize?: number; tasks?: TaskCommands; documents?: DocumentCommands; ideas?: IdeaCommands } = {},
+  opts: { heartbeatMs?: number; pageSize?: number; tasks?: TaskCommands; documents?: DocumentCommands; ideas?: IdeaCommands; rules?: RulesCommands } = {},
 ) {
   const dir = path.join(tmp, `t${fixtures++}`);
   const socket = path.join(dir, "api", "a.sock");
@@ -649,6 +652,88 @@ test("a document command that does not fit the schema gets 400 and never reaches
   }
   assert.deepEqual(documents.revised, []);
   assert.deepEqual(documents.undone, []);
+});
+
+// --- Rules commands -----------------------------------------------------------
+
+const rulesBody = JSON.parse(fixture("responses", "rules.json")) as Rules;
+
+/** Stands in for the rules service: records the commands it is given, and refuses with `refuse` when it is set. */
+function stubRules() {
+  const rules = {
+    saved: [] as RulesSave[],
+    refuse: undefined as Extract<RulesReply, { ok: false }> | undefined,
+    async save(command: RulesSave): Promise<RulesReply> {
+      rules.saved.push(command);
+      return rules.refuse ?? { ok: true, body: rulesBody };
+    },
+  };
+  return rules;
+}
+
+test("rules.save gets 503 until rules are wired in, and never reaches the handler", async (t) => {
+  const { socket, handler } = await start(t);
+  const reply = await post(socket, fixture("commands", "rules-save.json"));
+  assert.equal(reply.status, 503);
+  assert.deepEqual(reply.json(), { error: "rules are not available" });
+  assert.equal(handler.submitted.length, 0, "a rules command never reaches the message path");
+  assert.deepEqual(handler.stopped, []);
+  assert.deepEqual(handler.answered, []);
+});
+
+test("rules.save reaches the rules service as the parsed command and answers 200 with its Rules", async (t) => {
+  const rules = stubRules();
+  const { socket, handler } = await start(t, { rules });
+  const reply = await post(socket, fixture("commands", "rules-save.json"));
+  assert.equal(reply.status, 200);
+  assert.deepEqual(reply.json(), rulesBody);
+  assert.deepEqual(rules.saved, [parsedCommand("rules-save.json")]);
+  assert.equal(handler.submitted.length, 0, "a rules command never reaches the message path");
+});
+
+test("a rules reply that is not ok answers its status and its error", async (t) => {
+  const rules = stubRules();
+  const { socket } = await start(t, { rules });
+  rules.refuse = { ok: false, status: 409, error: "version: not the current version of ALFRED.md" };
+  const stale = await post(socket, fixture("commands", "rules-save.json"));
+  assert.equal(stale.status, 409);
+  assert.deepEqual(stale.json(), { error: "version: not the current version of ALFRED.md" });
+
+  rules.refuse = { ok: false, status: 400, error: "text: over 8192 bytes" };
+  const long = await post(socket, fixture("commands", "rules-save.json"));
+  assert.equal(long.status, 400);
+  assert.deepEqual(long.json(), { error: "text: over 8192 bytes" });
+});
+
+test("a rules.save that does not fit the schema gets 400 and never reaches the rules service", async (t) => {
+  const rules = stubRules();
+  const { socket } = await start(t, { rules });
+  for (const name of ["rules-save-missing-version.json", "rules-save-extra-key.json"]) {
+    assert.equal((await post(socket, fixture("invalid-commands", name))).status, 400, name);
+  }
+  assert.equal((await post(socket, { type: "rules.save", text: 5, version: "x" })).status, 400);
+  assert.deepEqual(rules.saved, []);
+});
+
+test("the real rules service saves with the version it read, and refuses the old version with 409", async (t) => {
+  const { rulesCommands } = await import("../agent/rules.ts");
+  const { socket } = await start(t, { rules: rulesCommands({ workspace }) });
+  const file = path.join(workspace, "ALFRED.md");
+  fs.rmSync(file, { force: true });
+  t.after(() => fs.rmSync(file, { force: true }));
+  const sha256 = (text: string) => crypto.createHash("sha256").update(text).digest("hex");
+
+  const first = await post(socket, { type: "rules.save", text: "# one\n", version: sha256("") });
+  assert.equal(first.status, 200);
+  assert.deepEqual(first.json(), { text: "# one\n", version: sha256("# one\n"), maxBytes: 8192 });
+  assert.equal(fs.readFileSync(file, "utf8"), "# one\n");
+
+  const second = await post(socket, { type: "rules.save", text: "# two\n", version: sha256("") });
+  assert.equal(second.status, 409);
+  assert.equal(fs.readFileSync(file, "utf8"), "# one\n", "the stale save changed nothing");
+  assert.equal((await post(socket, { type: "rules.save", text: "a\0b", version: sha256("# one\n") })).status, 400);
+  assert.equal((await post(socket, { type: "rules.save", text: "a".repeat(8193), version: sha256("# one\n") })).status, 400);
+  assert.equal((await post(socket, { type: "rules.save", text: "# two\n", version: sha256("# one\n") })).status, 200);
 });
 
 // --- Idea commands ------------------------------------------------------------
