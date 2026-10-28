@@ -23,6 +23,12 @@ Developed with the `orchestrate` skill: issues are specs, implementers deliver o
 - A row under the glass navigation bar or tab bar also counts as hittable, but the tap lands on the bar: scroll it between the bars first (`scrollBetweenBars` in `TasksUITests` and `IdeasUITests`).
 - The server image holds only `src/`, `plugin/` and the npm packages, so a merge that changes only `ios/` needs no redeploy (`deploy/update.sh` reports nothing to restart).
 - To time something on the real path from a phone, put temporary `print`s in a Release build (never commit them), install it, and run `xcrun devicectl device process launch --console --terminate-existing --device <name> io.damao.alfred`. A warm start is launching `com.apple.Preferences`, waiting, then launching Alfred again without `--terminate-existing`.
+- If another `app-dev` holds port 8787, start yours with `--port <n>`; the pairing it prints carries the port.
+- After `simctl install` of a differently built app, the notification prompt can block the chat until it is answered; pair through a short UI test (for example `ChatHeaderUITests/testTheMenuStillOffersUnpairing`), which answers it, before taking screenshots with `xcrun simctl io <udid> screenshot`.
+- Check bar and edge-effect changes in the dark appearance (`xcrun simctl ui <udid> appearance dark`): the soft edge fade is invisible on white, and `XCUIDevice.shared.appearance` did not switch it in a UI test.
+- A `safeAreaBar`'s scroll edge effect covers everything the bar draws, overflow included: draw content that hangs below a bar (the chat's avatar) as an overlay of the screen, not inside the bar.
+- Judge flicker frame by frame, not by eye: record with `xcrun simctl io <udid> recordVideo --codec=h264 <file>` (stop it with SIGINT) and compare frames. An `AVPlayerLayer` with no frame draws nothing on the simulator but black on a phone, so layer transitions need a check on the phone.
+- `devicectl` reporting the phone `unavailable` (CoreDevice error 4016 on install) means it is locked or off the network: ask the owner to unlock it, and keep the built `.app` so the install does not wait for another build.
 
 ## Architecture in brief
 
