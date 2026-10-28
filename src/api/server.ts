@@ -329,6 +329,8 @@ export async function startApi(opts: ApiOptions): Promise<() => Promise<void>> {
       if (!reply.ok) return sendJson(res, reply.status, { error: reply.error });
       return sendJson(res, 202, reply.body);
     }
+    // A settings command never reaches the message path either. Until settings are wired in it is refused with 503.
+    if (command.type === "settings.update") return sendJson(res, 503, { error: "settings are not available" });
     // A message's files are checked before anything is submitted: one that is not in the inbox refuses the message.
     const files = command.files ?? [];
     const missing = files.findIndex((file) => !inboxFile(file.path));

@@ -96,6 +96,16 @@ public struct AlfredClient: Sendable {
         try await get(IdeaList.self, "/api/ideas")
     }
 
+    /// POST /api/commands with `settings.update`. Alfred answers 200 with the settings as it now holds them.
+    public func updateSettings(_ changes: SettingsChanges) async throws -> AlfredSettings {
+        try JSONDecoder().decode(SettingsResult.self, from: await post(.settingsUpdate(changes))).settings
+    }
+
+    /// GET /api/settings: the settings, and what the owner has spent today.
+    public func settings() async throws -> SettingsDetail {
+        try await get(SettingsDetail.self, "/api/settings")
+    }
+
     /// GET /api/documents: the documents, newest updated first.
     public func documents() async throws -> DocumentList {
         try await get(DocumentList.self, "/api/documents")

@@ -75,6 +75,11 @@ public struct IdeaGenerationAccepted: Decodable, Hashable, Sendable {
     public let runId: String
 }
 
+/// The body of a successful `settings.update`: the settings as Alfred now holds them.
+public struct SettingsResult: Decodable, Hashable, Sendable {
+    public let settings: AlfredSettings
+}
+
 /// The body of `GET /api/ideas`: every idea Alfred keeps, newest created first, the generation run while one is queued
 /// or running, and the latest generation that ended.
 public struct IdeaList: Decodable, Hashable, Sendable {

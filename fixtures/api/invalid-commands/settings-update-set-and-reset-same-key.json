@@ -1,0 +1,7 @@
+{
+  "type": "settings.update",
+  "dailyBudgetUsd": 30,
+  "reset": [
+    "dailyBudgetUsd"
+  ]
+}
