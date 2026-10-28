@@ -80,6 +80,14 @@ public struct SettingsResult: Decodable, Hashable, Sendable {
     public let settings: AlfredSettings
 }
 
+/// The body of `GET /api/rules` and of a successful `rules.save`: the root ALFRED.md. `version` is the lowercase hex
+/// sha256 of the file's bytes, which a save names; `maxBytes` is the most a saved text may hold, in UTF-8 bytes.
+public struct Rules: Decodable, Hashable, Sendable {
+    public let text: String
+    public let version: String
+    public let maxBytes: Int
+}
+
 /// The body of `GET /api/ideas`: every idea Alfred keeps, newest created first, the generation run while one is queued
 /// or running, and the latest generation that ended.
 public struct IdeaList: Decodable, Hashable, Sendable {

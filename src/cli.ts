@@ -10,6 +10,7 @@ import { resolveInside } from "./agent/guard.ts";
 import { createAgentHandler } from "./agent/handler.ts";
 import { MEMORY_LOCK_FILE, describeScan, scanTranscripts } from "./agent/memory-scan.ts";
 import { MemoryLock } from "./agent/memory.ts";
+import { rulesCommands } from "./agent/rules.ts";
 import { describeEvent, request, streamEvents } from "./api/client.ts";
 import { apiSocketPath, startApi } from "./api/server.ts";
 import { appOutbound } from "./channels.ts";
@@ -91,13 +92,14 @@ async function cmdRun(args: string[]): Promise<void> {
   const agent = createAgentHandler({ out: appOutbound(), tasks, documents, ideas });
   let closeApi: () => Promise<void>;
   try {
-    // Without documents the API answers every document command 503.
+    // Without documents the API answers every document command 503, and a saved ALFRED.md is not committed to the history.
     closeApi = await startApi({
       socket,
       handler: agent,
       events: sharedEventLog(),
       tasks: taskCommands(tasks, agent),
       ideas: ideaCommands(ideas, tasks, { generate: (trigger) => agent.generateIdeas(trigger) }),
+      rules: rulesCommands({ workspace: WORKSPACE_DIR, versions: documents?.versions }),
       ...(documents ? { documents: documentCommands(agent, documents) } : {}),
     });
   } catch (err) {

@@ -17,6 +17,7 @@ import path from "node:path";
 
 import { resolveInside } from "../agent/guard.ts";
 import { loadMemories } from "../agent/memory.ts";
+import { RULES_READ_MAX_BYTES, readRulesForOwner } from "../agent/rules.ts";
 import { DocumentDetailSchema, PushRegistrationSchema, RunSchema, StepSchema } from "../api/schema.ts";
 import type { DocumentDetail, DocumentList, Run, RunDetail, TaskDetail } from "../api/schema.ts";
 import { apiSocketPath } from "../api/server.ts";
@@ -446,6 +447,17 @@ async function pushRegistrationReply(req: http.IncomingMessage, deviceId: string
 }
 
 /**
+ * GET /api/rules: the root ALFRED.md as a Rules: its text and the sha256 of its bytes as the version, which rules.save
+ * is made against. A missing file and a symlink read as empty text. A file over RULES_READ_MAX_BYTES is 413, so that an
+ * editor never holds a cut-off text.
+ */
+function rulesReply(workspace: string): Response {
+  const rules = readRulesForOwner(workspace);
+  if (!rules) return jsonError(413, `ALFRED.md is over ${RULES_READ_MAX_BYTES} bytes, too long to edit here.`);
+  return jsonReply(200, rules);
+}
+
+/**
  * GET /api/files/<path>: a workspace file's bytes, typed by extension as the pages type them, under the sandbox policy.
  * An HTML report comes with its workspace images inlined, as the report page shows it; one over the preview cap is
  * sent as it is, since the page would refuse it. With `?version=<commit>` it is the file as it was at that commit.
@@ -542,6 +554,7 @@ async function apiRoute(req: http.IncomingMessage, url: URL, ctx: ApiContext): P
   if (p === "/api/documents") return only("GET", () => documentListReply());
   if (p.startsWith(DOCUMENT_PREFIX)) return only("GET", () => documentDetailReply(p.slice(DOCUMENT_PREFIX.length)));
   if (p === "/api/ideas") return only("GET", () => ideaListReply());
+  if (p === "/api/rules") return only("GET", () => rulesReply(ctx.workspace));
   if (p === "/api/push") return only("POST", () => pushRegistrationReply(req, device.id, ctx.devices));
   const run = RUN_PATH.exec(p)?.[1];
   if (run) return only("GET", () => runDetailReply(run));

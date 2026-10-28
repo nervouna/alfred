@@ -4,8 +4,8 @@ JSON examples of the client API defined in `src/api/schema.ts`. Alfred's tests (
 
 - `events/`: events Alfred stores and emits, one file per shape the client decodes, `question.asked` and `question.answered` (answered and cancelled), `task.updated`, `document.updated`, `annotation.updated`, `idea.updated` and `settings.updated` among them. Each file is a whole `Event`.
 - `live/`: live events, streamed as they happen and never stored. Each file is a whole `LiveEvent`.
-- `commands/`: one valid command per command shape, including a `message.send` with files, a `question.answer`, the three task commands, the two document commands, the three idea commands and the settings command.
-- `responses/`: bodies of the app API: `UploadResult`, `RunList`, `RunDetail`, `TaskResult`, `TaskList`, `TaskDetail`, `DocumentResult`, `DocumentList`, `DocumentDetail`, `RevisionAccepted`, `IdeaResult`, `IdeaAccepted`, `IdeaGenerationAccepted`, `IdeaList`, `SettingsResult`, `SettingsDetail` and `ErrorResponse`. Each file is named after the schema it parses with.
+- `commands/`: one valid command per command shape, including a `message.send` with files, a `question.answer`, the three task commands, the two document commands, the three idea commands, the settings command and `rules.save`.
+- `responses/`: bodies of the app API: `UploadResult`, `RunList`, `RunDetail`, `TaskResult`, `TaskList`, `TaskDetail`, `DocumentResult`, `DocumentList`, `DocumentDetail`, `RevisionAccepted`, `IdeaResult`, `IdeaAccepted`, `IdeaGenerationAccepted`, `IdeaList`, `Rules`, `SettingsResult`, `SettingsDetail` and `ErrorResponse`. Each file is named after the schema it parses with.
 - `requests/`: bodies the client sends outside the command API: `PushRegistration`.
 - `pairing/`: the payload of the pairing QR code, a `Pairing`. Its values are made up.
 - `invalid-commands/`: commands that `parseCommand` must reject.
@@ -67,6 +67,17 @@ An idea is a suggestion Alfred generates from memory and recent conversations, o
 - `GET /api/ideas` is an `IdeaList`: every idea, newest created first, the `generatingRunId` while a generation is queued or running, and the `lastGeneration`: the latest generation that ended, which is absent until one has.
 - A `lastGeneration` (`IdeaGeneration`) has the generation's `runId` and `endedAt`, how it ended, what started it, how many ideas it added, and a note. `status` is `done`, when the model answered, or `failed`; a run that was lost (Alfred restarted) is neither, and leaves the last generation as it was. `trigger` is `requested`, when the owner asked (`idea.generate`), or `daily`, when the schedule started it. A requested generation suggests at least one idea; a daily one may add none. `added` is the number of ideas the generation added, an integer from 0 to 3. `note` is Alfred's sentence for the owner on what the generation found, and when it added none, why: 1 to 300 characters and not blank. A done generation has one; a failed one has none. It is a snapshot taken when the run ended, and no event announces it: the client reads the list again when a run of kind `ideas` ends. `responses/idea-list-nothing-new.json` is a list with no open ideas whose last generation added none, with its note; `responses/idea-list-failed.json` is a list whose last generation failed.
 - The errors of the idea commands are `ErrorResponse`: 404 for an unknown idea, and 409 for an idea that is not open, a generation while one is queued or running, and a day's spend cap that is reached.
+
+## Rules
+
+The owner reads and edits the root `ALFRED.md`, the workspace rules, in the app. `GET /api/rules` is a `Rules`: the file's `text`, its `version` and `maxBytes`.
+
+- `text` is the file decoded as UTF-8, as it is. A missing file, and one that is a symlink or not a regular file, reads as empty text. A file over 65 536 bytes is answered 413 with an `ErrorResponse`, so an editor never holds a cut-off text.
+- `version` is the lowercase hex sha256 of the file's bytes, of the empty string when the file is missing or reads as empty. `maxBytes` is 8192: the most a saved text may hold, in UTF-8 bytes, being what of the file reaches the agent's system prompt.
+- `rules.save` replaces the file with `text`, stored as sent, and is answered 200 with the new `Rules`. Its `version` is the one the owner read, so a client saves against the `Rules` it edited. Any other `version` is a conflict: the client reads again.
+- The errors are `ErrorResponse`: 400 for a text over `maxBytes` of UTF-8 or with a NUL, and 409 for a version that is not the file's current one, or when `ALFRED.md` is a symlink, not a regular file or over 65 536 bytes: Alfred never replaces those. `rules.save` is answered 503 until Alfred has the rules service.
+
+The `commands/rules-save.json` fixture saves an edit of the text of `responses/rules.json`, against its version.
 
 ## Settings
 
