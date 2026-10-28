@@ -76,6 +76,7 @@ function parseFrame(block: string): Frame | undefined {
  * Follows /events, yielding each event until the server ends the stream, `signal` aborts it
  * or the caller stops iterating. Resumes after `lastEventId` (sent as the Last-Event-ID
  * header, as a reconnecting EventSource does) or after `after` (the `after` query).
+ * The `caught-up` frame that ends a backlog is not an event and is not yielded.
  */
 export async function* streamEvents(
   socket: string,
@@ -100,7 +101,7 @@ export async function* streamEvents(
       for (let end = pending.indexOf("\n\n"); end >= 0; end = pending.indexOf("\n\n")) {
         const frame = parseFrame(pending.slice(0, end));
         pending = pending.slice(end + 2);
-        if (frame) yield frame;
+        if (frame && frame.type !== "caught-up") yield frame;
       }
     }
   } finally {
