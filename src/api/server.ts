@@ -41,6 +41,8 @@ import type {
 /** How often an event stream gets a `: ping` comment. */
 export const HEARTBEAT_MS = 30_000;
 const PING = ": ping\n\n";
+/** Ends the backlog of a stream. It has no id, so a client's resume point stays where it is, and a client that does not know it skips it. */
+const CAUGHT_UP = "event: caught-up\ndata: {}\n\n";
 /** Events per page when a stream sends its backlog. */
 const BACKLOG_PAGE = 200;
 /** A client that lets this much pile up unread is dropped; it resumes by id when it reconnects. */
@@ -470,6 +472,7 @@ export async function startApi(opts: ApiOptions): Promise<() => Promise<void>> {
     for (const event of buffered) send(event);
     buffered.length = 0;
     live = true;
+    write(CAUGHT_UP);
   }
 
   async function route(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {

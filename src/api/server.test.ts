@@ -805,6 +805,67 @@ test("events appended while the backlog is read are neither skipped nor repeated
   assert.equal(events.reads, 3, "the backlog took three pages of two");
 });
 
+/** The frame that ends a backlog, as it is on the wire. */
+const CAUGHT_UP = "event: caught-up\ndata: {}\n\n";
+const markers = (text: string) => text.split(CAUGHT_UP).length - 1;
+
+test("the backlog ends with a caught-up frame that has no id, before the first live event", async (t) => {
+  const { socket, events } = await start(t);
+  appendRuns(events, 2);
+  const sse = await open(t, socket);
+  await until("the marker", () => markers(sse.text()) === 1);
+  const last = events.readSince(1, 1)[0];
+  assert.ok(sse.text().endsWith(`id: 2\nevent: run.updated\ndata: ${JSON.stringify(last)}\n\n${CAUGHT_UP}`), "right after the last backlog event, and nothing after it yet");
+  assert.deepEqual(sse.ids(), [1, 2], "the marker has no id line");
+
+  const live = events.append("run.updated", run);
+  await until("the live event", () => sse.ids().length === 3);
+  assert.ok(sse.text().endsWith(`id: 3\nevent: run.updated\ndata: ${JSON.stringify(live)}\n\n`));
+  assert.equal(markers(sse.text()), 1, "once per stream");
+  assert.ok(sse.text().indexOf(CAUGHT_UP) < sse.text().indexOf("id: 3"));
+});
+
+test("a stream with nothing to catch up on gets the ping and then the marker, also when it resumes at the end", async (t) => {
+  const { socket, events } = await start(t, { heartbeatMs: 60_000 });
+  const empty = await open(t, socket);
+  await until("the marker", () => empty.text() === `: ping\n\n${CAUGHT_UP}`);
+
+  appendRuns(events, 3);
+  const atEnd = await open(t, socket, "/events", { "Last-Event-ID": "3" });
+  await until("the marker", () => atEnd.text() === `: ping\n\n${CAUGHT_UP}`);
+  assert.deepEqual(atEnd.ids(), []);
+});
+
+test("a backlog of several pages gets the marker only after the last page", async (t) => {
+  const { socket, events } = await start(t, { pageSize: 2 });
+  appendRuns(events, 5);
+  events.onRead = () => {}; // reads are counted only while a hook is set
+  const sse = await open(t, socket);
+  await until("the marker", () => markers(sse.text()) === 1);
+  assert.deepEqual(sse.ids(), [1, 2, 3, 4, 5], "every page came first");
+  assert.ok(sse.text().endsWith(CAUGHT_UP));
+  assert.equal(events.reads, 3, "three pages of two");
+
+  // A stream that resumes mid-log gets its own marker, after its own last page.
+  const exact = await open(t, socket, "/events?after=1");
+  await until("the marker", () => markers(exact.text()) === 1);
+  assert.deepEqual(exact.ids(), [2, 3, 4, 5]);
+  assert.ok(exact.text().endsWith(CAUGHT_UP));
+});
+
+test("events that arrive while the backlog is read come before the marker", async (t) => {
+  const { socket, events } = await start(t, { pageSize: 2 });
+  appendRuns(events, 3);
+  events.onRead = (read) => {
+    if (read <= 2) events.append("run.updated", run);
+  };
+  const sse = await open(t, socket);
+  await until("the marker", () => markers(sse.text()) === 1);
+  events.onRead = undefined;
+  assert.deepEqual(sse.ids(), [1, 2, 3, 4, 5]);
+  assert.ok(sse.text().endsWith(CAUGHT_UP), "buffered events are part of the backlog");
+});
+
 test("a client resumes after Last-Event-ID, which wins over ?after", async (t) => {
   const { socket, events } = await start(t);
   appendRuns(events, 5);
@@ -850,7 +911,7 @@ test("an id that is not a non-negative integer gets 400", async (t) => {
 test("a stream pings as it opens, so a client with nothing to catch up on gets a byte at once", async (t) => {
   const { socket } = await start(t, { heartbeatMs: 60_000 });
   const sse = await open(t, socket);
-  await until("the opening ping", () => sse.text() === ": ping\n\n");
+  await until("the opening ping", () => sse.text().startsWith(": ping\n\n"));
 });
 
 test("a ping goes out on the heartbeat interval, which is 30 s by default", async (t) => {
@@ -858,7 +919,7 @@ test("a ping goes out on the heartbeat interval, which is 30 s by default", asyn
   const { socket } = await start(t, { heartbeatMs: 20 });
   const sse = await open(t, socket);
   await until("three pings", () => sse.text().split(": ping\n\n").length > 3);
-  assert.equal(sse.text().replaceAll(": ping\n\n", ""), "", "only pings, as there are no events");
+  assert.equal(sse.text().replaceAll(": ping\n\n", ""), CAUGHT_UP, "only pings and the one marker, as there are no events");
 });
 
 test("after the client disconnects, nothing stays subscribed and the heartbeat stops", async (t) => {
@@ -925,8 +986,8 @@ test("a live event goes out as a frame with an event and a data line and no id l
   assert.deepEqual(sse.ids(), [1, 2], "ids go on as if the live events had not been there");
   assert.deepEqual(
     [...sse.text().matchAll(/^event: (.+)$/gm)].map((m) => m[1]),
-    ["run.updated", "message.delta", "run.step", "run.updated"],
-    "in the order they happened",
+    ["run.updated", "caught-up", "message.delta", "run.step", "run.updated"],
+    "in the order they happened, the marker after the backlog",
   );
 });
 
