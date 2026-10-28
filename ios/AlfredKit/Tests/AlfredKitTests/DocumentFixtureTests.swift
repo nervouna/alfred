@@ -37,6 +37,15 @@ final class DocumentFixtureTests: XCTestCase {
         XCTAssertEqual(document.taskId, "p3r8vx")
     }
 
+    func testRemovedDocumentEventNamesTheDocument() throws {
+        let event = try decodeEvent("events/document-removed.json")
+        XCTAssertEqual(event.id, 36)
+        guard case let .documentRemoved(id) = event.payload else {
+            return XCTFail("expected a document.removed event, got \(event.payload)")
+        }
+        XCTAssertEqual(id, "r4f7ma")
+    }
+
     /// The annotation of an annotation.updated fixture, or nil for any other event.
     private func annotation(_ name: String) throws -> Annotation? {
         guard case let .annotationUpdated(annotation) = try decodeEvent(name).payload else { return nil }
@@ -90,6 +99,9 @@ final class DocumentFixtureTests: XCTestCase {
         timeline.apply(.event(try decodeEvent("events/annotation-updated-submitted.json")))
         XCTAssertEqual(timeline.messages, [])
         XCTAssertEqual(timeline.lastEventId, 29)
+        timeline.apply(.event(try decodeEvent("events/document-removed.json")))
+        XCTAssertEqual(timeline.messages, [])
+        XCTAssertEqual(timeline.lastEventId, 36)
     }
 
     func testAnnotationTargetRoundTripsBothKinds() throws {

@@ -29,6 +29,11 @@ final class CommandFixtureTests: XCTestCase {
         XCTAssertEqual(send, .messageSend(clientId: "c-7f3a9e", text: "帮我查一下 VPS 价格"))
         let stop = try JSONDecoder().decode(Command.self, from: Data(#"{"type":"run.stop","runId":"k7m2qa"}"#.utf8))
         XCTAssertEqual(stop, .runStop(runId: "k7m2qa"))
+        let save = try JSONDecoder().decode(
+            Command.self,
+            from: Data(##"{"type":"rules.save","text":"# 规则\n","version":"3ca90a08"}"##.utf8)
+        )
+        XCTAssertEqual(save, .rulesSave(text: "# 规则\n", version: "3ca90a08"))
     }
 
     func testQuestionAnswerCarriesTheQuestionIdAndItsAnswers() throws {

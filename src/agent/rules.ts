@@ -7,6 +7,9 @@
 //
 // Skills in skills/ follow the same rule: the agent changes them only on the
 // owner's explicit request, and the change notice after a run covers them too.
+//
+// The owner can also read and replace the root ALFRED.md from the app (readRulesForOwner,
+// saveRules, rulesCommands). That does not change what the agent may write.
 
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -14,15 +17,20 @@ import path from "node:path";
 
 import type { HookCallbackMatcher } from "@anthropic-ai/claude-agent-sdk";
 
-import { log } from "../log.ts";
+import type { Rules, RulesSave } from "../api/schema.ts";
+import type { RulesCommands, RulesReply } from "../api/server.ts";
+import { TRASH_DIR } from "../documents/trash.ts";
+import type { Versions } from "../documents/versions.ts";
+import { describeError, log } from "../log.ts";
 import { resolveInside } from "./guard.ts";
+import { writeFileAtomic } from "./memory.ts";
 import { SKILLS_DIR } from "./skills.ts";
 
 export const RULES_FILE = "ALFRED.md";
 /** Cap on the text of one rules file placed in the prompt or injected by the hook. */
 export const RULES_MAX_BYTES = 8 * 1024;
-/** Rules files under .trash/ were deleted and never apply. */
-const TRASH_DIR = ".trash";
+/** The longest root ALFRED.md the app is sent whole; a longer one is refused, so an editor never holds a cut-off text. */
+export const RULES_READ_MAX_BYTES = 64 * 1024;
 
 export const DEFAULT_RULES = `# Workspace rules
 
@@ -297,6 +305,11 @@ export function rulesDisclosure(tracker: RulesTracker): HookCallbackMatcher {
   };
 }
 
+/** Lowercase hex sha256: the content hash of a snapshot, and the version the app sees of the root ALFRED.md. */
+function sha256Hex(data: Buffer | string): string {
+  return crypto.createHash("sha256").update(data).digest("hex");
+}
+
 /**
  * Content hash of every rules file in the workspace outside .trash/, and of
  * every file under skills/, by workspace-relative path.
@@ -323,7 +336,7 @@ export function snapshotRules(root: string): Map<string, string> {
         if (!(dir === rootReal && entry.name === TRASH_DIR)) walk(full, all || (dir === rootReal && entry.name === SKILLS_DIR));
       } else if (entry.isFile() && (all || isRulesFileName(entry.name))) {
         try {
-          out.set(path.relative(rootReal, full), crypto.createHash("sha256").update(fs.readFileSync(full)).digest("hex"));
+          out.set(path.relative(rootReal, full), sha256Hex(fs.readFileSync(full)));
         } catch {
           // Vanished or unreadable; treat as absent.
         }
@@ -345,4 +358,162 @@ export function rulesChangeNotice(before: Map<string, string>, after: Map<string
     else if (prev !== next) lines.push(`已更新 ${rel}`);
   }
   return lines.length ? lines.join("\n") : undefined;
+}
+
+/** Runs that are live, each with the snapshot it took at its start. An owner's save is folded into these. */
+const liveWatches = new Set<RulesWatch>();
+
+/**
+ * What a run knows of the workspace's rules and skills from its start, for the notice after it. The run is live from
+ * the moment it is made until `notice()` or `close()`: while it is, the owner's save of the root ALFRED.md (saveRules)
+ * is taken into its snapshot, so the notice does not report it as the run's change. What the agent writes to the file
+ * after the save still differs from the saved text, so the notice reports that. Every step here is synchronous, so a
+ * save cannot fall between the snapshot and the registration, nor between the comparison and the end of the watch.
+ */
+export class RulesWatch {
+  /** The real path of the workspace root the run works in. */
+  readonly rootReal: string;
+  private readonly snapshot: Map<string, string>;
+
+  constructor(root: string) {
+    this.snapshot = snapshotRules(root);
+    try {
+      this.rootReal = realRoot(root);
+    } catch {
+      this.rootReal = root;
+    }
+    liveWatches.add(this);
+  }
+
+  /** The snapshot: content hash by workspace-relative path, as of the run's start and the owner's saves since. */
+  get before(): ReadonlyMap<string, string> {
+    return this.snapshot;
+  }
+
+  /** The owner saved the root ALFRED.md with this content hash. */
+  ownerSaved(hash: string): void {
+    this.snapshot.set(RULES_FILE, hash);
+  }
+
+  /** The notice for the rules and skills the run changed, undefined when none; it ends the watch. */
+  notice(): string | undefined {
+    const notice = rulesChangeNotice(this.snapshot, snapshotRules(this.rootReal));
+    this.close();
+    return notice;
+  }
+
+  /** The run is over; the owner's saves are no longer taken into the snapshot. */
+  close(): void {
+    liveWatches.delete(this);
+  }
+}
+
+/** Snapshot `root`'s rules and skills for a run that is starting, and watch the owner's saves while it is live. */
+export function watchRules(root: string): RulesWatch {
+  return new RulesWatch(root);
+}
+
+/** The state of the root ALFRED.md for the app's edits. */
+type RootRules =
+  | { kind: "file"; bytes: Buffer }
+  | { kind: "missing" }
+  /** A symlink, or anything that is not a regular file: never followed, never replaced. */
+  | { kind: "irregular" }
+  /** Longer than RULES_READ_MAX_BYTES; not read whole. */
+  | { kind: "too-large" };
+
+function inspectRootRules(rootReal: string): RootRules {
+  const file = path.join(rootReal, RULES_FILE);
+  try {
+    if (!fs.lstatSync(file).isFile()) return { kind: "irregular" };
+  } catch (err) {
+    if (["ENOENT", "ENOTDIR"].includes((err as NodeJS.ErrnoException).code ?? "")) return { kind: "missing" };
+    throw err;
+  }
+  let fd: number;
+  try {
+    // A symlink put in place since the lstat is not followed, and a FIFO does not block the open.
+    fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ELOOP") return { kind: "irregular" };
+    if (code === "ENOENT") return { kind: "missing" };
+    throw err;
+  }
+  try {
+    if (!fs.fstatSync(fd).isFile()) return { kind: "irregular" };
+    // One byte more than the cap, so that a file that grew since the lstat is not taken for a whole one.
+    const buf = Buffer.alloc(RULES_READ_MAX_BYTES + 1);
+    let n = 0;
+    while (n < buf.length) {
+      const got = fs.readSync(fd, buf, n, buf.length - n, n);
+      if (got === 0) break;
+      n += got;
+    }
+    return n > RULES_READ_MAX_BYTES ? { kind: "too-large" } : { kind: "file", bytes: buf.subarray(0, n) };
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/** The app's view of the file with these bytes: its text decoded as UTF-8, as it is, and its content hash as the version. */
+function rulesOf(bytes: Buffer): Rules {
+  return { text: bytes.toString("utf8"), version: sha256Hex(bytes), maxBytes: RULES_MAX_BYTES };
+}
+
+/**
+ * The root ALFRED.md as the owner edits it in the app: its text as it is (not trimmed, not cut at RULES_MAX_BYTES) and
+ * the sha256 of its bytes as the version. A missing file, a symlink and anything but a regular file read as empty text
+ * with the version of the empty string. Undefined when the file is over RULES_READ_MAX_BYTES.
+ */
+export function readRulesForOwner(root: string): Rules | undefined {
+  const state = inspectRootRules(realRoot(root));
+  if (state.kind === "too-large") return undefined;
+  return rulesOf(state.kind === "file" ? state.bytes : Buffer.alloc(0));
+}
+
+/**
+ * rules.save: replaces the root ALFRED.md with the command's text, stored as sent, when the command's version is the
+ * file's current one. Refused, with nothing changed: 400 for a text over RULES_MAX_BYTES of UTF-8 or with a NUL, 409 for
+ * another version, for a symlink or a file that is not a regular one (never replaced) and for a file over
+ * RULES_READ_MAX_BYTES (no version of it was ever shown). The check and the write have no await between them, and the
+ * write is atomic. A run that is live (watchRules) takes the save into its snapshot, so it does not report it.
+ */
+export function saveRules(root: string, command: RulesSave): RulesReply {
+  const { text, version } = command;
+  if (text.includes("\0")) return { ok: false, status: 400, error: "text: must not contain a NUL" };
+  if (Buffer.byteLength(text, "utf8") > RULES_MAX_BYTES) return { ok: false, status: 400, error: `text: must be at most ${RULES_MAX_BYTES} bytes` };
+  const rootReal = realRoot(root);
+  const current = inspectRootRules(rootReal);
+  if (current.kind === "irregular") return { ok: false, status: 409, error: `${RULES_FILE} is a symlink or not a regular file, so it is not replaced` };
+  if (current.kind === "too-large") return { ok: false, status: 409, error: `${RULES_FILE} is over ${RULES_READ_MAX_BYTES} bytes, so it is not replaced from here` };
+  if (version !== sha256Hex(current.kind === "file" ? current.bytes : "")) {
+    return { ok: false, status: 409, error: `version: not the current version of ${RULES_FILE}` };
+  }
+  writeFileAtomic(path.join(rootReal, RULES_FILE), text);
+  const saved = rulesOf(Buffer.from(text, "utf8"));
+  for (const watch of liveWatches) if (watch.rootReal === rootReal) watch.ownerSaved(saved.version);
+  log.info(`owner saved ${RULES_FILE} in the app (${Buffer.byteLength(text, "utf8")} bytes)`);
+  return { ok: true, body: saved };
+}
+
+/**
+ * The rules commands of the command API (see RulesCommands in src/api/server.ts). With `versions`, the saved file is
+ * committed to the workspace's history as `Edit ALFRED.md`; a failed commit is logged and the save still answers 200.
+ */
+export function rulesCommands(opts: { workspace: string; versions?: Pick<Versions, "commit"> }): RulesCommands {
+  return {
+    async save(command) {
+      // Synchronous: nothing is awaited between its check and its write.
+      const reply = saveRules(opts.workspace, command);
+      if (reply.ok && opts.versions) {
+        try {
+          await opts.versions.commit(`Edit ${RULES_FILE}`, { paths: [RULES_FILE] });
+        } catch (err) {
+          log.warn(`committing ${RULES_FILE} after the owner's save failed: ${describeError(err)}`);
+        }
+      }
+      return reply;
+    },
+  };
 }

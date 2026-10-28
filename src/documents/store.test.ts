@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { after, beforeEach, test } from "node:test";
+import { after, beforeEach, mock, test } from "node:test";
 
 // runs.ts reads STATE_DIR at import time (through store.ts), so set it before loading the modules under test.
 const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "alfred-documents-")));
@@ -11,7 +12,7 @@ after(() => fs.rmSync(tmp, { recursive: true, force: true }));
 
 const { EventLog } = await import("../events.ts");
 const { AnnotationSchema, DocumentSchema, DocumentVersionSchema } = await import("../api/schema.ts");
-const { DocumentRefused, DocumentStore, documentKind, documentTitle, readDocumentFile } = await import("./store.ts");
+const { DocumentRefused, DocumentStore, TRASH_DIR, documentKind, documentTitle, isTrashedPath, readDocumentFile } = await import("./store.ts");
 type AnnotationDraft = import("./store.ts").AnnotationDraft;
 
 const at = (iso: string) => new Date(iso);
@@ -42,6 +43,11 @@ function open() {
 /** The document.updated events of a log, oldest first. */
 function documentUpdates(events: InstanceType<typeof EventLog>) {
   return events.readSince(0).flatMap((event) => (event.type === "document.updated" ? [event.data] : []));
+}
+
+/** The document.removed events of a log, oldest first. */
+function documentRemovals(events: InstanceType<typeof EventLog>) {
+  return events.readSince(0).flatMap((event) => (event.type === "document.removed" ? [event.data] : []));
 }
 
 /** The annotation.updated events of a log, oldest first. */
@@ -320,6 +326,140 @@ test("a move to the path a document already has changes nothing", () => {
   assert.deepEqual(store.move("a.md", "a.md", at("2026-10-26T05:00:00Z")), []);
   assert.deepEqual(store.get(doc.id), doc);
   assert.equal(documentUpdates(events).length, 1);
+});
+
+test("isTrashedPath: a path is trashed when it is under .trash/ at the root of the workspace", () => {
+  assert.equal(TRASH_DIR, ".trash");
+  for (const trashed of [".trash/a.md", ".trash/x/a.md"]) assert.equal(isTrashedPath(trashed), true, trashed);
+  for (const kept of ["notes/.trash/a.md", ".trashed/a.md", "a.md", "trash/a.md", "notes/a.md"]) assert.equal(isTrashedPath(kept), false, kept);
+});
+
+test("moving a document into .trash/ announces document.removed and no document.updated; moving it out announces document.updated", () => {
+  const { events, store } = open();
+  const doc = essay(store, "notes/a.md");
+  const delivered = events.readSince(0).length;
+
+  const trashed = store.move("notes/a.md", ".trash/a.md", at("2026-10-26T05:00:00Z"));
+  assert.deepEqual(
+    trashed.map((moved) => moved.path),
+    [".trash/a.md"],
+  );
+  assert.deepEqual(
+    events.readSince(delivered).map((event) => [event.type, event.data]),
+    [["document.removed", { id: doc.id }]],
+  );
+
+  const restored = store.move(".trash/a.md", "notes/b.md", at("2026-10-26T06:00:00Z"));
+  assert.deepEqual(
+    restored.map((moved) => moved.path),
+    ["notes/b.md"],
+  );
+  assert.deepEqual(
+    events.readSince(delivered + 1).map((event) => [event.type, event.data]),
+    [["document.updated", restored[0]]],
+  );
+});
+
+test("a move within .trash/ announces nothing, and a directory moved into it removes each document under it", () => {
+  const { events, store } = open();
+  const a = essay(store, "notes/a.md");
+  const b = essay(store, "notes/sub/b.md");
+  const outside = essay(store, "reports/c.md");
+
+  store.move("notes", ".trash/notes", at("2026-10-26T05:00:00Z"));
+  assert.deepEqual(
+    documentRemovals(events).map((removed) => removed.id).sort(),
+    [a.id, b.id].sort(),
+  );
+  assert.equal(documentUpdates(events).length, 3, "only the three deliveries");
+
+  const before = events.readSince(0).length;
+  const within = store.move(".trash/notes/a.md", ".trash/old/a.md", at("2026-10-26T06:00:00Z"));
+  assert.deepEqual(
+    within.map((moved) => moved.path),
+    [".trash/old/a.md"],
+    "the path is kept up to date",
+  );
+  assert.equal(events.readSince(0).length, before, "no event");
+
+  const restored = store.move(".trash/old/a.md", "notes/a.md", at("2026-10-26T07:00:00Z"));
+  assert.equal(restored[0]?.id, a.id, "a restore from the new place finds it");
+  assert.equal(store.get(a.id)?.path, "notes/a.md");
+  assert.equal(store.get(outside.id)?.path, "reports/c.md");
+  assert.equal(documentRemovals(events).length, 2);
+});
+
+test("a trashed document is absent from every read, and back after a restore with its id, versions and annotations", () => {
+  const { file, events, store } = open();
+  const doc = store.deliver({ path: "notes/a.md", version: commit(1), at: START, runId: RUN_A, title: "A", kind: "markdown" });
+  const keep = store.deliver({ path: "notes/keep.md", version: commit(1), at: START, runId: RUN_A, title: "Keep", kind: "markdown" });
+  store.deliver({ path: "notes/a.md", version: commit(2), at: at("2026-10-26T02:00:00Z"), runId: RUN_B, title: "A", kind: "markdown" });
+  const [note] = store.submit({ documentId: doc.id, version: commit(2), annotations: [draft("改")], runId: RUN_C, at: at("2026-10-26T03:00:00Z") });
+  if (!note) throw new Error("the batch has one annotation");
+  store.reply(note.id, RUN_C, "改了", at("2026-10-26T04:00:00Z"));
+  const versions = store.versions(doc.id);
+  const annotations = store.annotations(doc.id);
+  const current = store.get(doc.id);
+  assert.equal(versions?.length, 2);
+  assert.equal(annotations.length, 1);
+
+  store.move("notes/a.md", ".trash/a.md", at("2026-10-26T05:00:00Z"));
+  for (const reader of [store, new DocumentStore({ file, events, now })]) {
+    assert.deepEqual(
+      reader.list().map((listed) => listed.id),
+      [keep.id],
+    );
+    assert.equal(reader.get(doc.id), undefined);
+    assert.equal(reader.byPath(".trash/a.md"), undefined);
+    assert.equal(reader.versions(doc.id), undefined);
+    assert.deepEqual(reader.annotations(doc.id), []);
+  }
+  const held = readDocumentFile(file);
+  assert.equal(held.documents.length, 2, "the entry stays in the file");
+  assert.equal(held.annotations.length, 1, "and so does its annotation");
+
+  store.move(".trash/a.md", "notes/a.md", at("2026-10-26T06:00:00Z"));
+  const reopened = new DocumentStore({ file, events, now });
+  for (const reader of [store, reopened]) {
+    assert.deepEqual(
+      reader.list().map((listed) => listed.id),
+      [doc.id, keep.id],
+    );
+    assert.deepEqual(reader.get(doc.id), { ...current, path: "notes/a.md", updatedAt: "2026-10-26T06:00:00.000Z" });
+    assert.equal(reader.byPath("notes/a.md")?.id, doc.id);
+    assert.deepEqual(reader.versions(doc.id), versions);
+    assert.deepEqual(reader.annotations(doc.id), annotations);
+  }
+});
+
+test("submit on a trashed document is refused as no such document, and goes through after a restore", () => {
+  const { store } = open();
+  const doc = essay(store, "notes/a.md");
+  store.move("notes/a.md", ".trash/a.md", at("2026-10-26T05:00:00Z"));
+  assert.throws(
+    () => store.submit({ documentId: doc.id, version: commit(1), annotations: [draft("改")], runId: RUN_B, at: START }),
+    (err: unknown) => err instanceof DocumentRefused && err.status === 404 && err.message === "no such document",
+  );
+  assert.equal(store.annotations(doc.id).length, 0, "nothing was recorded");
+
+  store.move(".trash/a.md", "notes/a.md", at("2026-10-26T06:00:00Z"));
+  assert.equal(store.submit({ documentId: doc.id, version: commit(1), annotations: [draft("改")], runId: RUN_B, at: START }).length, 1);
+});
+
+test("a new document never takes the id of a trashed one", () => {
+  const { store } = open();
+  // The ids are drawn from random bytes: draw the first document's id again for the second, then another.
+  const draws = [[0, 8, 9, 10, 11, 12], [0, 8, 9, 10, 11, 12], [1, 8, 9, 10, 11, 12]];
+  const random = mock.method(crypto, "randomBytes", () => Buffer.from(draws.shift() ?? [2, 8, 9, 10, 11, 12]));
+  try {
+    const first = essay(store, "notes/a.md");
+    assert.equal(first.id, "2abcde");
+    store.move("notes/a.md", ".trash/a.md", at("2026-10-26T05:00:00Z"));
+    const second = essay(store, "notes/b.md");
+    assert.equal(second.id, "3abcde", "the id of the trashed document is taken");
+  } finally {
+    random.mock.restore();
+  }
 });
 
 test("submit refuses an unknown document, a version that is not current, a second revision and passages on HTML", () => {

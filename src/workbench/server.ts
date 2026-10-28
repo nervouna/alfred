@@ -17,10 +17,11 @@ import path from "node:path";
 
 import { resolveInside } from "../agent/guard.ts";
 import { loadMemories } from "../agent/memory.ts";
+import { RULES_READ_MAX_BYTES, readRulesForOwner } from "../agent/rules.ts";
 import { DocumentDetailSchema, PushRegistrationSchema, RunSchema, StepSchema } from "../api/schema.ts";
 import type { DocumentDetail, DocumentList, Run, RunDetail, TaskDetail } from "../api/schema.ts";
 import { apiSocketPath } from "../api/server.ts";
-import { readDocumentFile } from "../documents/store.ts";
+import { isTrashedPath, readDocumentFile } from "../documents/store.ts";
 import { VERSIONS_GIT_DIR, Versions } from "../documents/versions.ts";
 import { describeError, log } from "../log.ts";
 import type { AccessVerifier } from "./access.ts";
@@ -379,11 +380,13 @@ function ideaListReply(): Response {
 }
 
 /**
- * GET /api/documents: the documents the store keeps in documents.json, most recently updated first. A missing file is
- * an empty list; a file that does not fit fails the request, and is logged.
+ * GET /api/documents: the documents the store keeps in documents.json, most recently updated first, those in .trash/
+ * left out. A missing file is an empty list; a file that does not fit fails the request, and is logged.
  */
 function documentListReply(): Response {
-  const documents = readDocumentFile().documents.map((entry) => entry.document);
+  const documents = readDocumentFile()
+    .documents.map((entry) => entry.document)
+    .filter((document) => !isTrashedPath(document.path));
   documents.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
   const body: DocumentList = { documents };
   return jsonReply(200, body);
@@ -391,16 +394,16 @@ function documentListReply(): Response {
 
 /**
  * GET /api/documents/<id>: the document, its versions (newest first, the first being the current one), its annotations
- * (newest first) and its revision runs (newest first, at most 50). A malformed or unknown id is 404; runs whose record
- * does not fit the client's schema are left out and logged, as GET /api/tasks/<id> leaves them out. A body that does
- * not fit DocumentDetailSchema fails the request, and is logged.
+ * (newest first) and its revision runs (newest first, at most 50). A malformed or unknown id is 404, and so is the id of
+ * a document in .trash/; runs whose record does not fit the client's schema are left out and logged, as
+ * GET /api/tasks/<id> leaves them out. A body that does not fit DocumentDetailSchema fails the request, and is logged.
  */
 function documentDetailReply(id: string): Response {
   const notFound = () => jsonError(404, "There is no such document.");
   if (!DOCUMENT_ID.test(id)) return notFound();
   const file = readDocumentFile();
   const entry = file.documents.find((other) => other.document.id === id);
-  if (!entry) return notFound();
+  if (!entry || isTrashedPath(entry.document.path)) return notFound();
   const runs: Run[] = [];
   let left = 0;
   for (const record of allRuns()) {
@@ -443,6 +446,17 @@ async function pushRegistrationReply(req: http.IncomingMessage, deviceId: string
     return jsonError(401, "A paired device's token is required.", { "WWW-Authenticate": "Bearer" });
   }
   return { status: 204, headers: {}, body: "" };
+}
+
+/**
+ * GET /api/rules: the root ALFRED.md as a Rules: its text and the sha256 of its bytes as the version, which rules.save
+ * is made against. A missing file and a symlink read as empty text. A file over RULES_READ_MAX_BYTES is 413, so that an
+ * editor never holds a cut-off text.
+ */
+function rulesReply(workspace: string): Response {
+  const rules = readRulesForOwner(workspace);
+  if (!rules) return jsonError(413, `ALFRED.md is over ${RULES_READ_MAX_BYTES} bytes, too long to edit here.`);
+  return jsonReply(200, rules);
 }
 
 /**
@@ -542,6 +556,7 @@ async function apiRoute(req: http.IncomingMessage, url: URL, ctx: ApiContext): P
   if (p === "/api/documents") return only("GET", () => documentListReply());
   if (p.startsWith(DOCUMENT_PREFIX)) return only("GET", () => documentDetailReply(p.slice(DOCUMENT_PREFIX.length)));
   if (p === "/api/ideas") return only("GET", () => ideaListReply());
+  if (p === "/api/rules") return only("GET", () => rulesReply(ctx.workspace));
   if (p === "/api/push") return only("POST", () => pushRegistrationReply(req, device.id, ctx.devices));
   const run = RUN_PATH.exec(p)?.[1];
   if (run) return only("GET", () => runDetailReply(run));

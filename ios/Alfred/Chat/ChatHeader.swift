@@ -27,6 +27,10 @@ struct ChatHeader: View {
         barHeight - (AvatarMetrics.diameter - AvatarMetrics.hang)
     }
 
+    /// Whether a chat run is going: the commands that start or switch a session are held off until it has ended.
+    let isChatRunning: Bool
+    /// Sends a command's text as the owner's message.
+    let send: (ChatCommand) -> Void
     /// The 取消配对 item of the menu.
     let unpair: () -> Void
 
@@ -40,6 +44,18 @@ struct ChatHeader: View {
             .accessibilityIdentifier("chat.header.leading")
             Spacer(minLength: 0)
             Menu {
+                ForEach(Array(ChatCommand.menu.enumerated()), id: \.offset) { _, group in
+                    Section {
+                        if group.allSatisfy(\.isModel) {
+                            Menu("模型", systemImage: "cpu") {
+                                ForEach(group, id: \.self, content: item)
+                            }
+                        } else {
+                            ForEach(group, id: \.self, content: item)
+                        }
+                    }
+                }
+                Divider()
                 Button("取消配对", systemImage: "iphone.slash", role: .destructive, action: unpair)
             } label: {
                 GlassCircle(symbol: "ellipsis")
@@ -57,6 +73,12 @@ struct ChatHeader: View {
                 .accessibilityElement()
                 .accessibilityIdentifier("chat.header.bar")
         }
+    }
+
+    /// A menu item for a command. One that needs an idle chat is off while a run is going.
+    private func item(_ command: ChatCommand) -> some View {
+        Button(command.title, systemImage: command.symbol) { send(command) }
+            .disabled(command.needsIdleChat && isChatRunning)
     }
 }
 

@@ -319,6 +319,9 @@ export const DocumentSchema = z.object({
   updatedAt: IsoTimestampSchema,
 });
 
+/** The data of document.removed: the document the agent deleted. A restore announces it again as document.updated. */
+export const DocumentRemovedSchema = z.object({ id: DocumentIdSchema });
+
 const AnnotationQuoteSchema = z
   .string()
   .refine((quote) => quote.trim() !== "", "must not be blank")
@@ -515,6 +518,7 @@ export const EventSchema = z.discriminatedUnion("type", [
   z.object({ ...EventEnvelope, type: z.literal("question.answered"), data: QuestionAnsweredSchema }),
   z.object({ ...EventEnvelope, type: z.literal("task.updated"), data: TaskSchema }),
   z.object({ ...EventEnvelope, type: z.literal("document.updated"), data: DocumentSchema }),
+  z.object({ ...EventEnvelope, type: z.literal("document.removed"), data: DocumentRemovedSchema }),
   z.object({ ...EventEnvelope, type: z.literal("annotation.updated"), data: AnnotationSchema }),
   z.object({ ...EventEnvelope, type: z.literal("idea.updated"), data: IdeaSchema }),
   z.object({ ...EventEnvelope, type: z.literal("settings.updated"), data: SettingsSchema }),
@@ -661,6 +665,17 @@ export const IdeaListSchema = z.object({
   ideas: z.array(IdeaSchema),
   generatingRunId: RunIdSchema.optional(),
   lastGeneration: IdeaGenerationSchema.optional(),
+});
+
+/**
+ * The body of GET /api/rules and of a successful rules.save: the text of the root ALFRED.md, empty when there is none, and
+ * its `version`, the lowercase hex sha256 of the file's bytes (of the empty string when there is no file). `maxBytes` is
+ * the most a save may hold, in UTF-8 bytes: what of the file reaches the agent's system prompt.
+ */
+export const RulesSchema = z.object({
+  text: z.string(),
+  version: z.string().regex(/^[0-9a-f]{64}$/, "must be a 64-character lowercase hex sha256"),
+  maxBytes: z.int().positive(),
 });
 
 /** The body of POST /api/uploads: the file Alfred saved under inbox/. */
@@ -823,6 +838,17 @@ export const IdeaRejectSchema = z.strictObject({
 /** Asks Alfred to generate ideas now. */
 export const IdeaGenerateSchema = z.strictObject({ type: z.literal("idea.generate") });
 
+/**
+ * Replaces the root ALFRED.md with `text`, stored as sent. `version` is the one the owner read, the `version` of the `Rules`
+ * they edited: a save against any other string is a conflict (409), so no schema check is made on its shape. Over
+ * `maxBytes` of UTF-8 or a NUL in `text` is refused by Alfred (400), after the schema.
+ */
+export const RulesSaveSchema = z.strictObject({
+  type: z.literal("rules.save"),
+  text: z.string(),
+  version: z.string(),
+});
+
 // A setting's new value is within the range the owner may choose. A deployment's environment may set a value beyond it.
 const DailyBudgetSchema = z
   .number()
@@ -894,6 +920,7 @@ export const CommandSchema = z.discriminatedUnion("type", [
   IdeaAcceptSchema,
   IdeaRejectSchema,
   IdeaGenerateSchema,
+  RulesSaveSchema,
   SettingsUpdateSchema,
 ]);
 
@@ -918,6 +945,7 @@ export type TaskDetail = z.infer<typeof TaskDetailSchema>;
 export type TaskCreate = z.infer<typeof TaskCreateSchema>;
 export type TaskUpdate = z.infer<typeof TaskUpdateSchema>;
 export type Document = z.infer<typeof DocumentSchema>;
+export type DocumentRemoved = z.infer<typeof DocumentRemovedSchema>;
 export type DocumentVersion = z.infer<typeof DocumentVersionSchema>;
 export type Annotation = z.infer<typeof AnnotationSchema>;
 export type AnnotationTarget = z.infer<typeof AnnotationTargetSchema>;
@@ -942,6 +970,8 @@ export type IdeaList = z.infer<typeof IdeaListSchema>;
 export type IdeaAccept = z.infer<typeof IdeaAcceptSchema>;
 export type IdeaReject = z.infer<typeof IdeaRejectSchema>;
 export type IdeaGenerate = z.infer<typeof IdeaGenerateSchema>;
+export type Rules = z.infer<typeof RulesSchema>;
+export type RulesSave = z.infer<typeof RulesSaveSchema>;
 export type SettingKey = z.infer<typeof SettingKeySchema>;
 export type Settings = z.infer<typeof SettingsSchema>;
 export type SettingsResult = z.infer<typeof SettingsResultSchema>;

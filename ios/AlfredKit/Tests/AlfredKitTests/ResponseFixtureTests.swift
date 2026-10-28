@@ -29,6 +29,7 @@ final class ResponseFixtureTests: XCTestCase {
                     _ = try decoder.decode(IdeaList.self, from: data)
                 case "settings-result.json", "settings-result-beyond-ranges.json": _ = try decoder.decode(SettingsResult.self, from: data)
                 case "settings-detail.json": _ = try decoder.decode(SettingsDetail.self, from: data)
+                case "rules.json": _ = try decoder.decode(Rules.self, from: data)
                 case "error.json": _ = try decoder.decode(ErrorResponse.self, from: data)
                 default: XCTFail("\(name) has no response type")
                 }
@@ -60,6 +61,14 @@ final class ResponseFixtureTests: XCTestCase {
         XCTAssertEqual(detail.steps.map(\.tool), ["WebSearch", "Task", "Write"])
         XCTAssertNil(detail.steps[0].agent)
         XCTAssertEqual(detail.steps[1].agent, "reviewer")
+    }
+
+    func testRulesCarryTheTextItsVersionAndTheLimit() throws {
+        let data = try Data(contentsOf: Fixtures.directory.appending(path: "responses/rules.json"))
+        let rules = try JSONDecoder().decode(Rules.self, from: data)
+        XCTAssertTrue(rules.text.hasPrefix("# Workspace rules"))
+        XCTAssertEqual(rules.version, "3ca90a087679c144795ef3d87cd728ca2fc95886596e863550f376b76b61f10d")
+        XCTAssertEqual(rules.maxBytes, 8192)
     }
 
     func testErrorResponseCarriesItsMessage() throws {
