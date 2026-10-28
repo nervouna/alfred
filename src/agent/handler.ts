@@ -64,6 +64,7 @@ import type { DocumentReply, IdeaReply } from "../api/server.ts";
 import type { Annotation, DocumentRevise, IdeaGenerationAccepted, IdeaTrigger, Question, RevisionAccepted, Task } from "../api/schema.ts";
 import { InvalidAnswer, SerialQueue, outboundKind, recordInbound, recorded, workspaceRelative } from "../channels.ts";
 import type { Inbound, Intake, Outbound } from "../channels.ts";
+import { TRASH_RETENTION_DAYS, pruneTrash } from "../documents/purge.ts";
 import type { Documents } from "../documents/register.ts";
 import { DocumentRefused, TRASH_DIR } from "../documents/store.ts";
 import { type EventLog, sharedEventLog } from "../events.ts";
@@ -711,6 +712,8 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
   const prune = () => {
     const n = pruneRunFiles();
     if (n) log.info(`pruned ${n} run file(s) older than the retention period`);
+    const trashed = pruneTrash({ onPurged: (paths) => opts.documents?.store.forget(paths) });
+    if (trashed) log.info(`purged ${trashed} trashed file(s) older than ${TRASH_RETENTION_DAYS} days`);
   };
   prune();
   setInterval(prune, PRUNE_INTERVAL_MS).unref();

@@ -30,7 +30,8 @@ const { readRulesForOwner, saveRules } = await import("./rules.ts");
 const { EventLog, isLiveEvent } = await import("../events.ts");
 const { readRunFile } = await import("../runs.ts");
 const { InvalidAnswer, appOutbound } = await import("../channels.ts");
-const { DocumentStore } = await import("../documents/store.ts");
+const { DocumentStore, readDocumentFile } = await import("../documents/store.ts");
+const { TRASH_STATE_FILE } = await import("../documents/purge.ts");
 const { Versions } = await import("../documents/versions.ts");
 
 const cleanups: (() => Promise<void>)[] = [];
@@ -1386,10 +1387,11 @@ async function documentStack(versions?: InstanceType<typeof Versions>) {
   const gitDir = path.join(dir, "versions.git");
   const real = new Versions({ workspace: WORKSPACE, gitDir });
   await real.init();
-  const store = new DocumentStore({ file: path.join(dir, "documents.json"), events: new EventLog(path.join(dir, "events.jsonl")) });
+  const file = path.join(dir, "documents.json");
+  const store = new DocumentStore({ file, events: new EventLog(path.join(dir, "events.jsonl")) });
   const git = (...args: string[]) => execFileSync("git", [`--git-dir=${gitDir}`, `--work-tree=${WORKSPACE}`, ...args], { encoding: "utf8" }).trim();
   const documents: Documents = { versions: versions ?? real, store };
-  return { versions: real, store, documents, git, commitCount: () => Number(git("rev-list", "--count", "HEAD")) };
+  return { versions: real, store, documents, file, git, commitCount: () => Number(git("rev-list", "--count", "HEAD")) };
 }
 
 function put(rel: string, text: string): void {
@@ -1495,6 +1497,35 @@ test("a run that moves a file to .trash/ commits the removal", async () => {
   assert.ok(!fs.existsSync(path.join(WORKSPACE, "notes/run-trash.md")));
   assert.ok(!d.git("ls-tree", "-r", "--name-only", "HEAD").includes("notes/run-trash.md"));
   assert.deepEqual(readRunFile(t.taskId())?.files, [], "the run's card lists nothing it moved into .trash/");
+});
+
+test("a start purges a trashed file the sweep has held for 31 days, with its document and annotations", async () => {
+  const d = await documentStack();
+  const doc = await seedDocument(d, "notes/old-trash.md", "# 过期\n");
+  d.store.submit({ documentId: doc.id, version: doc.version, annotations: [{ target: { kind: "document" }, comment: "改" }], runId: "s2d8kp" });
+  fs.mkdirSync(path.join(WORKSPACE, ".trash"), { recursive: true });
+  fs.renameSync(path.join(WORKSPACE, "notes/old-trash.md"), path.join(WORKSPACE, ".trash/old-trash.md"));
+  d.store.move("notes/old-trash.md", ".trash/old-trash.md");
+  fs.mkdirSync(path.dirname(TRASH_STATE_FILE), { recursive: true });
+  fs.writeFileSync(TRASH_STATE_FILE, JSON.stringify({ "old-trash.md": new Date(Date.now() - 31 * 86_400_000).toISOString() }));
+
+  setup({ documents: d.documents });
+
+  assert.equal(fs.existsSync(path.join(WORKSPACE, ".trash/old-trash.md")), false);
+  const held = readDocumentFile(d.file);
+  assert.deepEqual(held.documents, [], "the document entry is gone");
+  assert.deepEqual(held.annotations, [], "and so are its annotations");
+});
+
+test("without documents a start still purges a trashed file held for 31 days", () => {
+  fs.mkdirSync(path.join(WORKSPACE, ".trash"), { recursive: true });
+  fs.writeFileSync(path.join(WORKSPACE, ".trash/no-documents.md"), "# 没有文档\n");
+  fs.mkdirSync(path.dirname(TRASH_STATE_FILE), { recursive: true });
+  fs.writeFileSync(TRASH_STATE_FILE, JSON.stringify({ "no-documents.md": new Date(Date.now() - 31 * 86_400_000).toISOString() }));
+
+  setup();
+
+  assert.equal(fs.existsSync(path.join(WORKSPACE, ".trash/no-documents.md")), false);
 });
 
 test("a delivery in the run is not recorded again at its end, and a change after it is", async () => {

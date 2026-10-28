@@ -380,6 +380,22 @@ export class DocumentStore {
   }
 
   /**
+   * Drops the trashed documents at these workspace paths, or under them as directories, with their versions and
+   * annotations: the purge of .trash/ removed their files. A document outside .trash/ is never dropped, and no event is
+   * sent, since the app dropped the documents when they were trashed.
+   */
+  forget(paths: string[]): void {
+    const gone = (entry: DocumentEntry) =>
+      isTrashedPath(entry.document.path) && paths.some((p) => entry.document.path === p || entry.document.path.startsWith(`${p}/`));
+    const dropped = new Set(this.entries.filter(gone).map((entry) => entry.document.id));
+    if (dropped.size === 0) return;
+    this.save(
+      this.entries.filter((entry) => !dropped.has(entry.document.id)),
+      this.allAnnotations.filter((annotation) => !dropped.has(annotation.documentId)),
+    );
+  }
+
+  /**
    * Records a revision batch against the document's current version, each annotation submitted to the run. Returns the
    * annotations in the owner's order. Throws a DocumentRefused for a batch it cannot take, and records nothing then.
    */
