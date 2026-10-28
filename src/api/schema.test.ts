@@ -22,11 +22,18 @@ import {
   IdeaResultSchema,
   IdeaSchema,
   LiveEventSchema,
+  MAX_COMPACT_TOKENS,
+  MAX_DAILY_BUDGET_USD,
   MAX_IDEA_NOTE_CHARS,
   MAX_IDEA_WHY_CHARS,
+  MAX_MEMORY_SCAN_BUDGET_USD,
+  MAX_MEMORY_SCAN_MINUTES,
   MAX_MESSAGE_FILES,
   MAX_NEW_IDEAS,
+  MAX_RUN_BUDGET_USD,
+  MAX_SESSION_IDLE_HOURS,
   MAX_TASK_BUDGET_USD,
+  MIN_COMPACT_TOKENS,
   MessageSchema,
   PairingSchema,
   PushRegistrationSchema,
@@ -36,6 +43,9 @@ import {
   RunKindSchema,
   RunListSchema,
   RunSchema,
+  SettingKeySchema,
+  SettingsDetailSchema,
+  SettingsResultSchema,
   TaskDetailSchema,
   TaskListSchema,
   TaskResultSchema,
@@ -77,6 +87,8 @@ const SCHEMAS_BY_NAME: Record<string, ZodType> = {
   "idea-accepted": IdeaAcceptedSchema,
   "idea-generation-accepted": IdeaGenerationAcceptedSchema,
   "idea-list": IdeaListSchema,
+  "settings-result": SettingsResultSchema,
+  "settings-detail": SettingsDetailSchema,
 };
 
 function schemaNamed(name: string): ZodType {
@@ -694,4 +706,127 @@ test("Rules has a lowercase hex sha256 version and a positive size cap", () => {
   ]) {
     assert.equal(RulesSchema.safeParse(bad).success, false, JSON.stringify(bad));
   }
+});
+
+// --- Settings -----------------------------------------------------------------
+
+const settingsUpdate = (over: Record<string, unknown>) => parseCommand({ type: "settings.update", ...over });
+const settingsResult = (): Record<string, unknown> => JSON.parse(readFixture("responses", "settings-result.json"));
+
+test("the settings range constants are the ranges of the settings table", () => {
+  assert.equal(MAX_DAILY_BUDGET_USD, 100);
+  assert.equal(MAX_RUN_BUDGET_USD, 20);
+  assert.equal(MAX_RUN_BUDGET_USD, MAX_TASK_BUDGET_USD, "a chat run may spend what a task's run may");
+  assert.equal(MAX_SESSION_IDLE_HOURS, 168);
+  assert.equal(MIN_COMPACT_TOKENS, 20_000);
+  assert.equal(MAX_COMPACT_TOKENS, 1_000_000);
+  assert.equal(MAX_MEMORY_SCAN_MINUTES, 1440);
+  assert.equal(MAX_MEMORY_SCAN_BUDGET_USD, 1);
+});
+
+test("the setting keys are the table's eight, and a Settings object has each of them and overridden", () => {
+  const keys = ["model", "dailyBudgetUsd", "runBudgetUsd", "sessionIdleHours", "compactTokens", "memoryScanMinutes", "memoryScanBudgetUsd", "ideasAt"];
+  assert.deepEqual(SettingKeySchema.options, keys);
+  assert.deepEqual(Object.keys(settingsResult().settings as object).filter((key) => key !== "overridden").sort(), [...keys].sort());
+});
+
+test("settings.update sets each setting within its range, bounds included, and refuses a value beyond it", () => {
+  const ok = (over: Record<string, unknown>) => settingsUpdate(over).ok;
+  assert.equal(ok({ dailyBudgetUsd: 1 }), true, "the daily budget's lower bound");
+  assert.equal(ok({ dailyBudgetUsd: 100 }), true, "the daily budget's upper bound");
+  assert.equal(ok({ dailyBudgetUsd: 0.99 }), false, "below 1");
+  assert.equal(ok({ dailyBudgetUsd: 101 }), false, "above 100");
+  assert.equal(ok({ runBudgetUsd: 1 }), true);
+  assert.equal(ok({ runBudgetUsd: 20 }), true);
+  assert.equal(ok({ runBudgetUsd: 20.5 }), false);
+  assert.equal(ok({ sessionIdleHours: 0 }), true, "0 turns rotation off");
+  assert.equal(ok({ sessionIdleHours: 168 }), true);
+  assert.equal(ok({ sessionIdleHours: -1 }), false);
+  assert.equal(ok({ compactTokens: 0 }), true, "0 keeps Claude Code's window");
+  assert.equal(ok({ compactTokens: 20_000 }), true);
+  assert.equal(ok({ compactTokens: 1_000_000 }), true);
+  for (const tokens of [1, 19_999, 1_000_001, 20_000.5]) assert.equal(ok({ compactTokens: tokens }), false, String(tokens));
+  assert.equal(ok({ memoryScanMinutes: 0 }), true, "0 turns scans off");
+  assert.equal(ok({ memoryScanMinutes: 1440 }), true);
+  assert.equal(ok({ memoryScanMinutes: 1441 }), false);
+  assert.equal(ok({ memoryScanBudgetUsd: 0 }), false, "above 0");
+  assert.equal(ok({ memoryScanBudgetUsd: 0.01 }), true);
+  assert.equal(ok({ memoryScanBudgetUsd: 1 }), true);
+  assert.equal(ok({ memoryScanBudgetUsd: 1.01 }), false);
+  for (const model of ["sonnet", "opus", "haiku"]) assert.equal(ok({ model }), true, model);
+  assert.equal(ok({ model: "gpt" }), false);
+});
+
+test("ideasAt is an HH:MM time or null in a command, and a response takes the same shapes", () => {
+  assert.equal(settingsUpdate({ ideasAt: "00:00" }).ok, true);
+  assert.equal(settingsUpdate({ ideasAt: "23:59" }).ok, true);
+  assert.equal(settingsUpdate({ ideasAt: null }).ok, true, "null turns the generation off");
+  for (const ideasAt of ["24:00", "8:00", "", "08:00:00"]) assert.equal(settingsUpdate({ ideasAt }).ok, false, JSON.stringify(ideasAt));
+
+  const result = settingsResult();
+  const withIdeasAt = (ideasAt: unknown) => SettingsResultSchema.safeParse({ settings: { ...(result.settings as object), ideasAt } }).success;
+  assert.equal(withIdeasAt(null), true);
+  assert.equal(withIdeasAt("08:00"), true);
+  assert.equal(withIdeasAt("24:00"), false);
+});
+
+test("a settings.update changes at least one setting or resets one, and resets each key once", () => {
+  assert.deepEqual(parseCommand({ type: "settings.update" }), { ok: false, error: "must change at least one setting or reset one" });
+  assert.equal(settingsUpdate({ reset: ["ideasAt"] }).ok, true, "a reset alone is a change");
+  assert.deepEqual(settingsUpdate({ reset: [] }), { ok: false, error: "reset: must not be empty" });
+  assert.deepEqual(settingsUpdate({ reset: ["dailyBudgetUsd", "dailyBudgetUsd"] }), { ok: false, error: "reset: must not repeat a key" });
+  assert.equal(settingsUpdate({ reset: ["temperature"] }).ok, false, "a key outside the eight");
+  assert.deepEqual(settingsUpdate({ dailyBudgetUsd: 30, reset: ["dailyBudgetUsd"] }), {
+    ok: false,
+    error: "reset: must not name a setting that is also set",
+  });
+  assert.deepEqual(settingsUpdate({ dailyBudgetUsd: 101 }), { ok: false, error: "dailyBudgetUsd: must be at most 100" });
+  assert.deepEqual(settingsUpdate({ compactTokens: 19_999 }), { ok: false, error: "compactTokens: must be 0, or from 20000 to 1000000" });
+  assert.equal(settingsUpdate({ dailyBudgetUsd: 30, colour: "red" }).ok, false, "an unknown key");
+});
+
+test("every invalid settings.update command is rejected", () => {
+  const invalid = fixtureNames("invalid-commands").filter((name) => name.startsWith("settings-"));
+  assert.equal(invalid.length, 17, "one file per rule of the settings command");
+  for (const name of invalid) {
+    assert.equal(parseCommand(JSON.parse(readFixture("invalid-commands", name))).ok, false, name);
+  }
+});
+
+test("a settings response has all eight keys and overridden, which names each override once, in the table's order", () => {
+  const result = settingsResult();
+  const withOverridden = (overridden: unknown) => SettingsResultSchema.safeParse({ settings: { ...(result.settings as object), overridden } }).success;
+  assert.equal(withOverridden(["model", "dailyBudgetUsd", "ideasAt"]), true);
+  assert.equal(withOverridden([]), true, "nothing overridden");
+  assert.equal(withOverridden(["dailyBudgetUsd", "model"]), false, "out of the table's order");
+  assert.equal(withOverridden(["model", "model"]), false, "a repeated key");
+
+  const { ideasAt: _ideasAt, ...noIdeasAt } = result.settings as Record<string, unknown>;
+  assert.equal(SettingsResultSchema.safeParse({ settings: noIdeasAt }).success, false, "ideasAt is present even when off");
+});
+
+test("a settings response checks types and the HH:MM shape only, so a value beyond a command's range is accepted", () => {
+  const beyond = JSON.parse(readFixture("responses", "settings-result-beyond-ranges.json"));
+  assert.equal(SettingsResultSchema.parse(beyond).settings.dailyBudgetUsd, 150);
+  assert.equal(settingsUpdate({ dailyBudgetUsd: 150 }).ok, false, "the command still refuses it");
+
+  const settings = { ...(settingsResult().settings as object) };
+  const beyondRanges = { ...settings, runBudgetUsd: 0, sessionIdleHours: -1, compactTokens: 5, memoryScanMinutes: 5000, memoryScanBudgetUsd: 3 };
+  assert.equal(SettingsResultSchema.safeParse({ settings: beyondRanges }).success, true);
+  assert.equal(SettingsResultSchema.safeParse({ settings: { ...settings, compactTokens: 2.5 } }).success, false, "compactTokens is an integer");
+});
+
+test("the settings detail's spend today is 0 or more", () => {
+  const detail = JSON.parse(readFixture("responses", "settings-detail.json"));
+  assert.equal(SettingsDetailSchema.safeParse(detail).success, true);
+  assert.equal(SettingsDetailSchema.safeParse({ ...detail, spentTodayUsd: 0 }).success, true, "zero");
+  assert.equal(SettingsDetailSchema.safeParse({ ...detail, spentTodayUsd: -0.01 }).success, false);
+});
+
+test("the settings.updated event carries the whole settings", () => {
+  const event = JSON.parse(readFixture("events", "settings-updated.json"));
+  const parsed = EventSchema.safeParse(event);
+  assert.equal(parsed.success, true);
+  assert.deepEqual(eventData("settings-updated.json").overridden, ["model", "dailyBudgetUsd"]);
+  assert.equal(EventSchema.safeParse({ ...event, data: { ...event.data, ideasAt: undefined } }).success, false, "every key is there");
 });

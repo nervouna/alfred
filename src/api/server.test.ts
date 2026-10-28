@@ -778,6 +778,18 @@ test("each idea command fixture gets 503 until ideas are wired in, and never rea
   assert.deepEqual(handler.answered, []);
 });
 
+test("each settings command fixture gets 503 until settings are wired in, and never reaches the handler", async (t) => {
+  const { socket, handler } = await start(t);
+  for (const name of ["settings-update.json", "settings-update-ideas-off.json", "settings-update-reset-all.json"]) {
+    const reply = await post(socket, fixture("commands", name));
+    assert.equal(reply.status, 503, name);
+    assert.deepEqual(reply.json(), { error: "settings are not available" }, name);
+  }
+  assert.equal(handler.submitted.length, 0, "a settings command never reaches the message path");
+  assert.deepEqual(handler.stopped, []);
+  assert.deepEqual(handler.answered, []);
+});
+
 test("idea.accept, idea.reject and idea.generate reach the ideas service as parsed commands, and answer 200, 200 and 202", async (t) => {
   const ideas = stubIdeas();
   const { socket, handler } = await start(t, { ideas });

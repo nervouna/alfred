@@ -1,0 +1,16 @@
+{
+  "settings": {
+    "model": "opus",
+    "dailyBudgetUsd": 30,
+    "runBudgetUsd": 10,
+    "sessionIdleHours": 4,
+    "compactTokens": 100000,
+    "memoryScanMinutes": 60,
+    "memoryScanBudgetUsd": 0.1,
+    "ideasAt": null,
+    "overridden": [
+      "model",
+      "model"
+    ]
+  }
+}

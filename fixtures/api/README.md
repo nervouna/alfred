@@ -2,14 +2,14 @@
 
 JSON examples of the client API defined in `src/api/schema.ts`. Alfred's tests (`src/api/schema.test.ts`) and the iOS client's Swift package tests (`ios/AlfredKit`) both read these files.
 
-- `events/`: events Alfred stores and emits, one file per shape the client decodes, `question.asked` and `question.answered` (answered and cancelled), `task.updated`, `document.updated`, `annotation.updated` and `idea.updated` among them. Each file is a whole `Event`.
+- `events/`: events Alfred stores and emits, one file per shape the client decodes, `question.asked` and `question.answered` (answered and cancelled), `task.updated`, `document.updated`, `annotation.updated`, `idea.updated` and `settings.updated` among them. Each file is a whole `Event`.
 - `live/`: live events, streamed as they happen and never stored. Each file is a whole `LiveEvent`.
-- `commands/`: one valid command per command shape, including a `message.send` with files, a `question.answer`, the three task commands, the two document commands, the three idea commands and `rules.save`.
-- `responses/`: bodies of the app API: `UploadResult`, `RunList`, `RunDetail`, `TaskResult`, `TaskList`, `TaskDetail`, `DocumentResult`, `DocumentList`, `DocumentDetail`, `RevisionAccepted`, `IdeaResult`, `IdeaAccepted`, `IdeaGenerationAccepted`, `IdeaList`, `Rules` and `ErrorResponse`. Each file is named after the schema it parses with.
+- `commands/`: one valid command per command shape, including a `message.send` with files, a `question.answer`, the three task commands, the two document commands, the three idea commands, the settings command and `rules.save`.
+- `responses/`: bodies of the app API: `UploadResult`, `RunList`, `RunDetail`, `TaskResult`, `TaskList`, `TaskDetail`, `DocumentResult`, `DocumentList`, `DocumentDetail`, `RevisionAccepted`, `IdeaResult`, `IdeaAccepted`, `IdeaGenerationAccepted`, `IdeaList`, `Rules`, `SettingsResult`, `SettingsDetail` and `ErrorResponse`. Each file is named after the schema it parses with.
 - `requests/`: bodies the client sends outside the command API: `PushRegistration`.
 - `pairing/`: the payload of the pairing QR code, a `Pairing`. Its values are made up.
 - `invalid-commands/`: commands that `parseCommand` must reject.
-- `invalid/`: off-schema files that the schema their name starts with must reject. Each is named `<schema>-<case>.json`, where `<schema>` is `pairing`, `push-registration`, `upload-result`, `run-list`, `run-detail`, `task-result`, `task-list`, `task-detail`, `document-result`, `document-list`, `document-detail`, `revision-accepted`, `idea-result`, `idea-accepted`, `idea-list` or `error`.
+- `invalid/`: off-schema files that the schema their name starts with must reject. Each is named `<schema>-<case>.json`, where `<schema>` is `pairing`, `push-registration`, `upload-result`, `run-list`, `run-detail`, `task-result`, `task-list`, `task-detail`, `document-result`, `document-list`, `document-detail`, `revision-accepted`, `idea-result`, `idea-accepted`, `idea-list`, `settings-result`, `settings-detail` or `error`.
 - `future/`: events a newer Alfred might send: one with an unknown `type`, one known event with an extra field, and one live event with an unknown `type`.
 
 Every file is pretty-printed JSON with a 2-space indent and a trailing newline. The files in `events/`, `live/`, `commands/`, `responses/`, `requests/` and `pairing/` contain only fields the schema defines, in the schema's key order; `invalid-commands/`, `invalid/` and `future/` are off-schema on purpose.
@@ -78,6 +78,16 @@ The owner reads and edits the root `ALFRED.md`, the workspace rules, in the app.
 - The errors are `ErrorResponse`: 400 for a text over `maxBytes` of UTF-8 or with a NUL, and 409 for a version that is not the file's current one, or when `ALFRED.md` is a symlink, not a regular file or over 65 536 bytes: Alfred never replaces those. `rules.save` is answered 503 until Alfred has the rules service.
 
 The `commands/rules-save.json` fixture saves an edit of the text of `responses/rules.json`, against its version.
+
+## Settings
+
+The owner's settings are Alfred's tunables: Alfred reads them from its environment when it starts, and the owner can override them from the app. The precedence is the built-in default, then the environment variable, then the owner's override. The contract carries only the effective values.
+
+- `Settings` has all eight keys, in the table's order: `model` (`sonnet`, `opus` or `haiku`, the chat's model), `dailyBudgetUsd` (spend per day), `runBudgetUsd` (spend cap of one chat run), `sessionIdleHours` (idle hours before a new session; 0 turns rotation off), `compactTokens` (an integer: the context size that triggers compaction; 0 keeps Claude Code's own window), `memoryScanMinutes` (minutes between memory scans; 0 turns them off), `memoryScanBudgetUsd` (spend cap of one scan) and `ideasAt` (the `HH:MM` time of the daily idea generation, or `null` when it is off).
+- `overridden` names the keys the owner has set to something other than the default, in the table's order, each once. For `model` that means not `sonnet`. A value that comes from the environment is not an override.
+- `settings.update` changes any subset of the eight keys, where `ideasAt` set to `null` turns the generation off, and `reset`: a non-empty list of distinct keys to return to their defaults. It needs at least one setting or reset, and a key may not be both set and reset. It is strict, as the other commands are.
+- The ranges are those a command may set: `dailyBudgetUsd` from 1 to 100, `runBudgetUsd` from 1 to 20, `sessionIdleHours` from 0 to 168, `compactTokens` 0 or from 20000 to 1000000, `memoryScanMinutes` from 0 to 1440, `memoryScanBudgetUsd` above 0 and at most 1, `ideasAt` an `HH:MM` time or `null`, and `model` one of the three. The ranges bind the command only. A deployment may run with a value beyond them (`ALFRED_DAILY_BUDGET_USD=150`), so a `Settings` in a response checks the types and the `HH:MM` shape alone.
+- `settings.updated` carries the whole `Settings` on every change of an effective value. `settings.update` is answered 200 with a `SettingsResult`: the `settings` as Alfred now holds them. `GET /api/settings` is a `SettingsDetail`: the `settings` and `spentTodayUsd`, the owner's spend today in the owner's time zone, 0 or more.
 
 ## Compatibility rules
 

@@ -18,6 +18,8 @@ public struct Event: Decodable, Hashable, Sendable {
         case annotationUpdated(Annotation)
         /// An idea was generated or changed state: the whole idea, as Alfred now holds it.
         case ideaUpdated(AlfredIdea)
+        /// A setting changed: the whole settings, as Alfred now holds them.
+        case settingsUpdated(AlfredSettings)
         /// An event type this client does not know. Its `data` is not decoded.
         case unknown(type: String)
     }
@@ -52,6 +54,8 @@ public struct Event: Decodable, Hashable, Sendable {
             payload = .annotationUpdated(try container.decode(Annotation.self, forKey: .data))
         case "idea.updated":
             payload = .ideaUpdated(try container.decode(AlfredIdea.self, forKey: .data))
+        case "settings.updated":
+            payload = .settingsUpdated(try container.decode(AlfredSettings.self, forKey: .data))
         default:
             payload = .unknown(type: type)
         }

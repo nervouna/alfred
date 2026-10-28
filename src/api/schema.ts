@@ -44,6 +44,20 @@ export const MAX_IDEA_WHY_CHARS = 300;
 export const MAX_IDEA_NOTE_CHARS = 500;
 /** A generation adds at most this many ideas. */
 export const MAX_NEW_IDEAS = 3;
+/** The most the owner may set the day's spend to, in USD. */
+export const MAX_DAILY_BUDGET_USD = 100;
+/** The most the owner may set one chat run's spend cap to, in USD: a task's run's cap. */
+export const MAX_RUN_BUDGET_USD = MAX_TASK_BUDGET_USD;
+/** The longest idle time before a new session, in hours: one week. */
+export const MAX_SESSION_IDLE_HOURS = 168;
+/** The smallest context size that triggers compaction the owner may set, in tokens. 0 keeps Claude Code's window. */
+export const MIN_COMPACT_TOKENS = 20_000;
+/** The largest context size that triggers compaction the owner may set, in tokens. */
+export const MAX_COMPACT_TOKENS = 1_000_000;
+/** The longest interval between memory scans, in minutes: one day. */
+export const MAX_MEMORY_SCAN_MINUTES = 1440;
+/** The most one memory scan may spend, in USD. */
+export const MAX_MEMORY_SCAN_BUDGET_USD = 1;
 const MAX_ANNOTATION_REPLY_CHARS = 4000;
 const MAX_TEXT_CHARS = 20_000;
 const MAX_ANSWER_CHARS = 2000;
@@ -445,6 +459,53 @@ export const IdeaSchema = z
     message: "must be set exactly when the idea is rejected",
   });
 
+/** A setting the owner can change: the eight keys of the settings table, in the table's order. */
+export const SettingKeySchema = z.enum([
+  "model",
+  "dailyBudgetUsd",
+  "runBudgetUsd",
+  "sessionIdleHours",
+  "compactTokens",
+  "memoryScanMinutes",
+  "memoryScanBudgetUsd",
+  "ideasAt",
+]);
+const SETTING_KEYS = SettingKeySchema.options;
+
+// `overridden` names each setting once, in the table's order.
+const settingKeysInTableOrder = (keys: z.infer<typeof SettingKeySchema>[]) =>
+  keys.every((key, index) => index === 0 || SETTING_KEYS.indexOf(key) > SETTING_KEYS.indexOf(keys[index - 1] ?? key));
+
+/**
+ * The settings as Alfred holds them: the effective value of each (the built-in default, the environment variable or the
+ * owner's override), `ideasAt` null when the daily generation is off, and `overridden`: the keys the owner has set to
+ * something other than the default, in the table's order. The ranges a command may set are not checked here, since a
+ * deployment's environment may set a value beyond them.
+ */
+export const SettingsSchema = z.object({
+  model: ModelSchema,
+  dailyBudgetUsd: z.number(),
+  runBudgetUsd: z.number(),
+  sessionIdleHours: z.number(),
+  compactTokens: z.int(),
+  memoryScanMinutes: z.number(),
+  memoryScanBudgetUsd: z.number(),
+  ideasAt: TimeOfDaySchema.nullable(),
+  overridden: z.array(SettingKeySchema).refine(settingKeysInTableOrder, "must name each setting once, in the table's order"),
+});
+
+// Compile-time check that Settings has a key for each setting, and overridden besides.
+type SettingsKeysMatch = Expect<Equals<Exclude<keyof z.infer<typeof SettingsSchema>, "overridden">, z.infer<typeof SettingKeySchema>>>;
+
+/** The body of a successful settings.update: the settings as Alfred now holds them. */
+export const SettingsResultSchema = z.object({ settings: SettingsSchema });
+
+/** The body of GET /api/settings: the settings, and what the owner has spent today, in USD. */
+export const SettingsDetailSchema = z.object({
+  settings: SettingsSchema,
+  spentTodayUsd: z.number().min(0, "must be at least 0"),
+});
+
 const EventEnvelope = { id: z.int().positive(), at: IsoTimestampSchema };
 
 export const EventSchema = z.discriminatedUnion("type", [
@@ -456,6 +517,7 @@ export const EventSchema = z.discriminatedUnion("type", [
   z.object({ ...EventEnvelope, type: z.literal("document.updated"), data: DocumentSchema }),
   z.object({ ...EventEnvelope, type: z.literal("annotation.updated"), data: AnnotationSchema }),
   z.object({ ...EventEnvelope, type: z.literal("idea.updated"), data: IdeaSchema }),
+  z.object({ ...EventEnvelope, type: z.literal("settings.updated"), data: SettingsSchema }),
 ]);
 
 const StreamIdSchema = z.string().regex(/^[A-Za-z0-9_.:-]{1,64}$/, "must be 1-64 letters, digits, _, ., : or -");
@@ -783,6 +845,65 @@ export const RulesSaveSchema = z.strictObject({
   version: z.string(),
 });
 
+// A setting's new value is within the range the owner may choose. A deployment's environment may set a value beyond it.
+const DailyBudgetSchema = z
+  .number()
+  .min(1, "must be at least 1")
+  .max(MAX_DAILY_BUDGET_USD, `must be at most ${MAX_DAILY_BUDGET_USD}`);
+const RunBudgetSchema = z
+  .number()
+  .min(1, "must be at least 1")
+  .max(MAX_RUN_BUDGET_USD, `must be at most ${MAX_RUN_BUDGET_USD}`);
+const SessionIdleHoursSchema = z
+  .number()
+  .min(0, "must be at least 0")
+  .max(MAX_SESSION_IDLE_HOURS, `must be at most ${MAX_SESSION_IDLE_HOURS}`);
+const CompactTokensSchema = z
+  .int()
+  .refine(
+    (tokens) => tokens === 0 || (tokens >= MIN_COMPACT_TOKENS && tokens <= MAX_COMPACT_TOKENS),
+    `must be 0, or from ${MIN_COMPACT_TOKENS} to ${MAX_COMPACT_TOKENS}`,
+  );
+const MemoryScanMinutesSchema = z
+  .number()
+  .min(0, "must be at least 0")
+  .max(MAX_MEMORY_SCAN_MINUTES, `must be at most ${MAX_MEMORY_SCAN_MINUTES}`);
+const MemoryScanBudgetSchema = z
+  .number()
+  .gt(0, "must be greater than 0")
+  .max(MAX_MEMORY_SCAN_BUDGET_USD, `must be at most ${MAX_MEMORY_SCAN_BUDGET_USD}`);
+const SettingsResetSchema = z
+  .array(SettingKeySchema)
+  .min(1, "must not be empty")
+  .refine((keys) => new Set(keys).size === keys.length, "must not repeat a key");
+
+/**
+ * Changes settings. Each setting it names is set to that value, and `ideasAt` null turns the daily generation off;
+ * `reset` returns its keys to their defaults. At least one setting is set or reset, and no key is both. Strict: an
+ * unknown key fails.
+ */
+export const SettingsUpdateSchema = z
+  .strictObject({
+    type: z.literal("settings.update"),
+    model: ModelSchema.optional(),
+    dailyBudgetUsd: DailyBudgetSchema.optional(),
+    runBudgetUsd: RunBudgetSchema.optional(),
+    sessionIdleHours: SessionIdleHoursSchema.optional(),
+    compactTokens: CompactTokensSchema.optional(),
+    memoryScanMinutes: MemoryScanMinutesSchema.optional(),
+    memoryScanBudgetUsd: MemoryScanBudgetSchema.optional(),
+    ideasAt: TimeOfDaySchema.nullable().optional(),
+    reset: SettingsResetSchema.optional(),
+  })
+  .refine(
+    (command) => SETTING_KEYS.some((key) => command[key] !== undefined) || command.reset !== undefined,
+    "must change at least one setting or reset one",
+  )
+  .refine((command) => (command.reset ?? []).every((key) => command[key] === undefined), {
+    path: ["reset"],
+    message: "must not name a setting that is also set",
+  });
+
 export const CommandSchema = z.discriminatedUnion("type", [
   MessageSendSchema,
   RunStopSchema,
@@ -796,6 +917,7 @@ export const CommandSchema = z.discriminatedUnion("type", [
   IdeaRejectSchema,
   IdeaGenerateSchema,
   RulesSaveSchema,
+  SettingsUpdateSchema,
 ]);
 
 export type Channel = z.infer<typeof ChannelSchema>;
@@ -845,6 +967,11 @@ export type IdeaReject = z.infer<typeof IdeaRejectSchema>;
 export type IdeaGenerate = z.infer<typeof IdeaGenerateSchema>;
 export type Rules = z.infer<typeof RulesSchema>;
 export type RulesSave = z.infer<typeof RulesSaveSchema>;
+export type SettingKey = z.infer<typeof SettingKeySchema>;
+export type Settings = z.infer<typeof SettingsSchema>;
+export type SettingsResult = z.infer<typeof SettingsResultSchema>;
+export type SettingsDetail = z.infer<typeof SettingsDetailSchema>;
+export type SettingsUpdate = z.infer<typeof SettingsUpdateSchema>;
 export type ErrorResponse = z.infer<typeof ErrorResponseSchema>;
 export type Pairing = z.infer<typeof PairingSchema>;
 export type PushRegistration = z.infer<typeof PushRegistrationSchema>;
