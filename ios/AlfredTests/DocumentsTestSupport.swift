@@ -49,6 +49,11 @@ extension TestData {
         ["id": eventId, "at": at, "type": "document.updated", "data": document]
     }
 
+    /// A stored `document.removed` event.
+    static func documentRemovedEvent(_ eventId: Int, id: String, at: String = "2026-10-26T08:00:00.000Z") -> [String: Any] {
+        ["id": eventId, "at": at, "type": "document.removed", "data": ["id": id]]
+    }
+
     /// An annotation as the server sends it: a comment on the whole document.
     static func annotationObject(
         _ id: String,

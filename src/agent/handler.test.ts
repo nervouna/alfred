@@ -1494,6 +1494,7 @@ test("a run that moves a file to .trash/ commits the removal", async () => {
   assert.equal(d.git("show", "--name-only", "--format=", "HEAD"), "notes/run-trash.md");
   assert.ok(!fs.existsSync(path.join(WORKSPACE, "notes/run-trash.md")));
   assert.ok(!d.git("ls-tree", "-r", "--name-only", "HEAD").includes("notes/run-trash.md"));
+  assert.deepEqual(readRunFile(t.taskId())?.files, [], "the run's card lists nothing it moved into .trash/");
 });
 
 test("a delivery in the run is not recorded again at its end, and a change after it is", async () => {

@@ -19,6 +19,7 @@ import type { HookCallbackMatcher } from "@anthropic-ai/claude-agent-sdk";
 
 import type { Rules, RulesSave } from "../api/schema.ts";
 import type { RulesCommands, RulesReply } from "../api/server.ts";
+import { TRASH_DIR } from "../documents/trash.ts";
 import type { Versions } from "../documents/versions.ts";
 import { describeError, log } from "../log.ts";
 import { resolveInside } from "./guard.ts";
@@ -30,8 +31,6 @@ export const RULES_FILE = "ALFRED.md";
 export const RULES_MAX_BYTES = 8 * 1024;
 /** The longest root ALFRED.md the app is sent whole; a longer one is refused, so an editor never holds a cut-off text. */
 export const RULES_READ_MAX_BYTES = 64 * 1024;
-/** Rules files under .trash/ were deleted and never apply. */
-const TRASH_DIR = ".trash";
 
 export const DEFAULT_RULES = `# Workspace rules
 

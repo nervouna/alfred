@@ -319,6 +319,9 @@ export const DocumentSchema = z.object({
   updatedAt: IsoTimestampSchema,
 });
 
+/** The data of document.removed: the document the agent deleted. A restore announces it again as document.updated. */
+export const DocumentRemovedSchema = z.object({ id: DocumentIdSchema });
+
 const AnnotationQuoteSchema = z
   .string()
   .refine((quote) => quote.trim() !== "", "must not be blank")
@@ -515,6 +518,7 @@ export const EventSchema = z.discriminatedUnion("type", [
   z.object({ ...EventEnvelope, type: z.literal("question.answered"), data: QuestionAnsweredSchema }),
   z.object({ ...EventEnvelope, type: z.literal("task.updated"), data: TaskSchema }),
   z.object({ ...EventEnvelope, type: z.literal("document.updated"), data: DocumentSchema }),
+  z.object({ ...EventEnvelope, type: z.literal("document.removed"), data: DocumentRemovedSchema }),
   z.object({ ...EventEnvelope, type: z.literal("annotation.updated"), data: AnnotationSchema }),
   z.object({ ...EventEnvelope, type: z.literal("idea.updated"), data: IdeaSchema }),
   z.object({ ...EventEnvelope, type: z.literal("settings.updated"), data: SettingsSchema }),
@@ -941,6 +945,7 @@ export type TaskDetail = z.infer<typeof TaskDetailSchema>;
 export type TaskCreate = z.infer<typeof TaskCreateSchema>;
 export type TaskUpdate = z.infer<typeof TaskUpdateSchema>;
 export type Document = z.infer<typeof DocumentSchema>;
+export type DocumentRemoved = z.infer<typeof DocumentRemovedSchema>;
 export type DocumentVersion = z.infer<typeof DocumentVersionSchema>;
 export type Annotation = z.infer<typeof AnnotationSchema>;
 export type AnnotationTarget = z.infer<typeof AnnotationTargetSchema>;

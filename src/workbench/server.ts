@@ -21,7 +21,7 @@ import { RULES_READ_MAX_BYTES, readRulesForOwner } from "../agent/rules.ts";
 import { DocumentDetailSchema, PushRegistrationSchema, RunSchema, StepSchema } from "../api/schema.ts";
 import type { DocumentDetail, DocumentList, Run, RunDetail, TaskDetail } from "../api/schema.ts";
 import { apiSocketPath } from "../api/server.ts";
-import { readDocumentFile } from "../documents/store.ts";
+import { isTrashedPath, readDocumentFile } from "../documents/store.ts";
 import { VERSIONS_GIT_DIR, Versions } from "../documents/versions.ts";
 import { describeError, log } from "../log.ts";
 import type { AccessVerifier } from "./access.ts";
@@ -380,11 +380,13 @@ function ideaListReply(): Response {
 }
 
 /**
- * GET /api/documents: the documents the store keeps in documents.json, most recently updated first. A missing file is
- * an empty list; a file that does not fit fails the request, and is logged.
+ * GET /api/documents: the documents the store keeps in documents.json, most recently updated first, those in .trash/
+ * left out. A missing file is an empty list; a file that does not fit fails the request, and is logged.
  */
 function documentListReply(): Response {
-  const documents = readDocumentFile().documents.map((entry) => entry.document);
+  const documents = readDocumentFile()
+    .documents.map((entry) => entry.document)
+    .filter((document) => !isTrashedPath(document.path));
   documents.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
   const body: DocumentList = { documents };
   return jsonReply(200, body);
@@ -392,16 +394,16 @@ function documentListReply(): Response {
 
 /**
  * GET /api/documents/<id>: the document, its versions (newest first, the first being the current one), its annotations
- * (newest first) and its revision runs (newest first, at most 50). A malformed or unknown id is 404; runs whose record
- * does not fit the client's schema are left out and logged, as GET /api/tasks/<id> leaves them out. A body that does
- * not fit DocumentDetailSchema fails the request, and is logged.
+ * (newest first) and its revision runs (newest first, at most 50). A malformed or unknown id is 404, and so is the id of
+ * a document in .trash/; runs whose record does not fit the client's schema are left out and logged, as
+ * GET /api/tasks/<id> leaves them out. A body that does not fit DocumentDetailSchema fails the request, and is logged.
  */
 function documentDetailReply(id: string): Response {
   const notFound = () => jsonError(404, "There is no such document.");
   if (!DOCUMENT_ID.test(id)) return notFound();
   const file = readDocumentFile();
   const entry = file.documents.find((other) => other.document.id === id);
-  if (!entry) return notFound();
+  if (!entry || isTrashedPath(entry.document.path)) return notFound();
   const runs: Run[] = [];
   let left = 0;
   for (const record of allRuns()) {
