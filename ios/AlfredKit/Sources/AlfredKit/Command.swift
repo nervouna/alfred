@@ -27,6 +27,13 @@ public enum Command: Hashable, Sendable, Codable {
     case settingsUpdate(SettingsChanges)
     /// Replaces the root ALFRED.md with `text`. `version` is the `version` of the `Rules` the owner edited.
     case rulesSave(text: String, version: String)
+    /// Adds a long-term memory. `name` is 1 to 80 characters and `description` 0 to 200, each one trimmed line; `kind`
+    /// is `user`, `preference`, `project` or `correction`; `body` is at most 8192 bytes of UTF-8. Alfred names the file.
+    case memoryCreate(name: String, description: String, kind: String, body: String)
+    /// Replaces a memory's fields. `version` is the `version` of the `Memory` the owner edited.
+    case memoryUpdate(file: String, version: String, name: String, description: String, kind: String, body: String)
+    /// Deletes a memory: its file moves into `.trash/memory/`. `version` is the `version` of the `Memory` the owner read.
+    case memoryDelete(file: String, version: String)
 
     private enum CodingKeys: String, CodingKey {
         case type, clientId, text, runId, files, questionId, answers
@@ -35,6 +42,8 @@ public enum Command: Hashable, Sendable, Codable {
         case ideaId, reason, note
         case dailyBudgetUsd, runBudgetUsd, sessionIdleHours, compactTokens, memoryScanMinutes, memoryScanBudgetUsd
         case ideasAt, reset
+        case file, name, kind, body
+        case memoryDescription = "description"
     }
 
     public init(from decoder: any Decoder) throws {
@@ -119,6 +128,27 @@ public enum Command: Hashable, Sendable, Codable {
         case "rules.save":
             self = .rulesSave(
                 text: try container.decode(String.self, forKey: .text),
+                version: try container.decode(String.self, forKey: .version)
+            )
+        case "memory.create":
+            self = .memoryCreate(
+                name: try container.decode(String.self, forKey: .name),
+                description: try container.decode(String.self, forKey: .memoryDescription),
+                kind: try container.decode(String.self, forKey: .kind),
+                body: try container.decode(String.self, forKey: .body)
+            )
+        case "memory.update":
+            self = .memoryUpdate(
+                file: try container.decode(String.self, forKey: .file),
+                version: try container.decode(String.self, forKey: .version),
+                name: try container.decode(String.self, forKey: .name),
+                description: try container.decode(String.self, forKey: .memoryDescription),
+                kind: try container.decode(String.self, forKey: .kind),
+                body: try container.decode(String.self, forKey: .body)
+            )
+        case "memory.delete":
+            self = .memoryDelete(
+                file: try container.decode(String.self, forKey: .file),
                 version: try container.decode(String.self, forKey: .version)
             )
         default:
@@ -213,6 +243,24 @@ public enum Command: Hashable, Sendable, Codable {
         case let .rulesSave(text, version):
             try container.encode("rules.save", forKey: .type)
             try container.encode(text, forKey: .text)
+            try container.encode(version, forKey: .version)
+        case let .memoryCreate(name, description, kind, body):
+            try container.encode("memory.create", forKey: .type)
+            try container.encode(name, forKey: .name)
+            try container.encode(description, forKey: .memoryDescription)
+            try container.encode(kind, forKey: .kind)
+            try container.encode(body, forKey: .body)
+        case let .memoryUpdate(file, version, name, description, kind, body):
+            try container.encode("memory.update", forKey: .type)
+            try container.encode(file, forKey: .file)
+            try container.encode(version, forKey: .version)
+            try container.encode(name, forKey: .name)
+            try container.encode(description, forKey: .memoryDescription)
+            try container.encode(kind, forKey: .kind)
+            try container.encode(body, forKey: .body)
+        case let .memoryDelete(file, version):
+            try container.encode("memory.delete", forKey: .type)
+            try container.encode(file, forKey: .file)
             try container.encode(version, forKey: .version)
         }
     }

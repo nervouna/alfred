@@ -16,6 +16,7 @@ import http from "node:http";
 import path from "node:path";
 
 import { resolveInside } from "../agent/guard.ts";
+import { memoryList } from "../agent/memory-edit.ts";
 import { loadMemories } from "../agent/memory.ts";
 import { RULES_READ_MAX_BYTES, readRulesForOwner } from "../agent/rules.ts";
 import { DocumentDetailSchema, PushRegistrationSchema, RunSchema, StepSchema } from "../api/schema.ts";
@@ -460,6 +461,15 @@ function rulesReply(workspace: string): Response {
 }
 
 /**
+ * GET /api/memories: the long-term memories as a MemoryList, in the order of the system prompt's index, each with the
+ * sha256 of its file's bytes as the version that memory.update and memory.delete are made against. No memory folder is
+ * an empty list.
+ */
+function memoryListReply(workspace: string): Response {
+  return jsonReply(200, memoryList(workspace));
+}
+
+/**
  * GET /api/files/<path>: a workspace file's bytes, typed by extension as the pages type them, under the sandbox policy.
  * An HTML report comes with its workspace images inlined, as the report page shows it; one over the preview cap is
  * sent as it is, since the page would refuse it. With `?version=<commit>` it is the file as it was at that commit.
@@ -557,6 +567,7 @@ async function apiRoute(req: http.IncomingMessage, url: URL, ctx: ApiContext): P
   if (p.startsWith(DOCUMENT_PREFIX)) return only("GET", () => documentDetailReply(p.slice(DOCUMENT_PREFIX.length)));
   if (p === "/api/ideas") return only("GET", () => ideaListReply());
   if (p === "/api/rules") return only("GET", () => rulesReply(ctx.workspace));
+  if (p === "/api/memories") return only("GET", () => memoryListReply(ctx.workspace));
   if (p === "/api/push") return only("POST", () => pushRegistrationReply(req, device.id, ctx.devices));
   const run = RUN_PATH.exec(p)?.[1];
   if (run) return only("GET", () => runDetailReply(run));

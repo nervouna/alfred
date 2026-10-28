@@ -50,6 +50,10 @@
 // the prompt, and how it ended (the ideas added and the model's note, or that it failed) is recorded in the store
 // before the run ends, for the app to read with the list. A shutdown aborts it, and it ends lost, recording nothing.
 //
+// The owner's edits of long-term memory in the app (memory-edit.ts) go through withMemoryLock: the handler owns the
+// MemoryLock that its runs and its scans use, and a second instance in this process would not share it. An edit holds
+// the lock as a task does, so it runs beside runs and never beside a scan.
+//
 // While a run works it also publishes live events (see events.ts): the main
 // agent's reply text as it is written, and every step the run records.
 
@@ -109,7 +113,7 @@ import { resolveInside, workspaceGuard } from "./guard.ts";
 import { TaskInput, answeredBy } from "./input.ts";
 import { EXTRACT_MODEL, MEMORY_LOCK_FILE, MemoryScanScheduler, SCAN_TIMEOUT_MS, scanTranscripts, transcriptDirs } from "./memory-scan.ts";
 import type { ScanReport } from "./memory-scan.ts";
-import { MemoryLock, capIndex, loadMemories, syncMemoryIndex } from "./memory.ts";
+import { type Locked, MemoryLock, capIndex, loadMemories, syncMemoryIndex } from "./memory.ts";
 import { QUESTION_TOOL, answersFromReply, denyPermissionPrompts, questionHook } from "./questions.ts";
 import type { AskOwner, QuestionOutcome } from "./questions.ts";
 import { revisionMessage, revisionPrompt, revisionSettings, revisionsSection } from "./revision.ts";
@@ -321,6 +325,12 @@ export interface AgentHandler extends Intake {
    * the day's spend cap is reached, and while a generation is running. A refusal leaves nothing behind.
    */
   generateIdeas(trigger: IdeaTrigger): IdeaReply<IdeaGenerationAccepted>;
+  /**
+   * Runs `job` while no memory scan runs, so it may edit memory files. It holds the memory lock as a run does: beside
+   * running tasks and never beside a scan, and `job` must not wait, so that what it checks it still finds when it
+   * writes. Waits up to `waitMs` for a scan to end, then gives up without running `job` (`locked: false`).
+   */
+  withMemoryLock<T>(job: () => T, waitMs: number): Promise<Locked<T>>;
   /** Stop the work the handler started, before the process exits. */
   shutdown(): Promise<void>;
 }
@@ -791,6 +801,15 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
     scan: () => recordScan(() => scanTranscripts({ workspace: WORKSPACE_DIR })),
   });
   if (MEMORY_SCAN_MINUTES > 0) scheduler.start(MEMORY_SCAN_MINUTES * 60_000);
+
+  async function withMemoryLock<T>(job: () => T, waitMs: number): Promise<Locked<T>> {
+    if (!(await memoryLock.acquire("task", waitMs))) return { locked: false };
+    try {
+      return { locked: true, value: job() };
+    } finally {
+      memoryLock.release();
+    }
+  }
 
   /**
    * Every session retirement goes through here. It is logged and triggers a
@@ -2039,6 +2058,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
     runTask,
     reviseDocument,
     generateIdeas,
+    withMemoryLock,
     shutdown,
   };
 }
