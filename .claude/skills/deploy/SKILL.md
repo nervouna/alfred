@@ -19,7 +19,7 @@ Alfred runs on a Linux host as a rootless podman Quadlet, set up as in the READM
 ssh $HOST alfred/deploy/update.sh
 ```
 
-- It pulls, builds, and restarts only when the image or the Quadlet changed. A docs-only merge ends with "Alfred already runs this build".
+- It pulls, builds, and restarts only when the image or the Quadlet changed. The image holds only `src/`, `plugin/` and the npm packages, so a docs-only merge, or one that changes only `ios/`, ends with "Alfred already runs this build".
 - Before restarting it waits, up to 15 minutes, for a running task or memory scan to finish. A task's query stays open while its background subagents run, so the wait can run out. If it gives up, nothing was restarted, and it lists the live runs: tell the user which ones, and run it again later. `--force` restarts anyway. Alfred stops its tasks cleanly on the way down, records them as lost, and names them in the owner's next message, so use it only when the user agrees to lose those runs. Never restart with `systemctl` or `podman` directly to save time. Run the script in the background or with a long timeout.
 - If `deploy/alfred.container` changed, the script stops and prints the diff against the installed Quadlet. Read the diff, then rerun with `--install-quadlet` to replace it. The installed copy should never carry host edits: host settings (`TZ`, `ALFRED_WORKBENCH`, `ALFRED_WORKBENCH_URL`, …) live in drop-ins under `~/.config/containers/systemd/alfred.container.d/`, which survive `--install-quadlet`. If the diff shows a host edit in the installed file, move it into a drop-in first. `--keep-quadlet` keeps the installed copy for this run only.
 - `--restart` restarts the current build, e.g. after changing a secret. `--rollback` goes back to the image that ran before the last update.
@@ -30,6 +30,7 @@ ssh $HOST alfred/deploy/update.sh
 ssh $HOST 'systemctl --user is-active alfred; journalctl --user -u alfred -n 60 --no-pager -o cat'
 ```
 
+- `journalctl --user` needs a persistent journal. If `/var/log/journal` is missing, create it as root, run `systemd-tmpfiles --create --prefix /var/log/journal`, restart `systemd-journald` and run `journalctl --rotate`. Until then, root can read the logs with `journalctl CONTAINER_NAME=alfred`.
 - Each task logs `agent run start` and `agent run done` (cost, duration, tools). `render_pdf`, `generate_image`, `send_file` and memory scans log their own lines.
 - A start without a matching done means a task is running.
 - `memory lock still held by …; running the task anyway` means the task waited minutes for the lock. If no other task or memory scan was running, the lock is stale. The bot takes over locks left by a killed container (#20), so look for another process holding it, e.g. a manual `memory-scan`. `update.sh --restart` removes a stale lock.
@@ -51,11 +52,11 @@ Podman reads secrets when the container starts, so run `update.sh --restart` aft
   ssh $HOST podman secret create --replace alfred_mmx_config - < /path/to/mmx/config.json
   ```
 
-  To check it, run `ssh $HOST podman exec alfred mmx quota show`. Ignore `mmx auth status`: it reports "Not authenticated" even when calls work.
+  Without image generation, create the secret from an empty config (`echo '{}' | podman secret create alfred_mmx_config -`) rather than removing the `Secret=` line; `generate_image` then returns the mmx error. To check it, run `ssh $HOST podman exec alfred mmx quota show`. Ignore `mmx auth status`: it reports "Not authenticated" even when calls work.
 
 ## Workbench
 
-The read-only workbench and its `cloudflared` run in the `workbench` pod, set up as in the README's "Workbench" section. The tunnel hostname, the Access team domain, AUD tag and owner email belong in project memory and `~/.config/alfred/workbench.env` on the host, never in this repo.
+The read-only workbench and its `cloudflared` run in the `workbench` pod, set up as in `docs/workbench.md`, Host setup. The tunnel hostname, the Access team domain, AUD tag and owner email belong in project memory and `~/.config/alfred/workbench.env` on the host, never in this repo.
 
 - `update.sh` restarts the workbench after an update. It does not wait for a task, because the workbench only reads. If the installed workbench Quadlets differ from `deploy/`, the same `--install-quadlet` and `--keep-quadlet` choice applies.
 - Health and logs: `ssh $HOST 'systemctl --user is-active workbench workbench-tunnel; journalctl --user -u workbench -n 40 --no-pager -o cat'`. `workbench refused … : <reason>` lines are requests without a valid Access token.
