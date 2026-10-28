@@ -157,6 +157,55 @@ final class AvatarPlayerTests: XCTestCase {
         await fulfillment(of: [first, second], timeout: 1)
     }
 
+    // MARK: The pictures of the poses
+
+    func testEveryClipStartsAndEndsOnItsPose() {
+        let starts: [AvatarClip: AvatarPose] = [.blink: .standing, .smile: .standing, .yawn: .standing, .workStart: .standing, .workLoop: .typing, .workEnd: .typing]
+        let ends: [AvatarClip: AvatarPose] = [.blink: .standing, .smile: .standing, .yawn: .standing, .workStart: .typing, .workLoop: .typing, .workEnd: .standing]
+        XCTAssertEqual(Set(starts.keys), Set(AvatarClip.allCases))
+        for clip in AvatarClip.allCases {
+            XCTAssertEqual(clip.startPose, starts[clip], "\(clip) starts on")
+            XCTAssertEqual(clip.endPose, ends[clip], "\(clip) ends on")
+        }
+    }
+
+    func testTheTypingPictureIsTypingPngAndTheStandingOneIsStillPng() throws {
+        try writeStill(.red)
+        try writeTyping(.blue)
+        let resources = AvatarResources(folders: [folder])
+        XCTAssertEqual(try look(resources.picture(of: .standing)), "still")
+        XCTAssertEqual(try look(resources.picture(of: .typing)), "typing")
+        XCTAssertEqual(try look(resources.restingPicture()), "still")
+    }
+
+    func testWithoutTypingPngTheTypingPictureIsTheStill() throws {
+        try writeStill(.red)
+        let resources = AvatarResources(folders: [folder])
+        XCTAssertEqual(try look(resources.picture(of: .typing)), "still")
+        try Data("this is not an image".utf8).write(to: folder.appending(path: "typing.png"))
+        XCTAssertEqual(try look(resources.picture(of: .typing)), "still", "a typing.png that is not an image is no typing picture")
+    }
+
+    func testWithNeitherPictureThePosesAreThePlaceholder() throws {
+        let resources = AvatarResources(folders: [folder])
+        XCTAssertEqual(resources.picture(of: .typing), .placeholder)
+        XCTAssertEqual(resources.picture(of: .standing), .placeholder)
+        try writeTyping(.blue)
+        XCTAssertEqual(resources.picture(of: .standing), .placeholder, "the typing picture does not stand in for the still")
+        XCTAssertEqual(try look(resources.picture(of: .typing)), "typing")
+    }
+
+    func testAClipThatCannotPlayShowsThePictureOfThePoseItStartsOn() async throws {
+        try writeStill(.red)
+        try writeTyping(.blue)
+        let resources = AvatarResources(folders: [folder])
+        for clip in AvatarClip.allCases {
+            let expected = clip.startPose == .typing ? "typing" : "still"
+            let picture = await resources.picture(for: clip)
+            XCTAssertEqual(try look(picture), expected, "\(clip) without a file")
+        }
+    }
+
     // MARK: The cover
 
     func testAtRestTheCoverIsUpWithTheStillAndNoLaneIsVisible() throws {
