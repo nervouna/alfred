@@ -16,6 +16,7 @@ Developed with the `orchestrate` skill: issues are specs, implementers deliver o
 - Run UI tests on a simulator that holds only the test build (`com.example.alfred`): a second Alfred build there adds a second share extension, and `ShareUITests` picks the wrong one. The share tests can fail on a new simulator's first run; rerun before blaming a change.
 - XCUITest calls a control hittable while it sits under the keyboard or in a sheet that is still resizing: tap once its frame holds still, as `tapWhenSettled` in `IdeasUITests` does.
 - The server image holds only `src/`, `plugin/` and the npm packages, so a merge that changes only `ios/` needs no redeploy (`deploy/update.sh` reports nothing to restart).
+- To time something on the real path from a phone, put temporary `print`s in a Release build (never commit them), install it, and run `xcrun devicectl device process launch --console --terminate-existing --device <name> io.damao.alfred`. A warm start is launching `com.apple.Preferences`, waiting, then launching Alfred again without `--terminate-existing`.
 
 ## Architecture in brief
 
@@ -25,6 +26,7 @@ Developed with the `orchestrate` skill: issues are specs, implementers deliver o
 - The workbench's `/api/` is the app's way in: `devices.ts` pairs devices and keeps only the SHA-256 of each token, every `/api/` request needs a device token, and `forward.ts` passes only the command set (checked with `parseCommand`) and the event stream and uploads on to Alfred's socket.
 - The workspace (`ALFRED_WORKSPACE`) is the only place the agent may read and write; `src/agent/guard.ts` enforces it per tool call.
 - `ios/` (from #27) holds the native client.
+- A streaming endpoint must write a byte right after its headers (the event stream sends `: ping` on open). Cloudflare holds response headers until the first body byte, and the app counts the stream as connected on the headers. A cold start resumes from event 0 and gets the backlog at once; a warm start has none, so without the opening ping it waited a whole heartbeat.
 
 ## Rules
 
