@@ -26,7 +26,7 @@ import path from "node:path";
 
 import qrcode from "qrcode-terminal";
 
-import { isModelKey, parseIdeasAt } from "../src/agent/config.ts";
+import { envSettings, isModelKey, parseIdeasAt } from "../src/agent/config.ts";
 import { describeEvent } from "../src/api/client.ts";
 import type { LiveEvent } from "../src/api/schema.ts";
 import { startApi } from "../src/api/server.ts";
@@ -41,6 +41,8 @@ import { startDailyIdeas } from "../src/ideas/schedule.ts";
 import { IDEAS_FILE, IdeaStore, type IdeaDraft } from "../src/ideas/store.ts";
 import { describeError, log } from "../src/log.ts";
 import { newRunId } from "../src/runs.ts";
+import { settingsCommands } from "../src/settings/commands.ts";
+import { SettingsStore } from "../src/settings/store.ts";
 import { STATE_DIR, WORKSPACE_DIR } from "../src/store.ts";
 import { taskCommands } from "../src/tasks/commands.ts";
 import { TaskStore } from "../src/tasks/store.ts";
@@ -352,18 +354,22 @@ async function main(options: Options): Promise<void> {
     const documents = await startDocuments();
     const tasks = new TaskStore();
     const ideas = new IdeaStore();
-    const handler = createLocalHandler({ tasks, documents, ideas });
+    // The one settings store. Its environment layer has the daily generation of ideas off unless --ideas-at says when: the
+    // stack does not spend on ideas on its own, whatever ALFRED_IDEAS_AT the shell has. The app can still turn it on.
+    const settings = new SettingsStore({ env: () => ({ ...envSettings(), ideasAt: options.ideasAt ?? null }) });
+    const handler = createLocalHandler({ tasks, documents, ideas, settings });
     cleanups.push(() => handler.shutdown());
     // Pushed before the API's cleanup, so it runs after the API closes, as archiving stops after the API in `run`.
     cleanups.push(startArchiving(ideas));
-    // Only with --ideas-at: the stack does not spend on ideas on its own. The app's button works without it.
-    cleanups.push(startDailyIdeas({ at: options.ideasAt, ideas, generate: (trigger) => handler.generateIdeas(trigger) }));
+    // Read at each check, as in `run`. The app's button (idea.generate) works without a time.
+    cleanups.push(startDailyIdeas({ at: () => settings.get().ideasAt, ideas, generate: (trigger) => handler.generateIdeas(trigger) }));
     // Without documents the API answers every document command 503, as in `run`.
     cleanups.push(
       await startApi({
         socket,
         handler,
         events: sharedEventLog(),
+        settings: settingsCommands(settings, handler),
         tasks: taskCommands(tasks, handler),
         ideas: ideaCommands(ideas, tasks, { generate: (trigger) => handler.generateIdeas(trigger) }),
         ...(documents ? { documents: documentCommands(handler, documents) } : {}),

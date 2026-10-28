@@ -18,13 +18,26 @@ import path from "node:path";
 import { resolveInside } from "../agent/guard.ts";
 import { loadMemories } from "../agent/memory.ts";
 import { DocumentDetailSchema, PushRegistrationSchema, RunSchema, StepSchema } from "../api/schema.ts";
-import type { DocumentDetail, DocumentList, Run, RunDetail, TaskDetail } from "../api/schema.ts";
+import type { DocumentDetail, DocumentList, Run, RunDetail, SettingsDetail, TaskDetail } from "../api/schema.ts";
 import { apiSocketPath } from "../api/server.ts";
 import { readDocumentFile } from "../documents/store.ts";
 import { VERSIONS_GIT_DIR, Versions } from "../documents/versions.ts";
 import { describeError, log } from "../log.ts";
 import type { AccessVerifier } from "./access.ts";
-import { allRuns, alfredStatus, listSessions, readIdeaList, readTaskList, readTranscript, runDetail, spendByDay, tailLog } from "./data.ts";
+import {
+  allRuns,
+  alfredStatus,
+  listSessions,
+  localDay,
+  readIdeaList,
+  readSettings,
+  readTaskList,
+  readTranscript,
+  runDetail,
+  spendByDay,
+  spendOnDay,
+  tailLog,
+} from "./data.ts";
 import { DeviceStore } from "./devices.ts";
 import { forwardCommand, forwardEvents, forwardUpload, jsonError, jsonReply, readBody } from "./forward.ts";
 import { html, trusted } from "./html.ts";
@@ -379,6 +392,23 @@ function ideaListReply(): Response {
 }
 
 /**
+ * GET /api/settings: the effective settings Alfred mirrors for the workbench, and what the owner has spent today, by the
+ * overview page's rule for "today" (the runs that started on the local day, subagents left out). The mirror is missing
+ * until Alfred first starts; one that cannot be read or does not fit is answered the same way, 503, and logged.
+ */
+function settingsReply(): Response {
+  let settings: SettingsDetail["settings"];
+  try {
+    settings = readSettings();
+  } catch (err) {
+    log.error(`GET /api/settings: ${describeError(err)}`);
+    return jsonError(503, "The settings are not available yet.");
+  }
+  const body: SettingsDetail = { settings, spentTodayUsd: spendOnDay(allRuns(), localDay(new Date().toISOString())) };
+  return jsonReply(200, body);
+}
+
+/**
  * GET /api/documents: the documents the store keeps in documents.json, most recently updated first. A missing file is
  * an empty list; a file that does not fit fails the request, and is logged.
  */
@@ -542,6 +572,7 @@ async function apiRoute(req: http.IncomingMessage, url: URL, ctx: ApiContext): P
   if (p === "/api/documents") return only("GET", () => documentListReply());
   if (p.startsWith(DOCUMENT_PREFIX)) return only("GET", () => documentDetailReply(p.slice(DOCUMENT_PREFIX.length)));
   if (p === "/api/ideas") return only("GET", () => ideaListReply());
+  if (p === "/api/settings") return only("GET", () => settingsReply());
   if (p === "/api/push") return only("POST", () => pushRegistrationReply(req, device.id, ctx.devices));
   const run = RUN_PATH.exec(p)?.[1];
   if (run) return only("GET", () => runDetailReply(run));

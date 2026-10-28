@@ -5,7 +5,7 @@ import path from "node:path";
 
 import qrcode from "qrcode-terminal";
 
-import { checkMemoryScanSettings, ideasAt } from "./agent/config.ts";
+import { checkMemoryScanSettings } from "./agent/config.ts";
 import { resolveInside } from "./agent/guard.ts";
 import { createAgentHandler } from "./agent/handler.ts";
 import { MEMORY_LOCK_FILE, describeScan, scanTranscripts } from "./agent/memory-scan.ts";
@@ -24,6 +24,8 @@ import { IdeaStore } from "./ideas/store.ts";
 import { describeError, log, logToFile } from "./log.ts";
 import { BROWSERS_PATH, renderPdf } from "./pdf.ts";
 import { LOG_FILE, startHeartbeat } from "./runs.ts";
+import { settingsCommands } from "./settings/commands.ts";
+import { SettingsStore } from "./settings/store.ts";
 import { STATE_DIR, WORKSPACE_DIR } from "./store.ts";
 import { taskCommands } from "./tasks/commands.ts";
 import { TaskStore } from "./tasks/store.ts";
@@ -76,9 +78,10 @@ async function cmdRun(args: string[]): Promise<void> {
   if (args.length) throw new Error("usage: run");
   const socket = apiSocketPath();
   if (!socket) throw new Error("Alfred is reached through its command API, so ALFRED_API_SOCKET=off leaves it nothing to serve");
-  // A setting that is not a time fails here, before anything is opened.
-  const dailyIdeasAt = ideasAt();
   logToFile(LOG_FILE);
+  // The only settings store: it is the only writer of settings.json and of the copy the workbench reads. A malformed
+  // environment variable fails here, before anything is opened.
+  const settings = new SettingsStore();
   const startedAt = new Date();
   // The one history of the workspace and the one document store, shared by the handler and its tools, and by whatever
   // else works on documents. Opened first: it commits what changed while Alfred was down, and imports earlier deliveries.
@@ -88,7 +91,7 @@ async function cmdRun(args: string[]): Promise<void> {
   const tasks = new TaskStore();
   // The only idea store: it is the only writer of ideas.json, and the idea commands and the archiving use it.
   const ideas = new IdeaStore();
-  const agent = createAgentHandler({ out: appOutbound(), tasks, documents, ideas });
+  const agent = createAgentHandler({ out: appOutbound(), tasks, documents, ideas, settings });
   let closeApi: () => Promise<void>;
   try {
     // Without documents the API answers every document command 503.
@@ -96,6 +99,7 @@ async function cmdRun(args: string[]): Promise<void> {
       socket,
       handler: agent,
       events: sharedEventLog(),
+      settings: settingsCommands(settings, agent),
       tasks: taskCommands(tasks, agent),
       ideas: ideaCommands(ideas, tasks, { generate: (trigger) => agent.generateIdeas(trigger) }),
       ...(documents ? { documents: documentCommands(agent, documents) } : {}),
@@ -106,8 +110,10 @@ async function cmdRun(args: string[]): Promise<void> {
   }
   const stopHeartbeat = startHeartbeat(startedAt);
   const stopArchiving = startArchiving(ideas);
+  const dailyIdeasAt = settings.get().ideasAt;
   log.info(dailyIdeasAt ? `daily ideas at ${dailyIdeasAt}` : "daily ideas are off");
-  const stopDailyIdeas = startDailyIdeas({ at: dailyIdeasAt, ideas, generate: (trigger) => agent.generateIdeas(trigger) });
+  // The time is read at each check, so the owner can move it or turn the generation off while Alfred runs.
+  const stopDailyIdeas = startDailyIdeas({ at: () => settings.get().ideasAt, ideas, generate: (trigger) => agent.generateIdeas(trigger) });
   log.info(`Alfred running: workspace=${WORKSPACE_DIR} api=${socket}`);
 
   await untilSignal();

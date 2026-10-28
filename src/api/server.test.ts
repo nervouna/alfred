@@ -19,11 +19,13 @@ import type {
   IdeaResult,
   Run,
   RevisionAccepted,
+  SettingsResult,
+  SettingsUpdate,
   TaskCreate,
   TaskResult,
   TaskUpdate,
 } from "./schema.ts";
-import type { DocumentCommands, DocumentReply, IdeaCommands, IdeaReply, TaskCommands, TaskReply } from "./server.ts";
+import type { DocumentCommands, DocumentReply, IdeaCommands, IdeaReply, SettingsCommands, SettingsReply, TaskCommands, TaskReply } from "./server.ts";
 import type { Inbound } from "../channels.ts";
 import type { EventLog as EventLogType } from "../events.ts";
 
@@ -44,7 +46,7 @@ after(() => {
 
 const { EventLog } = await import("../events.ts");
 const { localDate } = await import("../files.ts");
-const { MAX_COMMAND_BYTES, MAX_UPLOAD_BYTES, TaskResultSchema, parseCommand } = await import("./schema.ts");
+const { MAX_COMMAND_BYTES, MAX_UPLOAD_BYTES, SettingsResultSchema, TaskResultSchema, parseCommand } = await import("./schema.ts");
 const { HEARTBEAT_MS, apiSocketPath, startApi } = await import("./server.ts");
 const { InvalidAnswer } = await import("../channels.ts");
 
@@ -111,7 +113,7 @@ let fixtures = 0;
 /** An API on a socket of its own, with a stub handler and an event log of its own. */
 async function start(
   t: TestContext,
-  opts: { heartbeatMs?: number; pageSize?: number; tasks?: TaskCommands; documents?: DocumentCommands; ideas?: IdeaCommands } = {},
+  opts: { heartbeatMs?: number; pageSize?: number; tasks?: TaskCommands; documents?: DocumentCommands; ideas?: IdeaCommands; settings?: SettingsCommands } = {},
 ) {
   const dir = path.join(tmp, `t${fixtures++}`);
   const socket = path.join(dir, "api", "a.sock");
@@ -703,6 +705,57 @@ test("each settings command fixture gets 503 until settings are wired in, and ne
   assert.equal(handler.submitted.length, 0, "a settings command never reaches the message path");
   assert.deepEqual(handler.stopped, []);
   assert.deepEqual(handler.answered, []);
+});
+
+/** Stands in for the settings service: records the commands it is given, and answers the fixture's settings or `refuse`. */
+function stubSettings() {
+  const answer = JSON.parse(fixture("responses", "settings-result.json")) as SettingsResult;
+  const settings = {
+    updated: [] as SettingsUpdate[],
+    refuse: undefined as SettingsReply | undefined,
+    answer,
+    update(command: SettingsUpdate): SettingsReply {
+      settings.updated.push(command);
+      return settings.refuse ?? { ok: true, settings: answer.settings };
+    },
+  };
+  return settings;
+}
+
+test("settings.update reaches the settings service as a parsed command and answers 200 with a SettingsResult", async (t) => {
+  const settings = stubSettings();
+  const { socket, handler } = await start(t, { settings });
+  for (const name of ["settings-update.json", "settings-update-ideas-off.json", "settings-update-reset-all.json"]) {
+    const reply = await post(socket, fixture("commands", name));
+    assert.equal(reply.status, 200, name);
+    assert.deepEqual(reply.json(), settings.answer, name);
+    assert.equal(SettingsResultSchema.safeParse(reply.json()).success, true, name);
+  }
+  assert.deepEqual(settings.updated, [
+    parsedCommand("settings-update.json"),
+    parsedCommand("settings-update-ideas-off.json"),
+    parsedCommand("settings-update-reset-all.json"),
+  ]);
+  assert.equal(handler.submitted.length, 0, "a settings command never reaches the message path");
+  assert.deepEqual(handler.stopped, []);
+  assert.deepEqual(handler.answered, []);
+});
+
+test("a settings change the service refuses is answered with its status and reason", async (t) => {
+  const settings = stubSettings();
+  const { socket } = await start(t, { settings });
+  settings.refuse = { ok: false, status: 400, error: "dailyBudgetUsd: must be at most 100" };
+  const reply = await post(socket, fixture("commands", "settings-update.json"));
+  assert.equal(reply.status, 400);
+  assert.deepEqual(reply.json(), { error: "dailyBudgetUsd: must be at most 100" });
+});
+
+test("a settings command that fails the contract's ranges never reaches the settings service", async (t) => {
+  const settings = stubSettings();
+  const { socket } = await start(t, { settings });
+  const reply = await post(socket, fixture("invalid-commands", "settings-update-daily-101.json"));
+  assert.equal(reply.status, 400);
+  assert.deepEqual(settings.updated, []);
 });
 
 test("idea.accept, idea.reject and idea.generate reach the ideas service as parsed commands, and answer 200, 200 and 202", async (t) => {
