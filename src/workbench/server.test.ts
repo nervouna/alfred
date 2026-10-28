@@ -23,7 +23,7 @@ const { DOCUMENTS_FILE, DocumentStore } = await import("../documents/store.ts");
 const { VERSIONS_GIT_DIR, Versions } = await import("../documents/versions.ts");
 const { IDEAS_FILE } = await import("../ideas/store.ts");
 const { SETTINGS_MIRROR_FILE } = await import("../settings/store.ts");
-const { DocumentDetailSchema, DocumentListSchema, ErrorResponseSchema, IdeaListSchema, RunDetailSchema, RunListSchema, SettingsDetailSchema, TaskDetailSchema, TaskListSchema } = await import("../api/schema.ts");
+const { DocumentDetailSchema, DocumentListSchema, ErrorResponseSchema, IdeaListSchema, RulesSchema, RunDetailSchema, RunListSchema, SettingsDetailSchema, TaskDetailSchema, TaskListSchema } = await import("../api/schema.ts");
 const { AccessVerifier } = await import("./access.ts");
 const { DeviceStore } = await import("./devices.ts");
 const { REPORT_CSP, createHandler, inlineImages, startWorkbench } = await import("./server.ts");
@@ -566,6 +566,60 @@ test("the run and file routes need a device token, and refuse other methods with
   assert.equal(ping.headers.get("allow"), "GET", "POST /api/ping");
 });
 
+// --- /api/rules -------------------------------------------------------------
+
+const rulesFile = path.join(workspace, "ALFRED.md");
+const sha256 = (data: string | Buffer) => crypto.createHash("sha256").update(data).digest("hex");
+
+/** GET /api/rules with the paired device's token, with ALFRED.md as `put` makes it; the file is gone again afterwards. */
+async function getRules(put: () => void = () => {}, base = open): Promise<Response> {
+  fs.rmSync(rulesFile, { force: true });
+  put();
+  try {
+    return await fetch(`${base}/api/rules`, { headers: bearer(paired.token) });
+  } finally {
+    // A body that is still to be read is already in the response: the file is not needed for it.
+    fs.rmSync(rulesFile, { force: true });
+  }
+}
+
+test("GET /api/rules gives the root ALFRED.md's text as it is, the sha256 of its bytes and the size cap", async () => {
+  const text = "  # 规则\r\n\n- 报告开头先写摘要 😀\n\n";
+  const res = await getRules(() => fs.writeFileSync(rulesFile, text));
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("content-type"), "application/json; charset=utf-8");
+  assert.equal(res.headers.get("cache-control"), "no-store");
+  assert.deepEqual(RulesSchema.parse(await res.json()), { text, version: sha256(Buffer.from(text)), maxBytes: 8192 });
+});
+
+test("GET /api/rules reads a missing file and a symlink as empty text", async () => {
+  const empty = { text: "", version: sha256(""), maxBytes: 8192 };
+  const missing = await getRules();
+  assert.equal(missing.status, 200);
+  assert.deepEqual(RulesSchema.parse(await missing.json()), empty);
+
+  const link = await getRules(() => fs.symlinkSync(path.join(workspace, "notes", "a.md"), rulesFile));
+  assert.equal(link.status, 200);
+  assert.deepEqual(RulesSchema.parse(await link.json()), empty, "the note the link points to is not shown");
+});
+
+test("GET /api/rules reads a file of 65536 bytes whole and answers 413 for a longer one", async () => {
+  const exact = await getRules(() => fs.writeFileSync(rulesFile, "a".repeat(65_536)));
+  assert.equal(exact.status, 200);
+  assert.equal(RulesSchema.parse(await exact.json()).text.length, 65_536);
+
+  await assertApiError(await getRules(() => fs.writeFileSync(rulesFile, "a".repeat(65_537))), 413, "over the read cap");
+});
+
+test("GET /api/rules needs a device token, and refuses other methods with 405", async () => {
+  await assertApiError(await fetch(`${open}/api/rules`), 401, "without a token");
+  await assertApiError(await fetch(`${guarded}/api/rules`), 403, "on the tunnel without Access");
+  const wrong = await fetch(`${open}/api/rules`, { method: "POST", headers: bearer(paired.token), body: "{}" });
+  assert.equal(wrong.status, 405);
+  assert.equal(wrong.headers.get("allow"), "GET");
+  assert.equal(fs.existsSync(rulesFile), false, "a refused request writes nothing");
+});
+
 // --- /api/tasks -------------------------------------------------------------
 
 type RunRecord = import("../runs.ts").RunRecord;
@@ -856,6 +910,40 @@ test("GET /api/documents lists the documents, most recently updated first", asyn
   const list = DocumentListSchema.parse(await res.json());
   assert.deepEqual(list.documents.map((d) => d.id), [a.id, b.id]);
   assert.equal(list.documents[0]?.version, aSecond);
+});
+
+test("GET /api/documents leaves out a trashed document and GET /api/documents/<id> answers 404 for it, until it is restored", async () => {
+  const store = newDocumentStore();
+  const keepVersion = await commitFile("docs/keep.md", "# Keep\n");
+  const keep = store.deliver({ path: "docs/keep.md", version: keepVersion, at: new Date("2031-05-01T00:00:00Z"), title: "Keep", kind: "markdown" });
+  const goneVersion = await commitFile("docs/old-draft.md", "# Old draft\n");
+  const gone = store.deliver({ path: "docs/old-draft.md", version: goneVersion, at: new Date("2031-05-02T00:00:00Z"), title: "Old draft", kind: "markdown" });
+  const [note] = store.submit({
+    documentId: gone.id,
+    version: goneVersion,
+    annotations: [{ target: { kind: "document" }, comment: "再核对" }],
+    runId: newRunId(),
+    at: new Date("2031-05-02T01:00:00Z"),
+  });
+  assert.ok(note);
+
+  const ids = async () => DocumentListSchema.parse(await (await fetch(`${open}/api/documents`, { headers: bearer(paired.token) })).json()).documents.map((d) => d.id);
+  const detail = (id: string) => fetch(`${open}/api/documents/${id}`, { headers: bearer(paired.token) });
+  assert.deepEqual(await ids(), [gone.id, keep.id]);
+
+  store.move("docs/old-draft.md", ".trash/old-draft.md", new Date("2031-05-03T00:00:00Z"));
+  assert.deepEqual(await ids(), [keep.id], "the list leaves it out");
+  const missing = await detail(gone.id);
+  assert.equal(missing.status, 404);
+  assert.deepEqual(await missing.json(), { error: "There is no such document." });
+  assert.equal((await detail(keep.id)).status, 200, "the others are served");
+
+  store.move(".trash/old-draft.md", "docs/old-draft.md", new Date("2031-05-04T00:00:00Z"));
+  assert.deepEqual(await ids(), [gone.id, keep.id], "a restore brings it back");
+  const back = DocumentDetailSchema.parse(await (await detail(gone.id)).json());
+  assert.equal(back.document.id, gone.id);
+  assert.deepEqual(back.versions.map((v) => v.version), [goneVersion]);
+  assert.deepEqual(back.annotations.map((a) => a.id), [note.id]);
 });
 
 test("GET /api/documents/<id> answers 404 with its message for an unknown id and a malformed one", async () => {

@@ -15,7 +15,7 @@ import {
   transcriptDirs,
 } from "./memory-scan.ts";
 import type { Candidate } from "./memory-scan.ts";
-import { MemoryLock, capIndex, formatMemory, loadMemories, looksLikeSecret, parseMemory, syncMemoryIndex } from "./memory.ts";
+import { MemoryLock, capIndex, formatMemory, loadMemories, looksLikeSecret, parseMemory, syncMemoryIndex, writeFileAtomic } from "./memory.ts";
 
 const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "alfred-memory-")));
 after(() => fs.rmSync(tmp, { recursive: true, force: true }));
@@ -503,4 +503,20 @@ test("a scheduler that was never started stays off when restarted with 0, and st
   scheduler.restart(MINUTE_MS);
   assert.deepEqual(reasons, ["startup"]);
   scheduler.stop();
+});
+
+test("writeFileAtomic replaces the file whole, and a failed write leaves no temporary file", () => {
+  const dir = path.join(tmp, "atomic");
+  fs.mkdirSync(dir);
+  const file = path.join(dir, "a.md");
+  writeFileAtomic(file, "one");
+  writeFileAtomic(file, "two");
+  assert.deepEqual(fs.readdirSync(dir), ["a.md"]);
+  assert.equal(fs.readFileSync(file, "utf8"), "two");
+
+  // A rename onto a directory fails after the temporary file was written.
+  const blocked = path.join(dir, "blocked");
+  fs.mkdirSync(path.join(blocked, "inside"), { recursive: true });
+  assert.throws(() => writeFileAtomic(blocked, "x"));
+  assert.deepEqual(fs.readdirSync(dir).sort(), ["a.md", "blocked"]);
 });

@@ -26,10 +26,12 @@ Object.assign(process.env, {
 });
 
 const { createAgentHandler } = await import("./handler.ts");
+const { readRulesForOwner, saveRules } = await import("./rules.ts");
 const { EventLog, isLiveEvent } = await import("../events.ts");
 const { readRunFile } = await import("../runs.ts");
 const { InvalidAnswer, appOutbound } = await import("../channels.ts");
-const { DocumentStore } = await import("../documents/store.ts");
+const { DocumentStore, readDocumentFile } = await import("../documents/store.ts");
+const { TRASH_STATE_FILE } = await import("../documents/purge.ts");
 const { Versions } = await import("../documents/versions.ts");
 
 const cleanups: (() => Promise<void>)[] = [];
@@ -580,6 +582,63 @@ test("the notice for rules a run changed is recorded with the run that changed t
   const notice = t.messages().find((m) => m.text.startsWith("已新建"));
   assert.equal(notice?.channel, "app");
   assert.equal(notice?.runId, t.runs()[0]?.id, "the notice belongs to the run that changed the rules");
+});
+
+/** The owner saves the root ALFRED.md in the app, as the rules.save command does: against the version they read. */
+function ownerSavesRules(text: string): void {
+  const workspace = path.join(tmp, "workspace");
+  const current = readRulesForOwner(workspace);
+  assert.ok(current, "the file is within the read cap");
+  assert.equal(saveRules(workspace, { type: "rules.save", text, version: current.version }).ok, true);
+}
+
+/** Texts the app got that announce a change of rules or skills. */
+const rulesNotices = (texts: string[]): string[] => texts.filter((text) => /^已(新建|更新|移除) /.test(text));
+
+test("an owner's save of ALFRED.md while a run is live is not reported as the run's change", async () => {
+  let runs = 0;
+  const t = setup({
+    turn: async (prompt) => {
+      if (runs++ === 0) ownerSavesRules("# 主人在 app 里改的规则\n");
+      return `echo: ${prompt}`;
+    },
+  });
+  await t.send("跑着的时候我改了规则");
+  await until("the first run to finish", () => t.finished());
+  // A second run starts only once the first has ended, notice included, so its reply comes after any notice of the first.
+  await t.send("再来一个");
+  await until("the second run to finish", () => t.finished(2));
+
+  assert.equal(fs.readFileSync(path.join(tmp, "workspace", "ALFRED.md"), "utf8"), "# 主人在 app 里改的规则\n");
+  assert.deepEqual(rulesNotices(t.app.texts), []);
+  assert.ok(t.app.texts.includes("echo: 跑着的时候我改了规则"));
+});
+
+test("a run that also changes ALFRED.md after the owner's save still reports it, and so does one that changes it alone", async () => {
+  const rulesFile = path.join(tmp, "workspace", "ALFRED.md");
+  const afterOwner = setup({
+    turn: async () => {
+      ownerSavesRules("# 主人的规则\n");
+      fs.writeFileSync(rulesFile, "# Alfred 又改了一次\n");
+      return "写好了";
+    },
+  });
+  await afterOwner.send("先让主人改，再自己改");
+  await until("the run to finish", () => afterOwner.finished());
+  await until("the notice", () => afterOwner.app.texts.length === 2);
+  assert.deepEqual(afterOwner.app.texts, ["写好了", "已更新 ALFRED.md"]);
+  assert.equal(afterOwner.messages().find((m) => m.text === "已更新 ALFRED.md")?.runId, afterOwner.runs()[0]?.id);
+
+  const alone = setup({
+    turn: async () => {
+      fs.writeFileSync(rulesFile, "# 只有 Alfred 改了\n");
+      return "写好了";
+    },
+  });
+  await alone.send("自己改");
+  await until("the run to finish", () => alone.finished());
+  await until("the notice", () => alone.app.texts.length === 2);
+  assert.deepEqual(alone.app.texts, ["写好了", "已更新 ALFRED.md"]);
 });
 
 test("the note about a run a restart cut short comes with the next message, is recorded after it, and is said only once", async () => {
@@ -1328,10 +1387,11 @@ async function documentStack(versions?: InstanceType<typeof Versions>) {
   const gitDir = path.join(dir, "versions.git");
   const real = new Versions({ workspace: WORKSPACE, gitDir });
   await real.init();
-  const store = new DocumentStore({ file: path.join(dir, "documents.json"), events: new EventLog(path.join(dir, "events.jsonl")) });
+  const file = path.join(dir, "documents.json");
+  const store = new DocumentStore({ file, events: new EventLog(path.join(dir, "events.jsonl")) });
   const git = (...args: string[]) => execFileSync("git", [`--git-dir=${gitDir}`, `--work-tree=${WORKSPACE}`, ...args], { encoding: "utf8" }).trim();
   const documents: Documents = { versions: versions ?? real, store };
-  return { versions: real, store, documents, git, commitCount: () => Number(git("rev-list", "--count", "HEAD")) };
+  return { versions: real, store, documents, file, git, commitCount: () => Number(git("rev-list", "--count", "HEAD")) };
 }
 
 function put(rel: string, text: string): void {
@@ -1436,6 +1496,36 @@ test("a run that moves a file to .trash/ commits the removal", async () => {
   assert.equal(d.git("show", "--name-only", "--format=", "HEAD"), "notes/run-trash.md");
   assert.ok(!fs.existsSync(path.join(WORKSPACE, "notes/run-trash.md")));
   assert.ok(!d.git("ls-tree", "-r", "--name-only", "HEAD").includes("notes/run-trash.md"));
+  assert.deepEqual(readRunFile(t.taskId())?.files, [], "the run's card lists nothing it moved into .trash/");
+});
+
+test("a start purges a trashed file the sweep has held for 31 days, with its document and annotations", async () => {
+  const d = await documentStack();
+  const doc = await seedDocument(d, "notes/old-trash.md", "# 过期\n");
+  d.store.submit({ documentId: doc.id, version: doc.version, annotations: [{ target: { kind: "document" }, comment: "改" }], runId: "s2d8kp" });
+  fs.mkdirSync(path.join(WORKSPACE, ".trash"), { recursive: true });
+  fs.renameSync(path.join(WORKSPACE, "notes/old-trash.md"), path.join(WORKSPACE, ".trash/old-trash.md"));
+  d.store.move("notes/old-trash.md", ".trash/old-trash.md");
+  fs.mkdirSync(path.dirname(TRASH_STATE_FILE), { recursive: true });
+  fs.writeFileSync(TRASH_STATE_FILE, JSON.stringify({ "old-trash.md": new Date(Date.now() - 31 * 86_400_000).toISOString() }));
+
+  setup({ documents: d.documents });
+
+  assert.equal(fs.existsSync(path.join(WORKSPACE, ".trash/old-trash.md")), false);
+  const held = readDocumentFile(d.file);
+  assert.deepEqual(held.documents, [], "the document entry is gone");
+  assert.deepEqual(held.annotations, [], "and so are its annotations");
+});
+
+test("without documents a start still purges a trashed file held for 31 days", () => {
+  fs.mkdirSync(path.join(WORKSPACE, ".trash"), { recursive: true });
+  fs.writeFileSync(path.join(WORKSPACE, ".trash/no-documents.md"), "# 没有文档\n");
+  fs.mkdirSync(path.dirname(TRASH_STATE_FILE), { recursive: true });
+  fs.writeFileSync(TRASH_STATE_FILE, JSON.stringify({ "no-documents.md": new Date(Date.now() - 31 * 86_400_000).toISOString() }));
+
+  setup();
+
+  assert.equal(fs.existsSync(path.join(WORKSPACE, ".trash/no-documents.md")), false);
 });
 
 test("a delivery in the run is not recorded again at its end, and a change after it is", async () => {

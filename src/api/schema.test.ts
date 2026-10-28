@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import { test } from "node:test";
 
@@ -9,6 +10,7 @@ import {
   AnnotationSchema,
   DocumentDetailSchema,
   DocumentListSchema,
+  DocumentRemovedSchema,
   DocumentResultSchema,
   DocumentVersionSchema,
   ErrorResponseSchema,
@@ -37,6 +39,7 @@ import {
   PairingSchema,
   PushRegistrationSchema,
   RevisionAcceptedSchema,
+  RulesSchema,
   RunDetailSchema,
   RunKindSchema,
   RunListSchema,
@@ -74,6 +77,7 @@ const SCHEMAS_BY_NAME: Record<string, ZodType> = {
   "document-list": DocumentListSchema,
   "document-result": DocumentResultSchema,
   "revision-accepted": RevisionAcceptedSchema,
+  rules: RulesSchema,
   "run-detail": RunDetailSchema,
   "run-list": RunListSchema,
   "task-detail": TaskDetailSchema,
@@ -425,6 +429,17 @@ test("a document version is 40 lowercase hex characters, and a document id is si
   assert.deepEqual(revise({ documentId: "r4f7m0" }), { ok: false, error: "documentId: must be a six-character document id" });
 });
 
+test("a document.removed event carries the document's id and nothing else the client needs", () => {
+  const fixture = JSON.parse(readFixture("events", "document-removed.json"));
+  const parsed = EventSchema.parse(fixture);
+  assert.equal(parsed.type, "document.removed");
+  assert.deepEqual(parsed.data, { id: "r4f7ma" });
+  assert.deepEqual(DocumentRemovedSchema.parse({ id: "r4f7ma" }), { id: "r4f7ma" });
+  for (const data of [{}, { id: "r4f7m0" }, { id: "R4F7MA" }, { id: "r4f7ma0" }]) {
+    assert.equal(EventSchema.safeParse({ ...fixture, data }).success, false, JSON.stringify(data));
+  }
+});
+
 test("a file a delivery registered names its document and version together, or neither", () => {
   const path = { path: "reports/vps.md" };
   assert.equal(FileRefSchema.safeParse(path).success, true, "neither");
@@ -669,6 +684,40 @@ test("a generation of ideas is a run of its own kind", () => {
   const run = eventData("run-updated-ideas.json");
   assert.equal(RunKindSchema.safeParse("ideas").success, true);
   assert.equal(RunSchema.parse(run).kind, "ideas");
+});
+
+test("the rules fixtures tell one story: the owner reads a version, edits the text and saves against that version", () => {
+  const read = JSON.parse(readFixture("responses", "rules.json")) as { text: string; version: string; maxBytes: number };
+  assert.equal(read.version, crypto.createHash("sha256").update(read.text).digest("hex"), "the version is the sha256 of the text");
+  assert.equal(read.maxBytes, 8192);
+  const save = JSON.parse(readFixture("commands", "rules-save.json")) as { text: string; version: string };
+  assert.equal(save.version, read.version, "the save names the version that was read");
+  assert.notEqual(save.text, read.text);
+});
+
+test("rules.save takes any text, empty included, and any version string; only its shape is checked here", () => {
+  const save = (extra: Record<string, unknown>) => parseCommand({ type: "rules.save", text: "# rules\n", version: "x", ...extra });
+  assert.equal(save({}).ok, true);
+  assert.equal(save({ text: "" }).ok, true, "an empty text");
+  assert.equal(save({ text: "a\0b" }).ok, true, "the size and NUL checks are Alfred's, after the schema");
+  assert.equal(save({ text: "规".repeat(9000) }).ok, true, "the size check counts bytes, after the schema");
+  assert.equal(save({ text: 5 }).ok, false);
+  assert.equal(save({ version: 5 }).ok, false);
+  assert.equal(save({ version: undefined }).ok, false);
+});
+
+test("Rules has a lowercase hex sha256 version and a positive size cap", () => {
+  const rules = { text: "", version: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", maxBytes: 8192 };
+  assert.equal(RulesSchema.safeParse(rules).success, true);
+  for (const bad of [
+    { ...rules, version: rules.version.toUpperCase() },
+    { ...rules, version: rules.version.slice(1) },
+    { ...rules, maxBytes: 0 },
+    { ...rules, maxBytes: 1.5 },
+    { ...rules, text: undefined },
+  ]) {
+    assert.equal(RulesSchema.safeParse(bad).success, false, JSON.stringify(bad));
+  }
 });
 
 // --- Settings -----------------------------------------------------------------

@@ -27,6 +27,7 @@ import path from "node:path";
 import qrcode from "qrcode-terminal";
 
 import { envSettings, isModelKey, parseIdeasAt } from "../src/agent/config.ts";
+import { rulesCommands } from "../src/agent/rules.ts";
 import { describeEvent } from "../src/api/client.ts";
 import type { LiveEvent } from "../src/api/schema.ts";
 import { startApi } from "../src/api/server.ts";
@@ -372,6 +373,7 @@ async function main(options: Options): Promise<void> {
         settings: settingsCommands(settings, handler),
         tasks: taskCommands(tasks, handler),
         ideas: ideaCommands(ideas, tasks, { generate: (trigger) => handler.generateIdeas(trigger) }),
+        rules: rulesCommands({ workspace: WORKSPACE_DIR, versions: documents?.versions }),
         ...(documents ? { documents: documentCommands(handler, documents) } : {}),
       }),
     );

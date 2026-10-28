@@ -148,13 +148,32 @@ test("a run keeps the paths it moved files away from beside its files, and not i
   assert.deepEqual(run.movedFrom, []);
   run.wrote("notes/tmp.md", "Write");
   run.moved("notes/tmp.md", "notes/final.md");
-  run.moved("notes/old.md", ".trash/old.md");
+  run.moved("notes/old.md", "archive/old.md");
   run.moved("notes/final.md", "notes/final2.md");
-  run.moved("notes/old.md", ".trash/old-2.md"); // a path moved from twice is kept once
+  run.moved("notes/old.md", "archive/old-2.md"); // a path moved from twice is kept once
   assert.deepEqual([...run.movedFrom].sort(), ["notes/final.md", "notes/old.md", "notes/tmp.md"]);
-  assert.deepEqual(run.record.files.map((f) => f.path).sort(), [".trash/old-2.md", ".trash/old.md", "notes/final2.md"]);
+  assert.deepEqual(run.record.files.map((f) => f.path).sort(), ["archive/old-2.md", "archive/old.md", "notes/final2.md"]);
   run.finish("done");
   assert.ok(!("movedFrom" in (readRunFile(run.id) ?? {})), "the run file does not hold it");
+});
+
+test("a run does not list what it moved into .trash/, and keeps the path it left", () => {
+  const events = new EventLog(path.join(tmp, "moved-trash.jsonl"));
+  const run = new RunRecorder({ kind: "task", title: "清理", events });
+  run.wrote("notes/tmp.md", "Write");
+  run.moved("notes/tmp.md", ".trash/tmp.md"); // written and deleted in the same run
+  run.moved("notes/old.md", ".trash/old.md");
+  run.moved("reports/dir", ".trash/dir"); // a directory
+  assert.deepEqual([...run.movedFrom].sort(), ["notes/old.md", "notes/tmp.md", "reports/dir"], "the removals are still committed");
+  assert.deepEqual(run.record.files, [], "nothing under .trash/ is listed as written");
+  assert.equal(run.wroteFiles, false);
+
+  run.moved(".trash/old.md", "notes/old.md"); // a restore is a file the run wrote
+  assert.deepEqual(run.record.files, [{ path: "notes/old.md", tool: "move_file" }]);
+  assert.ok(run.movedFrom.includes(".trash/old.md"));
+
+  run.finish("done");
+  assert.deepEqual(readRunFile(run.id)?.files, [{ path: "notes/old.md", tool: "move_file" }]);
 });
 
 test("stepDetail summarizes tool inputs with workspace-relative paths", () => {
