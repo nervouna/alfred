@@ -56,7 +56,7 @@ final class ChatUITests: XCTestCase {
         XCTAssertEqual(status, 202)
         sleep(2)
         app.activate()
-        let echoed = app.staticTexts.matching(NSPredicate(format: "identifier BEGINSWITH 'message.in.' AND label == %@", marker)).firstMatch
+        let echoed = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'message.in.' AND label == %@", marker)).firstMatch
         XCTAssertTrue(echoed.waitForExistence(timeout: patience), "the stream did not resume with what happened in the background\n\(app.debugDescription)")
         let missed = newReply(beforeBackground, containing: "模型", in: app)
         XCTAssertTrue(missed.waitForExistence(timeout: patience), "the reply to the message sent in the background is missing")
@@ -154,6 +154,99 @@ final class ChatUITests: XCTestCase {
     private func assertInside(_ inner: XCUIElement, _ outer: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
         let room = outer.frame.insetBy(dx: -1, dy: -1)
         XCTAssertTrue(room.contains(inner.frame), "\(inner.label) \(inner.frame) is not inside \(outer.identifier) \(outer.frame)", file: file, line: line)
+    }
+
+    /// A message with a heading, a list, a quote, inline styles, a table and a line break shows laid out in the owner's
+    /// bubble, and Alfred's reply to it in its own, where the reply may hold the same. What the model answers is its own;
+    /// the test only waits for it. When `ALFRED_SHOTS` names a directory (pass `TEST_RUNNER_ALFRED_SHOTS`), the screen
+    /// with both bubbles is saved there as `chat-markdown.png`; run the test in each appearance for its screenshots.
+    @MainActor
+    func testMarkdownShowsInBothBubbles() async throws {
+        guard let pairing = ProcessInfo.processInfo.environment["ALFRED_PAIRING"], !pairing.isEmpty else {
+            throw XCTSkip("ALFRED_PAIRING is not set: start scripts/app-dev.ts and pass its pairing to run this test")
+        }
+        continueAfterFailure = false
+
+        let app = XCUIApplication()
+        app.launch()
+        unpairIfPaired(app)
+        UIPasteboard.general.string = pairing
+        let paste = app.buttons["粘贴配对信息"]
+        XCTAssertTrue(paste.waitForExistence(timeout: patience), "the pairing screen has no paste button\n\(app.debugDescription)")
+        paste.tap()
+        XCTAssertTrue(composer(in: app).waitForExistence(timeout: patience), "the chat did not appear\n\(app.debugDescription)")
+        XCTAssertTrue(app.staticTexts["连接中…"].waitForNonExistence(timeout: patience), "the stream never connected")
+        waitUntilStable { messageIds(in: app).count }
+
+        let known = messageIds(in: app)
+        let message = """
+        ## 标题
+        - 甲
+        - 乙
+
+        > 引用
+
+        `代码` 和 [链接](https://example.com)
+
+        | 列 | 值 |
+        |---|---|
+        | a | 1 |
+
+        第一行
+        第二行
+
+        请把以上消息原样重复一遍，不要放进代码块。
+        """
+        send(message, in: app)
+
+        // The stored message is the owner's bubble, one element whose label holds the text without its syntax.
+        let sent = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH 'message.in.' AND NOT (identifier IN %@)", known)).firstMatch
+        XCTAssertTrue(sent.waitForExistence(timeout: patience), "the message was not stored\n\(app.debugDescription)")
+        XCTAssertTrue(sent.label.contains("甲") && sent.label.contains("乙"), "the list is missing from the bubble: \(sent.label)")
+        XCTAssertFalse(sent.label.contains("- 甲"), "the list shows as typed: \(sent.label)")
+        XCTAssertFalse(sent.label.contains("## "), "the heading shows as typed: \(sent.label)")
+
+        // Alfred's reply is whatever the model wrote; once the run is over both bubbles are on the screen.
+        let reply = newReply(known, in: app)
+        XCTAssertTrue(reply.waitForExistence(timeout: modelPatience), "Alfred did not answer\n\(app.debugDescription)")
+        XCTAssertTrue(app.buttons["停止"].waitForNonExistence(timeout: patience), "the stop button should go once the run ends")
+        dismissKeyboard(in: app)
+        XCTAssertTrue(sent.exists && reply.exists)
+
+        // Both bubbles do not fit: put the owner's just below the avatar, which hangs over the top of the list, so the
+        // reply shows under it.
+        let avatar = app.descendants(matching: .any).matching(identifier: "chat.header.avatar").firstMatch
+        // The list lays itself out again as the keyboard goes: measure after that.
+        sleep(1)
+        for _ in 0..<4 where sent.exists {
+            let offset = avatar.frame.maxY + 8 - sent.frame.minY
+            if abs(offset) < 12 { break }
+            let from = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            // Slowly, and held at the end, so that the list follows the finger and does not carry on.
+            from.press(forDuration: 0.1, thenDragTo: from.withOffset(CGVector(dx: 0, dy: offset)), withVelocity: .slow, thenHoldForDuration: 0.5)
+            sleep(1)
+        }
+        snapshot("chat-markdown")
+    }
+
+    /// Puts the keyboard away: the message list dismisses it when it is dragged down into it.
+    @MainActor
+    private func dismissKeyboard(in app: XCUIApplication) {
+        guard app.keyboards.count > 0 else { return }
+        let top = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        let bottom = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.98))
+        top.press(forDuration: 0.1, thenDragTo: bottom)
+        XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: patience), "the keyboard stayed up")
+    }
+
+    /// Saves a screenshot of the screen when `ALFRED_SHOTS` names a directory.
+    @MainActor
+    private func snapshot(_ name: String) {
+        guard let directory = ProcessInfo.processInfo.environment["ALFRED_SHOTS"], !directory.isEmpty else { return }
+        let folder = URL(fileURLWithPath: directory, isDirectory: true)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try? XCUIScreen.main.screenshot().pngRepresentation.write(to: folder.appending(path: name + ".png"))
     }
 
     /// Sends a message to Alfred as the paired device, without the app: the device token in `pairing` is the
@@ -259,7 +352,7 @@ final class ChatUITests: XCTestCase {
     /// The identifiers of the stored messages on screen: `message.in.<id>` or `message.out.<id>`.
     @MainActor
     private func messageIds(in app: XCUIApplication) -> [String] {
-        app.staticTexts.matching(NSPredicate(format: "identifier BEGINSWITH 'message.'"))
+        app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'message.'"))
             .allElementsBoundByIndex.map(\.identifier)
             .filter { $0.hasPrefix("message.in.") || $0.hasPrefix("message.out.") }
     }
@@ -268,8 +361,8 @@ final class ChatUITests: XCTestCase {
     @MainActor
     private func newReply(_ known: [String], containing fragment: String? = nil, in app: XCUIApplication) -> XCUIElement {
         let fresh = NSPredicate(format: "identifier BEGINSWITH 'message.out.' AND NOT (identifier IN %@)", known)
-        guard let fragment else { return app.staticTexts.matching(fresh).firstMatch }
+        guard let fragment else { return app.descendants(matching: .any).matching(fresh).firstMatch }
         let matching = NSPredicate(format: "label CONTAINS %@", fragment)
-        return app.staticTexts.matching(NSCompoundPredicate(andPredicateWithSubpredicates: [fresh, matching])).firstMatch
+        return app.descendants(matching: .any).matching(NSCompoundPredicate(andPredicateWithSubpredicates: [fresh, matching])).firstMatch
     }
 }

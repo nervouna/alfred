@@ -209,7 +209,7 @@ final class ChatHeaderUITests: XCTestCase {
     /// The identifiers of the stored messages on screen: `message.in.<id>` or `message.out.<id>`.
     @MainActor
     private func messageIds(in app: XCUIApplication) -> [String] {
-        app.staticTexts.matching(NSPredicate(format: "identifier BEGINSWITH 'message.'"))
+        app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'message.'"))
             .allElementsBoundByIndex.map(\.identifier)
             .filter { $0.hasPrefix("message.in.") || $0.hasPrefix("message.out.") }
     }
@@ -217,7 +217,7 @@ final class ChatHeaderUITests: XCTestCase {
     /// A stored message from Alfred that is not among `known`.
     @MainActor
     private func newReply(_ known: [String], in app: XCUIApplication) -> XCUIElement {
-        app.staticTexts.matching(NSPredicate(format: "identifier BEGINSWITH 'message.out.' AND NOT (identifier IN %@)", known)).firstMatch
+        app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'message.out.' AND NOT (identifier IN %@)", known)).firstMatch
     }
 
     /// Returns once `value` has stayed the same for a second, which is when the replay of old events is over.

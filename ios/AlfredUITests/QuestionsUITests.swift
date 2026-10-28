@@ -45,7 +45,7 @@ final class QuestionsUITests: XCTestCase {
         XCTAssertTrue(blue.waitForNonExistence(timeout: patience), "the options should go once the question is answered")
 
         // The run goes on with the answer.
-        let reply = app.staticTexts
+        let reply = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH 'message.out.' AND NOT (identifier IN %@) AND label CONTAINS '蓝'", known.messages))
             .firstMatch
         XCTAssertTrue(reply.waitForExistence(timeout: modelPatience), "no reply naming the color\n\(app.debugDescription)")
@@ -178,7 +178,7 @@ final class QuestionsUITests: XCTestCase {
     /// The identifiers of the stored messages on screen: `message.in.<id>` or `message.out.<id>`.
     @MainActor
     private func messageIds(in app: XCUIApplication) -> [String] {
-        app.staticTexts.matching(NSPredicate(format: "identifier BEGINSWITH 'message.'"))
+        app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'message.'"))
             .allElementsBoundByIndex.map(\.identifier)
             .filter { $0.hasPrefix("message.in.") || $0.hasPrefix("message.out.") }
     }

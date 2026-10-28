@@ -144,16 +144,40 @@ private struct Bubble: View {
     let identifier: String
 
     var body: some View {
+        // Parsed on every pass, so a draft that grows is laid out again as it is.
+        let blocks = MessageText.blocks(text)
+        let palette = isOwner ? MessagePalette.owner : .alfred
         HStack(spacing: 0) {
             if isOwner { Spacer(minLength: 48) }
-            Text(MessageText.attributed(text))
-                .textSelection(.enabled)
+            MessageMarkdown(blocks: blocks, palette: palette)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
-                .foregroundStyle(isOwner ? Color.white : Color.primary)
+                .foregroundStyle(palette.text)
                 .background(isOwner ? Color.accentColor : Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16))
-                .accessibilityIdentifier(identifier)
+                .contextMenu {
+                    Button("复制", systemImage: "doc.on.doc") {
+                        UIPasteboard.general.string = MessageText.plainText(blocks)
+                    }
+                }
+                .modifier(BubbleAccessibility(isSingleText: MessageMarkdown.singleText(blocks) != nil, identifier: identifier))
             if !isOwner { Spacer(minLength: 48) }
+        }
+    }
+}
+
+/// A message of one paragraph stays a `Text`, which carries the identifier. Any other is one element for VoiceOver and
+/// the UI tests, with the text of its blocks as its label.
+private struct BubbleAccessibility: ViewModifier {
+    let isSingleText: Bool
+    let identifier: String
+
+    func body(content: Content) -> some View {
+        if isSingleText {
+            content.accessibilityIdentifier(identifier)
+        } else {
+            content
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier(identifier)
         }
     }
 }
