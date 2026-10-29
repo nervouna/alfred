@@ -16,6 +16,9 @@
 - A row under the glass navigation bar or tab bar also counts as hittable, but the tap lands on the bar: scroll it between the bars first (`scrollBetweenBars` in `TasksUITests` and `IdeasUITests`).
 - Run `xcodegen generate` again after adding a source or test file: a stale project builds, runs 0 tests of the new file and exits 0. Read the executed and skipped counts of every group.
 - A build or test run cut short (`BUILD INTERRUPTED`, exit 143) while another session's `xcodebuild` is running is not a failure of the change: check `ps -axo pid,etime,command | grep xcodebuild`, leave the other one alone, and rerun on a simulator of your own.
+- Keep the simulator's hardware keyboard off: with it connected, an off-screen `Keyboard` element stays in the tree and `RunsUITests` and `PushUITests` fail on `the keyboard stayed up`.
+- `ChatHeaderUITests.testTheFirstMessageIsNotCoveredByTheAvatar` swipes back to the start of the history and gives up after 120 s: run it against a stack with a short history (it sorts first in the plain group).
+- To capture a state the app has to be driven into (scrolled up, keyboard open), add a temporary UI test that drives there and waits, take `xcrun simctl io <udid> screenshot` meanwhile, and do not commit the test: driving the simulator by hand needs the owner to grant access, which fails while they are away.
 
 ## Look and feel
 
@@ -26,6 +29,9 @@
 - `.searchable` on the memory list left its field hidden above the first row and scrolled the avatar under the pinned control; `.searchToolbarBehavior(.minimize)` (a Search button in the bar) does not move the content.
 - A `confirmationDialog` hung on a list row is lost when the swipe action that opens it takes the row away: attach it to the `List`, where it opens as a popover (tap `PopoverDismissRegion` to dismiss it, and look for its buttons in `app.sheets` or `app.popovers`).
 - The avatar counts as hittable while half of it is under the glass control: for the top of a list, test that its frame lies below the control.
+- `.buttonStyle(.glass)` pads its label by 7 pt on every side, so a 44 pt circle takes a 30 pt label.
+- `defaultScrollAnchor(.bottom)` leaves a scrolled-up list where it is as content grows, but it does not keep the end in view when the container shrinks (the keyboard): a list that should stay at the end scrolls there itself on a container change (`MessageList`).
+- `onChange` of a value derived from the model sees only what is there when the view draws: two model changes between draws (a pending message and its echo) can look like none. Watch the model with `Observations` when every change counts.
 
 ## On the phone
 
