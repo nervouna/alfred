@@ -4,7 +4,9 @@
 
 ## Test
 
-- CI builds the app but does not run its unit or UI tests (`README.md`, Test). After an app change to a screen other tests pass through, run the whole `AlfredUITests` suite, each group against the stack it needs (`README.md`, Test): plain `app-dev`, `--seed-documents`, and a fresh `--seed-ideas` for `IdeasUITests` and a fresh `--seed-memories` for `MemoryUITests`.
+- CI builds the app but does not run its unit or UI tests (`README.md`, Test). While working on a change, run `AlfredTests` and the `AlfredUITests` classes of the screens it changes, not the whole suite after each edit: a whole-suite run holds one of `simq`'s two slots for 30–54 minutes, and other sessions' runs wait behind it. Before the PR merges, run the whole `AlfredUITests` suite once, each group against the stack it needs (`README.md`, Test): plain `app-dev`, `--seed-documents`, and a fresh `--seed-ideas` for `IdeasUITests` and a fresh `--seed-memories` for `MemoryUITests`.
+- Create one simulator per session and give it to every `simq run` after that, not a new one per run or per group: a new simulator's first boot takes about 30 s against 3–4 s for a used one, and it slows the whole machine for minutes after.
+- A test that can fail on a new simulator's first run (the share tests, `SettingsUITests.test1TheTabIsTheFifthAndShowsEveryRow`) gets one rerun on the same simulator; do not create another simulator for it or run the base branch against the fix.
 - If another `app-dev` holds port 8787, start yours with `--port <n>`; the pairing it prints carries the port.
 - Run UI tests on a simulator that holds only the test build (`com.example.alfred`): a second Alfred build there adds a second share extension, and `ShareUITests` picks the wrong one. The share tests can fail on a new simulator's first run; rerun before blaming a change.
 - Add `ShareUITests`' photo before the run, not during it (`xcrun simctl addmedia <udid> ios/Alfred/Avatar/Clips/still.png`): an `addmedia` during a run stalled the simulator and hung the suite.
