@@ -26,6 +26,7 @@
 - Two test runs at once need two simulators (`simq` refuses a second run on a device a slot holds) and two worktrees: two `xcodebuild` runs in one `-derivedDataPath ios/build` clash.
 - `SettingsUITests.test1TheTabIsTheFifthAndShowsEveryRow` can fail on `the notification state is not 已开启 after Allow` in a run on a fresh simulator, `main` included; rerun before blaming a change.
 - When a UI test fails and the `app-dev` log shows the answer was sent, find out which side lacks it: expose the model's counts as the `accessibilityValue` of a clear 4 pt element (a probe view overlaid on `ChatView`) and write `app.screenshot().pngRepresentation` to an absolute path (the simulator shares the host's filesystem). Do not trace with `NSLog`: its synchronous writes changed the timing and hid a race in 6 runs out of 6 (#218); use an in-memory buffer (8 runs with `Logger` calls in the update path never failed either).
+- A whole group failing at the pairing step (`the chat tab did not appear`, the screen dump showing `pairing.error` 无法把配对信息存入钥匙串) is a test bundle built with `CODE_SIGNING_ALLOWED=NO`, not the change or the machine load (`README.md`, Credentials): build for testing with the default signing.
 
 ## Look and feel
 
@@ -49,5 +50,5 @@
 
 - To time something on the real path, put temporary `print`s in a Release build (never commit them), install it, and run `xcrun devicectl device process launch --console --terminate-existing --device <name> io.damao.alfred`. A warm start is launching `com.apple.Preferences`, waiting, then launching Alfred again without `--terminate-existing`.
 - `devicectl` reporting the phone `unavailable` (CoreDevice error 4016 on install) means it is locked or off the network: ask the owner to unlock it, and keep the built `.app` so the install does not wait for another build.
-- Build the phone install from `origin/main` in a throwaway `git worktree add --detach <dir> origin/main`, not from whatever branch the checkout is on, and copy `ios/Config/Signing.xcconfig` into it first (git ignores it, so a worktree has none). Remove the worktree afterwards.
+- Build the phone install from `origin/main` in a throwaway `git worktree add --detach <dir> origin/main`, not from whatever branch the checkout is on, and copy `ios/Config/Signing.xcconfig` into it first (git ignores it, so a worktree has none). The project is generated and not tracked, so run `xcodegen generate` in `ios/` before `xcodebuild` (without it: `'ios/Alfred.xcodeproj' does not exist`, exit 66). Remove the worktree afterwards.
 - Before a phone install, compare the deployed commit (`git -C alfred log -1` on the host) with `git log <deployed>..origin/main -- src`, and deploy first if the server changed: an app newer than the server can show an empty chat, as one waiting for the `caught-up` frame (#201) did.
