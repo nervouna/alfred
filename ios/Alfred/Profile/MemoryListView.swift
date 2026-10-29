@@ -67,15 +67,15 @@ struct MemoryListView<Header: View>: View {
                 MemoryFormView()
             }
         }
-        // Not on the row: a swipe action takes its row away, and with it a dialog that hangs on the row, even when the list
-        // holds the state that opens it. So the dialog hangs on the list, and its arrow points at the top of it.
-        .confirmationDialog(
+        // Not on the row: a swipe action takes its row away, and with it a question that hangs on the row, even when the list
+        // holds the state that opens it. An alert is centred, with no arrow, so it does not point at any row anyway.
+        .alert(
             "删除这条记忆？",
             isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
-            titleVisibility: .visible,
             presenting: deleting
         ) { memory in
             Button("删除", role: .destructive) { Task { await delete(memory) } }
+            Button("取消", role: .cancel) {}
         } message: { memory in
             Text(memory.name)
         }
