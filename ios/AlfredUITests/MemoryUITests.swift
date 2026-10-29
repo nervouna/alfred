@@ -258,21 +258,20 @@ final class MemoryUITests: XCTestCase {
         let added = row("metric-units.md", in: app)
         scrollBetweenBars(added, in: app)
 
-        // Swiping offers 删除, which asks first. The dialog hangs on the list (its arrow points at the hero, not at the row)
-        // and has no cancel button of its own: a tap outside it keeps the memory.
+        // Swiping offers 删除, which asks in an alert on the list, naming the memory. 取消 keeps the memory.
         added.swipeLeft()
         swipeDeleteButton(in: app).tap()
-        XCTAssertNotNil(dialogButton("删除", in: app), "删除 did not ask\n\(app.debugDescription)")
+        let alert = deleteAlert(naming: "Metric units", in: app)
         snapshot("memory-delete")
-        element("PopoverDismissRegion", in: app).tap()
-        XCTAssertTrue(wait(timeout: patience) { dialogButton("删除", in: app, patience: 0) == nil }, "the dialog stayed\n\(app.debugDescription)")
+        alert.buttons["取消"].tap()
+        XCTAssertTrue(alert.waitForNonExistence(timeout: patience), "the alert stayed\n\(app.debugDescription)")
         XCTAssertTrue(row("metric-units.md", in: app).exists, "dismissing the confirmation deleted the memory")
 
         // Confirming removes the row at once.
         scrollBetweenBars(row("metric-units.md", in: app), in: app)
         row("metric-units.md", in: app).swipeLeft()
         swipeDeleteButton(in: app).tap()
-        try XCTUnwrap(dialogButton("删除", in: app), "删除 did not ask\n\(app.debugDescription)").tap()
+        deleteAlert(naming: "Metric units", in: app).buttons["删除"].tap()
         XCTAssertTrue(row("metric-units.md", in: app).waitForNonExistence(timeout: patience), "the deleted memory is still listed\n\(app.debugDescription)")
 
         // The context menu has 删除 too, behind the same question.
@@ -282,9 +281,9 @@ final class MemoryUITests: XCTestCase {
         let menuDelete = app.buttons["删除"]
         XCTAssertTrue(menuDelete.waitForExistence(timeout: patience), "the context menu has no 删除\n\(app.debugDescription)")
         menuDelete.tap()
-        XCTAssertNotNil(dialogButton("删除", in: app), "删除 in the context menu did not ask\n\(app.debugDescription)")
-        element("PopoverDismissRegion", in: app).tap()
-        XCTAssertTrue(wait(timeout: patience) { dialogButton("删除", in: app, patience: 0) == nil }, "the dialog stayed\n\(app.debugDescription)")
+        let menuAlert = deleteAlert(naming: "Short answers first", in: app)
+        menuAlert.buttons["取消"].tap()
+        XCTAssertTrue(menuAlert.waitForNonExistence(timeout: patience), "the alert stayed\n\(app.debugDescription)")
         XCTAssertTrue(row(preferenceFile, in: app).exists, "dismissing the confirmation deleted the memory")
 
         // A new launch reads the list from Alfred: the deleted memory is not there, the others are.
@@ -467,20 +466,15 @@ final class MemoryUITests: XCTestCase {
         XCTAssertTrue(element("memory.detail.name", in: app).waitForExistence(timeout: patience))
     }
 
-    /// A button of a confirmation dialog, which opens from the row as a popover (or from the bottom as a sheet), once it
-    /// shows. `nil` when it does not within `patience`.
+    /// The alert that asks before a memory is deleted, once it shows: it offers 删除 and 取消 and says which memory it is
+    /// about.
     @MainActor
-    private func dialogButton(_ title: String, in app: XCUIApplication, patience: TimeInterval? = nil) -> XCUIElement? {
-        let limit = patience ?? self.patience
-        let deadline = Date().addingTimeInterval(limit)
-        repeat {
-            for query in [app.sheets, app.popovers] {
-                let button = query.buttons[title]
-                if button.exists { return button }
-            }
-            usleep(250_000)
-        } while Date() < deadline
-        return nil
+    private func deleteAlert(naming name: String, in app: XCUIApplication) -> XCUIElement {
+        let alert = app.alerts["删除这条记忆？"]
+        XCTAssertTrue(alert.waitForExistence(timeout: patience), "删除 did not ask\n\(app.debugDescription)")
+        XCTAssertTrue(alert.buttons["删除"].exists && alert.buttons["取消"].exists, "the alert does not offer 删除 and 取消\n\(alert.debugDescription)")
+        XCTAssertTrue(alert.staticTexts[name].exists, "the alert does not name the memory \(name)\n\(alert.debugDescription)")
+        return alert
     }
 
     /// The 删除 a swipe on a row offers, once it shows.
