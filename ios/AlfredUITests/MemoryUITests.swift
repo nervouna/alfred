@@ -7,8 +7,9 @@ import XCTest
 ///
 /// The tests change the stack's memories, so they need a fresh stack (new state and workspace directories), and they run in
 /// the order of their names: the first only reads, the second renames a memory, the third adds one, and the later ones
-/// delete or conflict over the rest. The conflict tests change memories behind the app's back with the device token from the
-/// pairing, over the same workbench API the app uses.
+/// delete or conflict over the rest; the last adds enough memories for the list to scroll. The conflict tests and the last
+/// one change memories behind the app's back with the device token from the pairing, over the same workbench API the app
+/// uses.
 ///
 /// When `ALFRED_SHOTS` names a directory (pass `TEST_RUNNER_ALFRED_SHOTS`), the tests save screenshots of the list, a
 /// memory's page and the form there, in the appearance the device has.
@@ -50,24 +51,15 @@ final class MemoryUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["不在提示中"].exists)
         snapshot("memory-list")
         scrollThroughHeaders(in: app)
-        snapshot("memory-list-scrolled")
+        snapshot("memory-list-end")
         scrollToTop(in: app)
 
-        // The hero scrolls with the list and the control stays where it is.
+        // The hero comes first at rest, with the control directly under it, and the first section under the control.
         let parts = element("profile.parts", in: app)
         let avatar = element("profile.avatar", in: app)
         XCTAssertTrue(avatar.exists && parts.exists, "no avatar or control\n\(app.debugDescription)")
-        let partsFrame = parts.frame
-        let avatarTop = avatar.frame.minY
-        XCTAssertGreaterThanOrEqual(avatarTop, partsFrame.maxY - 1, "the avatar is not under the control")
-        // A short drag, which leaves the avatar half under the control.
-        let window = app.windows.firstMatch
-        window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6))
-            .press(forDuration: 0.1, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.48)))
-        XCTAssertTrue(wait(timeout: patience) { avatar.frame.minY < avatarTop - 40 || !avatar.exists }, "the avatar did not scroll with the list")
-        XCTAssertEqual(parts.frame, partsFrame, "the control moved with the list")
-        snapshot("memory-list-scrolling")
-        scrollToTop(in: app)
+        assertControlUnderHero(in: app)
+        XCTAssertGreaterThanOrEqual(element("memory.section.user", in: app).frame.minY, parts.frame.maxY - 1, "the first section is not under the control")
 
         // Search matches the name, the description and the body, and a query that matches nothing says so.
         // The search field is a button in the bar until it is opened, and takes the focus when it is.
@@ -266,8 +258,8 @@ final class MemoryUITests: XCTestCase {
         let added = row("metric-units.md", in: app)
         scrollBetweenBars(added, in: app)
 
-        // Swiping offers 删除, which asks first. The dialog points at the row and has no cancel button of its own: a tap
-        // outside it keeps the memory.
+        // Swiping offers 删除, which asks first. The dialog hangs on the list (its arrow points at the hero, not at the row)
+        // and has no cancel button of its own: a tap outside it keeps the memory.
         added.swipeLeft()
         swipeDeleteButton(in: app).tap()
         XCTAssertNotNil(dialogButton("删除", in: app), "删除 did not ask\n\(app.debugDescription)")
@@ -366,6 +358,75 @@ final class MemoryUITests: XCTestCase {
         XCTAssertTrue(row(projectFile, in: app).waitForExistence(timeout: patience), "the list is not showing\n\(app.debugDescription)")
         XCTAssertTrue(row(preferenceFile, in: app).waitForNonExistence(timeout: patience), "the memory that is gone is still listed\n\(app.debugDescription)")
         XCTAssertEqual(app.alerts.count, 0, "a 404 raised an alert")
+    }
+
+    // MARK: Scrolling
+
+    @MainActor
+    func test8TheControlPinsWhenTheListScrollsUpToIt() throws {
+        // A list a screen long cannot scroll the hero away: Alfred gets enough memories, behind the app's back, before the
+        // app reads them.
+        let api = try WorkbenchAPI(environment: ProcessInfo.processInfo.environment)
+        for number in 1...8 {
+            try api.createMemory(
+                name: "Scroll filler \(number)", description: "Only here to make the list longer.",
+                kind: "project", body: "Filler \(number)."
+            )
+        }
+        let app = try launchPaired()
+        openMemories(in: app)
+        scrollToTop(in: app)
+
+        // At rest the hero comes first and the control sits directly under it.
+        let parts = element("profile.parts", in: app)
+        let avatar = element("profile.avatar", in: app)
+        assertControlUnderHero(in: app)
+        let rest = parts.frame
+        let avatarTop = avatar.frame.minY
+
+        // A short scroll moves the hero and the control up together: the control has not reached the bar yet.
+        drag(upBy: 90, in: app)
+        XCTAssertTrue(wait(timeout: patience) { avatar.exists && avatar.frame.minY < avatarTop - 40 }, "the hero did not scroll with the list (at \(avatar.frame))")
+        settle(avatar)
+        let scrolledBy = avatarTop - avatar.frame.minY
+        XCTAssertEqual(rest.minY - parts.frame.minY, scrolledBy, accuracy: 3, "the control did not move with the list (\(rest) to \(parts.frame), the hero by \(scrolledBy))")
+        XCTAssertGreaterThan(parts.frame.minY, app.navigationBars.firstMatch.frame.maxY + pinnedGap + 16, "the control pinned before the list reached it (\(parts.frame))")
+        snapshot("memory-list-scrolling")
+
+        // Just short of the bar the control is still moving with the list.
+        let barBottom = app.navigationBars.firstMatch.frame.maxY
+        drag(parts, to: barBottom + 24, in: app)
+        XCTAssertEqual(parts.frame.minY, barBottom + 24, accuracy: 6, "the control did not keep moving with the list up to the bar (\(parts.frame), bar \(barBottom))")
+
+        // Scrolled up to it, the control stays at the bottom edge of the bar with the rows going under it.
+        app.swipeUp()
+        app.swipeUp()
+        XCTAssertTrue(wait(timeout: patience) { !avatar.exists || avatar.frame.maxY < parts.frame.minY + 1 }, "the hero did not scroll away with the list (at \(avatar.frame))")
+        settle(parts)
+        assertControlPinned(in: app)
+        snapshot("memory-list-pinned")
+        // The control works where it is pinned: a tap on 规则 shows the rules, with the control under the hero again.
+        app.buttons["规则"].tap()
+        XCTAssertTrue(element("profile.rules.text", in: app).waitForExistence(timeout: patience), "规则 shows no rules\n\(app.debugDescription)")
+        XCTAssertTrue(wait(timeout: patience) { samePlace(parts.frame, rest) }, "the control did not return under the hero in 规则 (\(parts.frame), at rest \(rest))")
+        app.buttons["记忆"].tap()
+        XCTAssertTrue(element("memory.add", in: app).waitForExistence(timeout: patience), "记忆 shows no list\n\(app.debugDescription)")
+        XCTAssertTrue(wait(timeout: patience) { parts.frame == rest }, "the control did not return under the hero in 记忆 (\(parts.frame), at rest \(rest))")
+
+        // Scrolling up again pins it, and scrolling back brings the hero back with the control under it.
+        XCTAssertTrue(wait(timeout: patience) { !rows(in: app).isEmpty }, "the memories did not load again\n\(app.debugDescription)")
+        app.swipeUp()
+        app.swipeUp()
+        XCTAssertTrue(wait(timeout: patience) { !avatar.exists || avatar.frame.maxY < parts.frame.minY + 1 }, "the hero did not scroll away with the list (at \(avatar.frame))")
+        settle(parts)
+        assertControlPinned(in: app)
+        app.swipeDown()
+        app.swipeDown()
+        app.swipeDown()
+        XCTAssertTrue(wait(timeout: patience) { avatar.exists && abs(avatar.frame.minY - avatarTop) < 1 }, "the hero did not come back (avatar at \(avatar.frame))")
+        settle(parts)
+        assertControlUnderHero(in: app)
+        XCTAssertEqual(parts.frame, rest, "the control did not come back to its place under the hero")
     }
 
     // MARK: The screen
@@ -474,15 +535,82 @@ final class MemoryUITests: XCTestCase {
 
     @MainActor
     private func scrollToTop(in app: XCUIApplication) {
-        // The avatar is hittable while it is half under the glass bars, so the top is where it lies below the control.
+        // The avatar is hittable while it is half under the glass bars, so the top is where it lies below the navigation
+        // bar, by the hero's own padding.
         let avatar = element("profile.avatar", in: app)
-        let parts = element("profile.parts", in: app)
+        let bar = app.navigationBars.firstMatch
         var tries = 0
-        while !(avatar.exists && avatar.frame.minY >= parts.frame.maxY - 1) && tries < 8 {
+        while !(avatar.exists && avatar.frame.minY >= bar.frame.maxY + 8) && tries < 8 {
             app.swipeDown()
             tries += 1
         }
         usleep(500_000)
+    }
+
+    // MARK: The control's place
+
+    /// The page at rest: the hero comes first, below the navigation bar, and the segmented control sits directly under his
+    /// name, with nothing between them.
+    @MainActor
+    private func assertControlUnderHero(in app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
+        let avatar = element("profile.avatar", in: app)
+        let name = element("profile.name", in: app)
+        let parts = element("profile.parts", in: app)
+        let bar = app.navigationBars.firstMatch.frame
+        XCTAssertGreaterThanOrEqual(avatar.frame.minY, bar.maxY - 1, "the hero is not below the navigation bar (avatar \(avatar.frame), bar \(bar))", file: file, line: line)
+        XCTAssertGreaterThanOrEqual(parts.frame.minY, name.frame.maxY - 1, "the segmented control (\(parts.frame)) is not under the name (\(name.frame))", file: file, line: line)
+        XCTAssertLessThanOrEqual(parts.frame.minY - name.frame.maxY, 40, "the segmented control (\(parts.frame)) is not directly under the name (\(name.frame))", file: file, line: line)
+    }
+
+    /// The list scrolled up to the control: it sits at the bottom edge of the navigation bar.
+    @MainActor
+    private func assertControlPinned(in app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
+        let parts = element("profile.parts", in: app)
+        let bar = app.navigationBars.firstMatch.frame
+        XCTAssertEqual(parts.frame.minY - bar.maxY, pinnedGap, accuracy: 4, "the segmented control (\(parts.frame)) is not at the bottom edge of the navigation bar (\(bar))", file: file, line: line)
+    }
+
+    /// How far below the navigation bar's bottom edge the pinned control's top edge lies: the control's own padding.
+    private let pinnedGap: CGFloat = 8
+
+    /// Whether two frames are the same place on screen. The list and the scroll view lay the hero out a pixel apart, so
+    /// the control sits a third of a point differently in the two parts.
+    private func samePlace(_ a: CGRect, _ b: CGRect) -> Bool {
+        abs(a.minX - b.minX) <= 1 && abs(a.minY - b.minY) <= 1 && abs(a.width - b.width) <= 1 && abs(a.height - b.height) <= 1
+    }
+
+    /// Drags the list's content up by `points` and holds it there, so that it stops where the finger does instead of
+    /// carrying on.
+    @MainActor
+    private func drag(upBy points: CGFloat, in app: XCUIApplication) {
+        let start = app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.7))
+        start.press(forDuration: 0.1, thenDragTo: start.withOffset(CGVector(dx: 0, dy: -points)), withVelocity: .slow, thenHoldForDuration: 0.5)
+    }
+
+    /// Drags the list until `control`'s top edge is at `y`. A drag loses its first points to the touch slop, so it goes in
+    /// steps, looking again after each.
+    @MainActor
+    private func drag(_ control: XCUIElement, to y: CGFloat, in app: XCUIApplication) {
+        for _ in 0..<4 {
+            settle(control)
+            let remaining = control.frame.minY - y
+            if abs(remaining) <= 4 { return }
+            drag(upBy: remaining + (remaining > 0 ? 10 : -10), in: app)
+        }
+        settle(control)
+    }
+
+    /// Waits for `target` to keep its frame over three looks in a row.
+    @MainActor
+    private func settle(_ target: XCUIElement) {
+        var previous: CGRect?
+        var steady = 0
+        _ = wait(timeout: patience) {
+            let frame = target.frame
+            steady = frame == previous ? steady + 1 : 0
+            previous = frame
+            return steady >= 3
+        }
     }
 
     /// Scrolls the list until `target` lies between the bars: below the page's segmented control and above the tab bar. The
@@ -676,6 +804,13 @@ private struct WorkbenchAPI {
         _ = try call("POST", "/api/commands", body: [
             "type": "memory.update", "file": file, "version": memory["version"] as Any,
             "name": name, "description": description, "kind": kind, "body": body,
+        ])
+    }
+
+    /// Adds a memory.
+    func createMemory(name: String, description: String, kind: String, body: String) throws {
+        _ = try call("POST", "/api/commands", body: [
+            "type": "memory.create", "name": name, "description": description, "kind": kind, "body": body,
         ])
     }
 

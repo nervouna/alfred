@@ -1,8 +1,8 @@
 import XCTest
 
 /// Pairs the app with a running `node scripts/app-dev.ts` and works Alfred's profile page, which the avatar in the chat's
-/// header opens: the 规则 and 记忆 segments pinned at the top, over content that starts with the avatar large over his name,
-/// and ALFRED.md shown as Markdown and edited in place. The 记忆 part has its own tests (`MemoryUITests`). The pairing comes from the environment variable `ALFRED_PAIRING` (pass `TEST_RUNNER_ALFRED_PAIRING` to
+/// header opens: the avatar large over his name, the 规则 and 记忆 segments directly under them (pinned below the navigation
+/// bar once the content has scrolled up to them), and ALFRED.md shown as Markdown and edited in place. The 记忆 part has its own tests (`MemoryUITests`). The pairing comes from the environment variable `ALFRED_PAIRING` (pass `TEST_RUNNER_ALFRED_PAIRING` to
 /// xcodebuild); without it the tests skip themselves. Nothing here runs the model.
 ///
 /// A new stack's workspace holds Alfred's default ALFRED.md, which starts with `# Workspace rules`. The tests that change
@@ -37,8 +37,8 @@ final class ProfileUITests: XCTestCase {
 
         XCTAssertTrue(element("profile.page", in: app).waitForExistence(timeout: patience), "the avatar did not open the profile\n\(app.debugDescription)")
 
-        // The segmented control is pinned at the top, and the hero, the avatar 128 pt and centred over the name, is the
-        // first thing under it. 规则 is the segment that shows first.
+        // The hero, the avatar 128 pt and centred over the name, comes first under the navigation bar, and the segmented
+        // control sits directly under it. 规则 is the segment that shows first.
         let avatar = element("profile.avatar", in: app)
         let name = element("profile.name", in: app)
         let parts = element("profile.parts", in: app)
@@ -51,7 +51,7 @@ final class ProfileUITests: XCTestCase {
         XCTAssertEqual(name.frame.midX, app.frame.midX, accuracy: 2)
         XCTAssertGreaterThanOrEqual(name.frame.minY, avatar.frame.maxY - 1, "the name is not under the avatar")
         XCTAssertTrue(parts.exists, "no segmented control\n\(app.debugDescription)")
-        XCTAssertGreaterThanOrEqual(avatar.frame.minY, parts.frame.maxY - 1, "the avatar is not under the segmented control")
+        assertControlUnderHero(in: app)
         XCTAssertTrue(app.buttons["规则"].exists && app.buttons["记忆"].exists, "the segments are not 规则 and 记忆\n\(app.debugDescription)")
         XCTAssertTrue(app.buttons["规则"].isSelected, "规则 is not the first segment")
         XCTAssertFalse(app.buttons["记忆"].isSelected)
@@ -73,7 +73,7 @@ final class ProfileUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["# \(heading)"].exists, "the Markdown source shows instead of the rendering")
         snapshot("profile")
 
-        // 记忆 shows its list, with ＋ and no 编辑, under the same pinned control with the hero as its first row.
+        // 记忆 shows its list, with ＋ and no 编辑, with the hero as its first row and the control in the same place.
         let partsFrame = parts.frame
         app.buttons["记忆"].tap()
         XCTAssertTrue(element("memory.add", in: app).waitForExistence(timeout: patience), "记忆 shows no list\n\(app.debugDescription)")
@@ -81,7 +81,8 @@ final class ProfileUITests: XCTestCase {
         XCTAssertFalse(rulesText.exists, "记忆 still shows the rules")
         XCTAssertFalse(edit.exists, "记忆 has an 编辑 button")
         XCTAssertTrue(element("profile.avatar", in: app).exists && element("profile.name", in: app).exists, "记忆 has no hero")
-        XCTAssertEqual(parts.frame, partsFrame, "the segmented control moved between the parts")
+        assertControlUnderHero(in: app)
+        XCTAssertTrue(samePlace(parts.frame, partsFrame), "the segmented control moved between the parts (\(partsFrame) to \(parts.frame))")
         app.buttons["规则"].tap()
         XCTAssertTrue(app.staticTexts[heading].waitForExistence(timeout: patience), "规则 does not show the rules again\n\(app.debugDescription)")
 
@@ -101,7 +102,8 @@ final class ProfileUITests: XCTestCase {
         openProfile(in: app)
         ensureBaseline(in: app)
 
-        // The editor: 取消 and 保存 in the bar and no back button, the segmented control off, a count under the text.
+        // The editor: 取消 and 保存 in the bar and no back button, the segmented control off and pinned under the bar
+        // with the hero gone, the editor under it, a count under the text.
         let stamp = String(Int(Date().timeIntervalSince1970))
         let heading = "规则 \(stamp)"
         let item = "回复之前先看一眼 ALFRED.md"
@@ -115,6 +117,8 @@ final class ProfileUITests: XCTestCase {
         XCTAssertFalse(element("profile.edit", in: app).exists, "编辑 stayed while editing")
         XCTAssertFalse(backButton(in: app).exists, "the back button stayed while editing\n\(app.debugDescription)")
         XCTAssertFalse(element("profile.parts", in: app).isEnabled, "the segmented control is on while editing")
+        XCTAssertFalse(element("profile.avatar", in: app).exists, "the hero stayed while editing\n\(app.debugDescription)")
+        assertControlPinned(in: app)
         XCTAssertFalse(element("profile.save", in: app).isEnabled, "保存 is on while the text is unchanged")
         XCTAssertEqual(element("profile.rules.count", in: app).label, "\(baseline.utf8.count) / 8192")
 
@@ -234,7 +238,7 @@ final class ProfileUITests: XCTestCase {
     // MARK: Scrolling
 
     @MainActor
-    func test5TheHeroScrollsWithTheRulesAndTheControlStaysPinned() throws {
+    func test5TheControlSitsUnderTheHeroAndPinsWhenTheTextScrollsUpToIt() throws {
         let app = try launchPaired()
         openProfile(in: app)
         ensureBaseline(in: app)
@@ -251,29 +255,57 @@ final class ProfileUITests: XCTestCase {
         XCTAssertTrue(editor.waitForNonExistence(timeout: patience), "the editor stayed after the save")
         XCTAssertTrue(app.staticTexts["第30条规则"].waitForExistence(timeout: patience), "the long text does not show\n\(app.debugDescription)")
 
-        // Scrolling moves the avatar and the name out of the way; the control stays where it is, over the text.
+        // At rest the hero comes first and the control sits directly under it.
         let avatar = element("profile.avatar", in: app)
         let parts = element("profile.parts", in: app)
-        let partsFrame = parts.frame
+        assertControlUnderHero(in: app)
+        let rest = parts.frame
         let avatarTop = avatar.frame.minY
-        XCTAssertGreaterThanOrEqual(avatarTop, partsFrame.maxY - 1, "the avatar is not under the segmented control")
+
+        // A short scroll moves the hero and the control up together: the control has not reached the bar yet.
+        drag(upBy: 90, in: app)
+        XCTAssertTrue(wait(timeout: patience) { avatar.exists && avatar.frame.minY < avatarTop - 40 }, "the hero did not scroll with the text (at \(avatar.frame))")
+        settle(avatar)
+        let scrolledBy = avatarTop - avatar.frame.minY
+        XCTAssertEqual(rest.minY - parts.frame.minY, scrolledBy, accuracy: 3, "the segmented control did not move with the text (\(rest) to \(parts.frame), the hero by \(scrolledBy))")
+        XCTAssertGreaterThan(parts.frame.minY, app.navigationBars.firstMatch.frame.maxY + pinnedGap + 16, "the segmented control pinned before the text reached it (\(parts.frame))")
+        snapshot("profile-scrolling")
+
+        // Just short of the bar the control is still moving with the text.
+        let barBottom = app.navigationBars.firstMatch.frame.maxY
+        drag(parts, to: barBottom + 24, in: app)
+        XCTAssertEqual(parts.frame.minY, barBottom + 24, accuracy: 6, "the segmented control did not keep moving with the text up to the bar (\(parts.frame), bar \(barBottom))")
+
+        // Scrolled up to it, the control stays at the bottom edge of the bar with the text going under it.
         app.swipeUp()
         app.swipeUp()
-        XCTAssertTrue(wait(timeout: patience) { !avatar.exists || avatar.frame.maxY < partsFrame.maxY + 1 }, "the avatar did not scroll away with the text (at \(avatar.frame))")
-        XCTAssertEqual(parts.frame, partsFrame, "the segmented control moved with the text")
+        XCTAssertTrue(wait(timeout: patience) { !avatar.exists || avatar.frame.maxY < parts.frame.minY + 1 }, "the hero did not scroll away with the text (at \(avatar.frame))")
+        settle(parts)
+        assertControlPinned(in: app)
         snapshot("profile-scrolled")
-        // The control still works where it is: a tap on 记忆 shows the memories, with the hero at the top of its list.
+        // The control works where it is pinned: a tap on 记忆 shows the memories at rest, and 规则 shows the rules at rest.
         app.buttons["记忆"].tap()
         XCTAssertTrue(element("memory.add", in: app).waitForExistence(timeout: patience), "记忆 shows no list\n\(app.debugDescription)")
         XCTAssertTrue(app.buttons["记忆"].isSelected, "the tap on 记忆 did not select it")
+        XCTAssertTrue(wait(timeout: patience) { samePlace(parts.frame, rest) }, "the segmented control did not return under the hero in 记忆 (\(parts.frame), at rest \(rest))")
+        assertControlUnderHero(in: app)
         app.buttons["规则"].tap()
         XCTAssertTrue(app.staticTexts["第30条规则"].waitForExistence(timeout: patience) || app.staticTexts["第1条规则"].waitForExistence(timeout: patience), "规则 does not show the long text again\n\(app.debugDescription)")
+        XCTAssertTrue(wait(timeout: patience) { parts.frame == rest }, "the segmented control did not return under the hero in 规则 (\(parts.frame), at rest \(rest))")
 
-        // Scrolling back brings the hero back.
+        // Scrolling up again pins it, and scrolling back brings the hero back with the control under it.
+        app.swipeUp()
+        app.swipeUp()
+        XCTAssertTrue(wait(timeout: patience) { !avatar.exists || avatar.frame.maxY < parts.frame.minY + 1 }, "the hero did not scroll away with the text (at \(avatar.frame))")
+        settle(parts)
+        assertControlPinned(in: app)
         app.swipeDown()
         app.swipeDown()
         app.swipeDown()
         XCTAssertTrue(wait(timeout: patience) { avatar.exists && abs(avatar.frame.minY - avatarTop) < 1 }, "the hero did not come back (avatar at \(avatar.frame))")
+        settle(parts)
+        assertControlUnderHero(in: app)
+        XCTAssertEqual(parts.frame, rest, "the segmented control did not come back to its place under the hero")
 
         // The stack is left with the baseline, as the other tests expect.
         ensureBaseline(in: app)
@@ -331,6 +363,72 @@ final class ProfileUITests: XCTestCase {
     private func replaceText(in field: XCUIElement, with text: String) {
         let held = (field.value as? String)?.count ?? 0
         field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: held) + text)
+    }
+
+    // MARK: The control's place
+
+    /// The page at rest: the hero comes first, below the navigation bar, and the segmented control sits directly under his
+    /// name, with nothing between them.
+    @MainActor
+    private func assertControlUnderHero(in app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
+        let avatar = element("profile.avatar", in: app)
+        let name = element("profile.name", in: app)
+        let parts = element("profile.parts", in: app)
+        let bar = app.navigationBars.firstMatch.frame
+        XCTAssertGreaterThanOrEqual(avatar.frame.minY, bar.maxY - 1, "the hero is not below the navigation bar (avatar \(avatar.frame), bar \(bar))", file: file, line: line)
+        XCTAssertGreaterThanOrEqual(parts.frame.minY, name.frame.maxY - 1, "the segmented control (\(parts.frame)) is not under the name (\(name.frame))", file: file, line: line)
+        XCTAssertLessThanOrEqual(parts.frame.minY - name.frame.maxY, 40, "the segmented control (\(parts.frame)) is not directly under the name (\(name.frame))", file: file, line: line)
+    }
+
+    /// The page scrolled, or the editor open: the segmented control sits at the bottom edge of the navigation bar.
+    @MainActor
+    private func assertControlPinned(in app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
+        let parts = element("profile.parts", in: app)
+        let bar = app.navigationBars.firstMatch.frame
+        XCTAssertEqual(parts.frame.minY - bar.maxY, pinnedGap, accuracy: 4, "the segmented control (\(parts.frame)) is not at the bottom edge of the navigation bar (\(bar))", file: file, line: line)
+    }
+
+    /// How far below the navigation bar's bottom edge the pinned control's top edge lies: the control's own padding.
+    private let pinnedGap: CGFloat = 8
+
+    /// Whether two frames are the same place on screen. The list and the scroll view lay the hero out a pixel apart, so
+    /// the control sits a third of a point differently in the two parts.
+    private func samePlace(_ a: CGRect, _ b: CGRect) -> Bool {
+        abs(a.minX - b.minX) <= 1 && abs(a.minY - b.minY) <= 1 && abs(a.width - b.width) <= 1 && abs(a.height - b.height) <= 1
+    }
+
+    /// Drags the page's content up by `points` and holds it there, so that it stops where the finger does instead of
+    /// carrying on.
+    @MainActor
+    private func drag(upBy points: CGFloat, in app: XCUIApplication) {
+        let start = app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.7))
+        start.press(forDuration: 0.1, thenDragTo: start.withOffset(CGVector(dx: 0, dy: -points)), withVelocity: .slow, thenHoldForDuration: 0.5)
+    }
+
+    /// Drags the page until `control`'s top edge is at `y`. A drag loses its first points to the touch slop, so it goes in
+    /// steps, looking again after each.
+    @MainActor
+    private func drag(_ control: XCUIElement, to y: CGFloat, in app: XCUIApplication) {
+        for _ in 0..<4 {
+            settle(control)
+            let remaining = control.frame.minY - y
+            if abs(remaining) <= 4 { return }
+            drag(upBy: remaining + (remaining > 0 ? 10 : -10), in: app)
+        }
+        settle(control)
+    }
+
+    /// Waits for `target` to keep its frame over three looks in a row.
+    @MainActor
+    private func settle(_ target: XCUIElement) {
+        var previous: CGRect?
+        var steady = 0
+        _ = wait(timeout: patience) {
+            let frame = target.frame
+            steady = frame == previous ? steady + 1 : 0
+            previous = frame
+            return steady >= 3
+        }
     }
 
     // MARK: Behind the app's back

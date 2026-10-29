@@ -2,11 +2,12 @@ import AlfredKit
 import SwiftUI
 
 /// The 记忆 part of Alfred's profile: his long-term memories in an inset-grouped list, one section for each kind, with
-/// the avatar and his name as the first row, so they scroll away with the rest. A row opens the memory's page; the search
-/// field narrows the list by name, description and body; ＋ opens the form for a new memory; a swipe or the context menu
-/// deletes one, behind a confirmation. The list comes from the model, which keeps the owner's own changes in it.
-struct MemoryListView: View {
-    let avatarState: AvatarState
+/// the page's header (the avatar, his name and the room for the segmented control) as the first row, so it scrolls away
+/// with the rest. A row opens the memory's page; the search field narrows the list by name, description and body; ＋ opens
+/// the form for a new memory; a swipe or the context menu deletes one, behind a confirmation. The list comes from the
+/// model, which keeps the owner's own changes in it.
+struct MemoryListView<Header: View>: View {
+    let header: Header
 
     @Environment(AppModel.self) private var model
     @State private var query = ""
@@ -19,10 +20,15 @@ struct MemoryListView: View {
     var body: some View {
         let sections = model.memoryCatalog.sections(matching: query)
         List {
-            ProfileHero(state: avatarState)
-                .listRowBackground(Color.clear)
-                .listRowSeparator(.hidden)
-                .listRowInsets(EdgeInsets())
+            // The header's section starts at the top and spans the width, as the rules' scroll view does, so that the
+            // control sits in the same place in both parts and the page knows how far the list has to scroll to reach it.
+            Section {
+                header
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets())
+            }
+            .listSectionMargins([.top, .horizontal], 0)
             if sections.isEmpty {
                 placeholder
             }
@@ -61,7 +67,8 @@ struct MemoryListView: View {
                 MemoryFormView()
             }
         }
-        // Not on the row: a swipe action takes its row away, and with it a dialog that hangs on the row.
+        // Not on the row: a swipe action takes its row away, and with it a dialog that hangs on the row, even when the list
+        // holds the state that opens it. So the dialog hangs on the list, and its arrow points at the top of it.
         .confirmationDialog(
             "删除这条记忆？",
             isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
