@@ -79,7 +79,15 @@ final class AppModel {
 
     /// The device's credentials; `nil` until it is paired.
     private(set) var credentials: Credentials?
-    private(set) var timeline = Timeline()
+    /// What the chat shows. It is changed only through `changeTimeline`: the value is written first and the views are told
+    /// after. An observed property announces a change before it makes it, and SwiftUI can update the views right then, so a
+    /// view that read the timeline there saw the old one, and was not told again when the new one landed (#218).
+    var timeline: Timeline {
+        _ = timelineVersion
+        return storedTimeline
+    }
+    @ObservationIgnored private var storedTimeline = Timeline()
+    private var timelineVersion = 0
     /// The owner's tasks: the list read from the server, kept current by `task.updated` events.
     private(set) var taskCatalog = TaskCatalog()
     /// Why the last read of the task list failed, until a read works.
@@ -273,7 +281,7 @@ final class AppModel {
     }
 
     private func reset() {
-        timeline = Timeline()
+        changeTimeline { $0 = Timeline() }
         taskCatalog = TaskCatalog()
         taskFailure = nil
         documentCatalog = DocumentCatalog()
@@ -397,7 +405,7 @@ final class AppModel {
 
     /// What one stream event changes. The work that only needs doing once per update is left to `handle`.
     private func apply(_ event: StreamEvent) {
-        timeline.apply(event)
+        changeTimeline { $0.apply(event) }
         taskCatalog.apply(event)
         documentCatalog.apply(event)
         ideaCatalog.apply(event)
@@ -411,6 +419,12 @@ final class AppModel {
                 AttachmentStaging.discard(sent)
             }
         }
+    }
+
+    /// Changes the timeline, then tells the views.
+    private func changeTimeline(_ change: (inout Timeline) -> Void) {
+        change(&storedTimeline)
+        timelineVersion += 1
     }
 
     /// An access error from a command means the stream's failure too: show it instead of a chat that cannot send.
@@ -989,7 +1003,7 @@ final class AppModel {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !attachments.isEmpty else { return }
         let clientId = makeClientId()
-        timeline.addPending(clientId: clientId, text: text)
+        changeTimeline { $0.addPending(clientId: clientId, text: text) }
         if !attachments.isEmpty {
             outgoingAttachments[clientId] = attachments
         }

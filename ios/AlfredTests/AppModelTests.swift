@@ -1,4 +1,5 @@
 import AlfredKit
+import Observation
 import Synchronization
 import XCTest
 
@@ -165,6 +166,23 @@ final class AppModelTests: XCTestCase {
         XCTAssertTrue(model.failedClientIds.isEmpty)
         let request = try XCTUnwrap(server.requests(to: "/api/commands").first)
         XCTAssertEqual(request.command, ["type": "message.send", "clientId": "c-test-1", "text": "帮我查一下"])
+    }
+
+    /// An observed property tells its observers before it changes, and SwiftUI may update a view right then (#218): the
+    /// timeline is written first, so a view that reads it when told sees the change and is not left on the old one.
+    func testAnObserverToldOfTheTimelineReadsTheChange() async throws {
+        let (model, _, _) = try makeModel(credentials: true)
+        final class Seen: @unchecked Sendable { var pending: [Int] = [] }
+        let seen = Seen()
+        withObservationTracking {
+            _ = model.timeline
+        } onChange: {
+            MainActor.assumeIsolated { seen.pending.append(model.timeline.pending.count) }
+        }
+
+        await model.send("你好")
+
+        XCTAssertEqual(seen.pending, [1], "the observer read the timeline before the message was in it")
     }
 
     func testBlankTextIsNotSent() async throws {
