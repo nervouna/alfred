@@ -67,7 +67,7 @@ final class QuestionsUITests: XCTestCase {
         XCTAssertTrue(answer.label.contains("绿色"), answer.label)
     }
 
-    /// Stopping the run cancels its open question.
+    /// Sending `/stop` from the composer (the chat has no stop button) cancels the run's open question.
     @MainActor
     func testStoppingTheRunMarksTheQuestionCancelled() throws {
         let (app, known) = try launchPaired()
@@ -76,14 +76,12 @@ final class QuestionsUITests: XCTestCase {
         XCTAssertTrue(card.waitForExistence(timeout: modelPatience), "no question card\n\(app.debugDescription)")
         XCTAssertTrue(option(containing: "蓝色", in: card).waitForExistence(timeout: patience))
 
-        let stop = app.buttons["停止"]
-        XCTAssertTrue(stop.waitForExistence(timeout: patience), "no stop button while the run waits")
-        stop.tap()
+        send("/stop", in: app)
 
         let cancelled = card.staticTexts["已取消"]
         XCTAssertTrue(cancelled.waitForExistence(timeout: patience), "the card does not say 已取消\n\(app.debugDescription)")
         XCTAssertFalse(option(containing: "蓝色", in: card).exists, "a cancelled question has no options to tap")
-        XCTAssertTrue(app.buttons["停止"].waitForNonExistence(timeout: patience), "the run should have ended")
+        XCTAssertTrue(newReply(known.messages, containing: "已停止", in: app).waitForExistence(timeout: patience), "Alfred did not say it stopped the run\n\(app.debugDescription)")
     }
 
     // MARK: Driving the app
@@ -160,6 +158,14 @@ final class QuestionsUITests: XCTestCase {
     @MainActor
     private func option(containing fragment: String, in card: XCUIElement) -> XCUIElement {
         card.buttons.matching(NSPredicate(format: "identifier == 'question.option' AND label CONTAINS %@", fragment)).firstMatch
+    }
+
+    /// A stored message from Alfred that was not on screen when the test started, with text containing `fragment`.
+    @MainActor
+    private func newReply(_ known: [String], containing fragment: String, in app: XCUIApplication) -> XCUIElement {
+        let fresh = NSPredicate(format: "identifier BEGINSWITH 'message.out.' AND NOT (identifier IN %@)", known)
+        let matching = NSPredicate(format: "label CONTAINS %@", fragment)
+        return app.staticTexts.matching(NSCompoundPredicate(andPredicateWithSubpredicates: [fresh, matching])).firstMatch
     }
 
     /// The identifiers of the question cards on screen: `question.card.<id>`.

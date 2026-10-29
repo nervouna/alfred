@@ -1165,7 +1165,7 @@ final class AppModel {
 
     // MARK: What the chat shows
 
-    /// The newest chat run that is running: the one the stop button stops. A chat run is a run of kind `task` without a
+    /// The newest chat run that is running, which the avatar works for. A chat run is a run of kind `task` without a
     /// `taskId`. A scheduled task's run is not the chat's; `taskRunBanners` shows it.
     var runningChatRun: Run? {
         timeline.runs.values

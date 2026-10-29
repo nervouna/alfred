@@ -71,7 +71,7 @@ struct AttachmentChip: View {
     }
 }
 
-/// The files chosen for the next message, above the field.
+/// The files chosen for the next message, in the composer's field above the text row. The field's shape clips it.
 struct AttachmentStrip: View {
     let model: AppModel
     /// Photos being read from the picker, which the model does not know about yet.
@@ -92,9 +92,8 @@ struct AttachmentStrip: View {
                         .accessibilityIdentifier("attachment.loading")
                 }
             }
-            .padding(.horizontal)
+            .padding(.horizontal, 12)
         }
-        .scrollClipDisabled()
     }
 }
 
