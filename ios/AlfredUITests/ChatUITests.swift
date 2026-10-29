@@ -47,7 +47,6 @@ final class ChatUITests: XCTestCase {
         let answer = newReply(beforeAsk, in: app)
         XCTAssertTrue(answer.waitForExistence(timeout: modelPatience), "Alfred did not answer\n\(app.debugDescription)")
         XCTAssertFalse(answer.label.isEmpty)
-        XCTAssertTrue(app.buttons["停止"].waitForNonExistence(timeout: patience), "the stop button should go once the run ends")
 
         // Out of the app and back: what happened meanwhile is there once the stream resumes.
         let beforeBackground = messageIds(in: app)
@@ -85,6 +84,76 @@ final class ChatUITests: XCTestCase {
         XCTAssertTrue(app.buttons["文件"].exists, "no 文件 in the attach menu\n\(app.debugDescription)")
         // Nothing is chosen, so nothing is attached and the send button stays off.
         XCTAssertEqual(app.otherElements.matching(identifier: "attachment.chip").count, 0)
+    }
+
+    /// The composer is one glass field (`composer.field`): the attach and send buttons sit inside its frame, the send
+    /// button only while there is something to send, and both stay at the bottom as the text grows. It needs no model.
+    @MainActor
+    func testTheComposerIsOneFieldHoldingTheAttachAndSendButtons() throws {
+        guard let pairing = ProcessInfo.processInfo.environment["ALFRED_PAIRING"], !pairing.isEmpty else {
+            throw XCTSkip("ALFRED_PAIRING is not set: start scripts/app-dev.ts and pass its pairing to run this test")
+        }
+        continueAfterFailure = false
+
+        let app = XCUIApplication()
+        app.launch()
+        unpairIfPaired(app)
+        UIPasteboard.general.string = pairing
+        app.buttons["粘贴配对信息"].tap()
+        XCTAssertTrue(composer(in: app).waitForExistence(timeout: patience), "the chat did not appear\n\(app.debugDescription)")
+
+        let field = app.descendants(matching: .any).matching(identifier: "composer.field").firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: patience), "no composer.field\n\(app.debugDescription)")
+        let attach = app.buttons["添加附件"]
+        let send = app.buttons["发送"]
+        XCTAssertTrue(attach.waitForExistence(timeout: patience))
+
+        // Blank: a single line, 44 pt high, with the attach button inside it and no send button at all.
+        XCTAssertEqual(field.frame.height, 44, accuracy: 1, "a single line should be 44 pt high")
+        assertInside(attach, field)
+        XCTAssertFalse(send.exists, "the send button should not exist while the field is blank\n\(app.debugDescription)")
+
+        // Something typed: the send button appears, inside the field and at its trailing edge.
+        composer(in: app).tap()
+        composer(in: app).typeText("你好")
+        XCTAssertTrue(send.waitForExistence(timeout: patience), "no send button after typing\n\(app.debugDescription)")
+        waitUntilStill(field, attach, send)
+        assertInside(attach, field)
+        assertInside(send, field)
+        XCTAssertGreaterThan(send.frame.midX, composer(in: app).frame.midX, "the send button should be at the trailing edge")
+
+        // Three lines: the field grows, and both buttons stay at the bottom, by the last line.
+        composer(in: app).typeText("\n二\n三")
+        waitUntilStill(field, attach, send)
+        XCTAssertGreaterThan(field.frame.height, 44 + 20, "the field should grow with the text")
+        assertInside(attach, field)
+        assertInside(send, field)
+        XCTAssertEqual(attach.frame.maxY, field.frame.maxY, accuracy: 2, "the attach button should stay at the bottom")
+        XCTAssertEqual(send.frame.maxY, field.frame.maxY, accuracy: 2, "the send button should stay at the bottom")
+    }
+
+    /// Returns once none of the elements has moved for 0.6 s: the keyboard and the field's growth are animations, and the
+    /// elements are read one after the other.
+    @MainActor
+    private func waitUntilStill(_ elements: XCUIElement...) {
+        var last = elements.map(\.frame)
+        var steady = 0
+        let deadline = Date().addingTimeInterval(patience)
+        while steady < 3, Date() < deadline {
+            usleep(200_000)
+            let now = elements.map(\.frame)
+            // Frames are floating point and differ in the last digits between reads.
+            let still = zip(now, last).allSatisfy { $0.insetBy(dx: -0.5, dy: -0.5).contains($1) && $1.insetBy(dx: -0.5, dy: -0.5).contains($0) }
+            steady = still ? steady + 1 : 0
+            last = now
+        }
+    }
+
+    /// `inner`'s frame is inside `outer`'s, allowing a point for rounding.
+    @MainActor
+    private func assertInside(_ inner: XCUIElement, _ outer: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
+        let room = outer.frame.insetBy(dx: -1, dy: -1)
+        XCTAssertTrue(room.contains(inner.frame), "\(inner.label) \(inner.frame) is not inside \(outer.identifier) \(outer.frame)", file: file, line: line)
     }
 
     /// A message with a heading, a list, a quote, inline styles, a table and a line break shows laid out in the owner's

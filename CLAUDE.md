@@ -28,6 +28,7 @@ Developed with the `orchestrate` skill: issues are specs, implementers deliver o
 - The workspace (`ALFRED_WORKSPACE`) is the only place the agent may read and write; `src/agent/guard.ts` enforces it per tool call, and refuses any `.git` path segment.
 - Delivered files are documents (`src/documents/`): `versions.ts` commits the workspace to a git dir outside it (`$STATE_DIR/workbench/versions.git`), and `commands.ts` runs revise and undo in one lane.
 - A streaming endpoint must write a byte right after its headers (the event stream sends `: ping` on open). Cloudflare holds response headers until the first body byte, and the app counts the stream as connected on the headers. A cold start resumes from event 0 and gets the backlog at once; a warm start has none, so without the opening ping it waited a whole heartbeat.
+- A setting is declared in `Settings` and `SettingsUpdate` (with its range) in `src/api/schema.ts` and `fixtures/api/`, read through `envSettings()` (`src/agent/config.ts`) and kept by `src/settings/store.ts`; the Swift side is `Settings.swift` in AlfredKit and the catalog under `ios/Alfred/Settings/`. A reader calls the accessor at each use: a value cached at startup ignores the owner's override.
 
 ## Rules
 
