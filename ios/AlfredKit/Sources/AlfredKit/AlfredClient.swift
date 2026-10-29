@@ -117,6 +117,49 @@ public struct AlfredClient: Sendable {
         try JSONDecoder().decode(Rules.self, from: await post(.rulesSave(text: text, version: version)))
     }
 
+    /// GET /api/memories: Alfred's long-term memories, most recently updated first, and how many of the first are in his
+    /// system prompt.
+    public func memories() async throws -> MemoryList {
+        try await get(MemoryList.self, "/api/memories")
+    }
+
+    /// POST /api/commands with `memory.create`. Alfred answers 201 with the memory as its new file holds it. A 409 means he
+    /// is tidying memory and the owner should try again shortly.
+    public func createMemory(name: String, description: String, kind: String, body: String) async throws -> Memory {
+        try JSONDecoder().decode(MemoryResult.self, from: await post(.memoryCreate(
+            name: name,
+            description: description,
+            kind: kind,
+            body: body
+        ))).memory
+    }
+
+    /// POST /api/commands with `memory.update`. Alfred answers 200 with the memory as its file now holds it. A `version`
+    /// that is not the file's current one is a 409, and so is a busy Alfred; a `file` that is gone is a 404.
+    public func updateMemory(
+        file: String,
+        version: String,
+        name: String,
+        description: String,
+        kind: String,
+        body: String
+    ) async throws -> Memory {
+        try JSONDecoder().decode(MemoryResult.self, from: await post(.memoryUpdate(
+            file: file,
+            version: version,
+            name: name,
+            description: description,
+            kind: kind,
+            body: body
+        ))).memory
+    }
+
+    /// POST /api/commands with `memory.delete`: the file moves into `.trash/memory/`. Alfred answers 200 with
+    /// `{"deleted":true}`, which this takes as done. A stale `version` or a busy Alfred is a 409, a gone `file` a 404.
+    public func deleteMemory(file: String, version: String) async throws {
+        _ = try await post(.memoryDelete(file: file, version: version))
+    }
+
     /// GET /api/documents: the documents, newest updated first.
     public func documents() async throws -> DocumentList {
         try await get(DocumentList.self, "/api/documents")

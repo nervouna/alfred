@@ -96,6 +96,10 @@ final class AppModel {
     private(set) var rules: Rules?
     /// How many reads of the rules are out.
     private var rulesReads = 0
+    /// Alfred's long-term memories: the list read from the server, with the owner's own changes applied as they are made.
+    private(set) var memoryCatalog = MemoryCatalog()
+    /// How many reads of the memory list are out.
+    private var memoryReads = 0
     /// Alfred's settings: what the server says, with the owner's unsaved changes laid over them.
     private(set) var settingsCatalog = SettingsCatalog()
     /// Why the last read of the settings failed, until a read works.
@@ -278,6 +282,7 @@ final class AppModel {
         ideaFailure = nil
         ideaRefreshAgain = false
         rules = nil
+        memoryCatalog = MemoryCatalog()
         settingsCatalog = SettingsCatalog()
         settingsFailure = nil
         settingsTimer?.cancel()
@@ -806,6 +811,96 @@ final class AppModel {
         } catch {
             actionFailure = LoadFailure.commandMessage(for: error)
             return .failed
+        }
+    }
+
+    // MARK: Memory
+
+    /// Whether a read of the memory list is out.
+    var isLoadingMemories: Bool {
+        memoryReads > 0
+    }
+
+    /// Reads the memory list (`GET /api/memories`) and keeps it. The profile page asks for it when 记忆 shows, on pull to
+    /// refresh, after a change of the owner's (which has already been applied, so the read only puts the list in the
+    /// server's order and says how many are in the prompt), and 重新载入 asks after a conflict. A failure is shown in the
+    /// usual alert and leaves what was kept. The list read is handed back, `nil` when the read did not work. A list read
+    /// before a change of the owner's came in is handed back too but not kept (`MemoryCatalog.load`).
+    @discardableResult
+    func refreshMemories() async -> MemoryList? {
+        guard let client, let credentials else { return nil }
+        memoryReads += 1
+        defer { memoryReads -= 1 }
+        let revision = memoryCatalog.revision
+        do {
+            let read = try await client.memories()
+            // The pairing may have changed while the request was out.
+            guard self.credentials == credentials else { return nil }
+            memoryCatalog.load(read, requestedAt: revision)
+            return read
+        } catch where LoadFailure.isCancellation(error) {
+            return nil
+        } catch {
+            guard self.credentials == credentials else { return nil }
+            noteAccess(error)
+            actionFailure = LoadFailure.message(for: error)
+            return nil
+        }
+    }
+
+    /// Adds a memory, or replaces a changed one against the version its draft started from. The memory the server answers
+    /// with is listed at once, first. A 409 for a stale version is `.stale` and shows nothing: the form asks the owner what to
+    /// do. A 404 removes the memory from the list. Any other refusal, Alfred's own 409 included (he is tidying memory),
+    /// is `.refused` with its message and shows nothing here either: the form puts it beside the draft, where the owner
+    /// can see it over a sheet, which the usual alert cannot.
+    func saveMemory(_ draft: MemoryDraft) async -> MemorySaving {
+        let name = draft.sentName
+        let description = draft.sentDescription
+        do {
+            let saved = try await perform({ client in
+                if let file = draft.file, let version = draft.version {
+                    try await client.updateMemory(
+                        file: file, version: version, name: name, description: description, kind: draft.kind, body: draft.body
+                    )
+                } else {
+                    try await client.createMemory(name: name, description: description, kind: draft.kind, body: draft.body)
+                }
+            }, then: { memoryCatalog.apply($0) })
+            return .saved(saved)
+        } catch AlfredError.http(status: 409, message: let message) {
+            if let message, !MemoryConflict.isStaleVersion(message: message) { return .refused(message) }
+            return .stale
+        } catch AlfredError.http(status: 404, message: _) where draft.file != nil {
+            if let file = draft.file { memoryCatalog.remove(file: file) }
+            return .gone
+        } catch {
+            return .refused(LoadFailure.commandMessage(for: error))
+        }
+    }
+
+    /// Deletes a memory against the version the owner read: its file moves into `.trash/memory/`, and it leaves the list at
+    /// once. A 409 for a stale version is `.stale` and shows nothing: the list asks the owner what to do. A 404 means it
+    /// was gone already and removes it from the list. Any other refusal, Alfred's own 409 included, or no answer, shows in
+    /// the usual alert with the server's message when it gave one.
+    func deleteMemory(_ memory: Memory) async -> MemoryDeleting {
+        do {
+            try await perform({ try await $0.deleteMemory(file: memory.file, version: memory.version) }, then: { _ in
+                memoryCatalog.remove(file: memory.file)
+            })
+            return .deleted
+        } catch AlfredError.http(status: 409, message: let message) {
+            if let message, !MemoryConflict.isStaleVersion(message: message) {
+                actionFailure = message
+                return .refused(message)
+            }
+            return .stale
+        } catch AlfredError.http(status: 404, message: _) {
+            memoryCatalog.remove(file: memory.file)
+            return .gone
+        } catch {
+            let message = LoadFailure.commandMessage(for: error)
+            actionFailure = message
+            return .refused(message)
         }
     }
 

@@ -468,4 +468,96 @@ final class AlfredClientTests: XCTestCase {
         let (unauthorized, _) = try makeClient { _ in StubReply(status: 401) }
         await assertFails(with: .unauthorized) { _ = try await unauthorized.saveRules(text: "x", version: "v") }
     }
+
+    // MARK: Memories
+
+    func testMemoriesFetchesTheListAndHowManyAreInThePrompt() async throws {
+        let (client, log) = try makeClient { _ in StubReply(chunks: [(try? fixture("responses/memory-list.json")) ?? Data()]) }
+        let list = try await client.memories()
+        XCTAssertEqual(list.memories.count, 5)
+        XCTAssertEqual(list.memories.first?.file, "prefer-short-answers.md")
+        XCTAssertEqual(list.promptCount, 3)
+        let entry = try XCTUnwrap(log.entries.first)
+        XCTAssertEqual(entry.request.httpMethod, "GET")
+        XCTAssertEqual(try encodedPath(entry.request), "/api/memories")
+        assertCredentials(entry.request)
+    }
+
+    func testCreateMemoryPostsTheCommandAndDecodesTheMemory() async throws {
+        let (client, log) = try makeClient { _ in StubReply(status: 201, chunks: [(try? fixture("responses/memory-result.json")) ?? Data()]) }
+        let command = try JSONDecoder().decode(Command.self, from: fixture("commands/memory-create.json"))
+        guard case let .memoryCreate(name, description, kind, body) = command else { return XCTFail("the fixture is not a memory.create: \(command)") }
+
+        let memory = try await client.createMemory(name: name, description: description, kind: kind, body: body)
+        XCTAssertEqual(memory.file, "prefer-short-answers.md")
+        XCTAssertEqual(memory.version, "a1075618ddd4346fc0569eb1a35aa04936451c96997b30d4eeca95cda23fc7a0")
+        let entry = try XCTUnwrap(log.entries.first)
+        XCTAssertEqual(entry.request.httpMethod, "POST")
+        XCTAssertEqual(try encodedPath(entry.request), "/api/commands")
+        XCTAssertEqual(entry.request.value(forHTTPHeaderField: "Content-Type"), "application/json")
+        try assertSameJSON(entry.body, fixture("commands/memory-create.json"))
+        assertCredentials(entry.request)
+    }
+
+    func testUpdateMemoryPostsTheCommandAgainstTheVersionAndDecodesTheMemory() async throws {
+        let (client, log) = try makeClient { _ in StubReply(chunks: [(try? fixture("responses/memory-result.json")) ?? Data()]) }
+        let command = try JSONDecoder().decode(Command.self, from: fixture("commands/memory-update.json"))
+        guard case let .memoryUpdate(file, version, name, description, kind, body) = command else {
+            return XCTFail("the fixture is not a memory.update: \(command)")
+        }
+
+        let memory = try await client.updateMemory(file: file, version: version, name: name, description: description, kind: kind, body: body)
+        XCTAssertEqual(memory.name, "回答要简短")
+        XCTAssertEqual(memory.updated, "2026-10-29")
+        let entry = try XCTUnwrap(log.entries.first)
+        XCTAssertEqual(entry.request.httpMethod, "POST")
+        XCTAssertEqual(try encodedPath(entry.request), "/api/commands")
+        try assertSameJSON(entry.body, fixture("commands/memory-update.json"))
+        assertCredentials(entry.request)
+    }
+
+    func testDeleteMemoryPostsTheCommandAndTakesTheAnswerAsDone() async throws {
+        let (client, log) = try makeClient { _ in StubReply(chunks: [Data(#"{"deleted":true}"#.utf8)]) }
+        let command = try JSONDecoder().decode(Command.self, from: fixture("commands/memory-delete.json"))
+        guard case let .memoryDelete(file, version) = command else { return XCTFail("the fixture is not a memory.delete: \(command)") }
+
+        try await client.deleteMemory(file: file, version: version)
+        let entry = try XCTUnwrap(log.entries.first)
+        XCTAssertEqual(entry.request.httpMethod, "POST")
+        XCTAssertEqual(try encodedPath(entry.request), "/api/commands")
+        try assertSameJSON(entry.body, fixture("commands/memory-delete.json"))
+        assertCredentials(entry.request)
+    }
+
+    func testMemoryCommandsMapAStaleVersionABusyAlfredAndAGoneMemoryToTheirStatusAndMessage() async throws {
+        let (stale, _) = try makeClient { _ in
+            StubReply(status: 409, chunks: [Data(#"{"error":"version: not the current version of prefer-short-answers.md"}"#.utf8)])
+        }
+        await assertFails(with: .http(status: 409, message: "version: not the current version of prefer-short-answers.md")) {
+            _ = try await stale.updateMemory(file: "prefer-short-answers.md", version: "old", name: "n", description: "", kind: "user", body: "")
+        }
+        await assertFails(with: .http(status: 409, message: "version: not the current version of prefer-short-answers.md")) {
+            try await stale.deleteMemory(file: "prefer-short-answers.md", version: "old")
+        }
+
+        let (busy, _) = try makeClient { _ in
+            StubReply(status: 409, chunks: [Data(#"{"error":"Alfred is tidying memory right now; try again shortly."}"#.utf8)])
+        }
+        await assertFails(with: .http(status: 409, message: "Alfred is tidying memory right now; try again shortly.")) {
+            _ = try await busy.createMemory(name: "n", description: "", kind: "user", body: "")
+        }
+
+        let (gone, _) = try makeClient { _ in
+            StubReply(status: 404, chunks: [Data(#"{"error":"no memory prefer-short-answers.md"}"#.utf8)])
+        }
+        await assertFails(with: .http(status: 404, message: "no memory prefer-short-answers.md")) {
+            _ = try await gone.updateMemory(file: "prefer-short-answers.md", version: "v", name: "n", description: "", kind: "user", body: "")
+        }
+        await assertFails(with: .http(status: 404, message: "no memory prefer-short-answers.md")) {
+            try await gone.deleteMemory(file: "prefer-short-answers.md", version: "v")
+        }
+
+        let (unauthorized, _) = try makeClient { _ in StubReply(status: 401) }
+        await assertFails(with: .unauthorized) { _ = try await unauthorized.memories() }
+    }
 }
