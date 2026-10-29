@@ -20,6 +20,10 @@
 - Keep the simulator's hardware keyboard off: with it connected, an off-screen `Keyboard` element stays in the tree and `RunsUITests` and `PushUITests` fail on `the keyboard stayed up`.
 - `ChatHeaderUITests.testTheFirstMessageIsNotCoveredByTheAvatar` swipes back to the start of the history and gives up after 120 s: run it against a stack with a short history (it sorts first in the plain group).
 - To capture a state the app has to be driven into (scrolled up, keyboard open), add a temporary UI test that drives there and waits, take `xcrun simctl io <udid> screenshot` meanwhile, and do not commit the test: driving the simulator by hand needs the owner to grant access, which fails while they are away.
+- `test-without-building` ends with `** TEST EXECUTE SUCCEEDED **`; only `test` prints `** TEST SUCCEEDED **`. A script that greps for the second reads every passing run as a failure.
+- Two test runs at once need two simulators (`simq` refuses a second run on a device a slot holds) and two worktrees: two `xcodebuild` runs in one `-derivedDataPath ios/build` clash.
+- `SettingsUITests.test1TheTabIsTheFifthAndShowsEveryRow` can fail on `the notification state is not 已开启 after Allow` in a run on a fresh simulator, `main` included; rerun before blaming a change.
+- When a UI test fails and the `app-dev` log shows the answer was sent, find out which side lacks it: expose the model's counts as the `accessibilityValue` of a clear 4 pt element (a probe view overlaid on `ChatView`) and write `app.screenshot().pngRepresentation` to an absolute path (the simulator shares the host's filesystem). Do not trace with `NSLog`: its synchronous writes changed the timing and hid a race in 6 runs out of 6 (#218); use `Logger` or an in-memory buffer.
 
 ## Look and feel
 
@@ -36,6 +40,7 @@
 - `.buttonStyle(.glass)` pads its label by 7 pt on every side, so a 44 pt circle takes a 30 pt label.
 - `defaultScrollAnchor(.bottom)` leaves a scrolled-up list where it is as content grows, but it does not keep the end in view when the container shrinks (the keyboard): a list that should stay at the end scrolls there itself on a container change (`MessageList`).
 - `onChange` of a value derived from the model sees only what is there when the view draws: two model changes between draws (a pending message and its echo) can look like none. Watch the model with `Observations` when every change counts.
+- A `Menu` draws its label in the tint and ignores `foregroundStyle`: set `.tint(.secondary)` for a grey plus. The simulator's first keyboard shows the "Speed up your typing by sliding…" tip, which needs a tap on Continue before a screenshot shows the keys.
 
 ## On the phone
 
