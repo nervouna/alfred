@@ -24,6 +24,7 @@ targets:
     platform: iOS
     sources:
       - path: Alfred
+        excludes: [CLAUDE.md]
       - path: Shared
     dependencies:
       - package: AlfredKit
@@ -76,6 +77,7 @@ targets:
     platform: iOS
     sources:
       - path: AlfredUITests
+        excludes: [CLAUDE.md]
     dependencies:
       - target: Alfred
     settings:
