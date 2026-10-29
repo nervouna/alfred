@@ -14,6 +14,7 @@
 - A `confirmationDialog` that a toolbar button opens is a popover with no cancel button: tap the `PopoverDismissRegion` element to dismiss it without choosing.
 - `XCUIKeyboardKey.forwardDelete` is typed as a character (U+F728) in a text view; only `.delete` works, so clear a text view by deleting back from the end of its text, where a view that has just taken focus puts the caret.
 - A row under the glass navigation bar or tab bar also counts as hittable, but the tap lands on the bar: scroll it between the bars first (`scrollBetweenBars` in `TasksUITests` and `IdeasUITests`).
+- A view made one element with `.accessibilityElement(children: .combine)` is not a `staticText` to XCUITest (a multi-block chat bubble can come up as `other`): look it up by identifier through `app.descendants(matching: .any)`, as the chat helpers do.
 - Run `xcodegen generate` again after adding a source or test file: a stale project builds, runs 0 tests of the new file and exits 0. Read the executed and skipped counts of every group.
 - A build or test run cut short (`BUILD INTERRUPTED`, exit 143) while another session's `xcodebuild` is running is not a failure of the change: check `ps -axo pid,etime,command | grep xcodebuild`, leave the other one alone, and rerun on a simulator of your own.
 - Keep the simulator's hardware keyboard off: with it connected, an off-screen `Keyboard` element stays in the tree and `RunsUITests` and `PushUITests` fail on `the keyboard stayed up`.
