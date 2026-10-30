@@ -1,15 +1,15 @@
 # Client API fixtures
 
-JSON examples of the client API defined in `src/api/schema.ts`. Alfred's tests (`src/api/schema.test.ts`) and the iOS client's Swift package tests (`ios/AlfredKit`) both read these files.
+JSON examples of the client API defined in `src/api/schema.ts`. Alfred's tests (`src/api/schema.test.ts`) and the iOS client's Swift package tests (`ios/AlfredKit`) both read these files. Adding or changing a shape is the `api-contract` skill (`.claude/skills/api-contract/SKILL.md`).
 
-- `events/`: events Alfred stores and emits, one file per shape the client decodes, `question.asked` and `question.answered` (answered and cancelled), `task.updated`, `document.updated`, `document.removed`, `annotation.updated`, `idea.updated` and `settings.updated` among them. Each file is a whole `Event`.
+- `events/`: events Alfred stores and emits, one file per shape the client decodes. Each file is a whole `Event`.
 - `live/`: live events, streamed as they happen and never stored. Each file is a whole `LiveEvent`.
-- `commands/`: one valid command per command shape, including a `message.send` with files, a `question.answer`, the three task commands, the two document commands, the three idea commands, the settings command, `rules.save` and the three memory commands.
-- `responses/`: bodies of the app API: `UploadResult`, `RunList`, `RunDetail`, `TaskResult`, `TaskList`, `TaskDetail`, `DocumentResult`, `DocumentList`, `DocumentDetail`, `RevisionAccepted`, `IdeaResult`, `IdeaAccepted`, `IdeaGenerationAccepted`, `IdeaList`, `Rules`, `MemoryList`, `MemoryResult`, `SettingsResult`, `SettingsDetail` and `ErrorResponse`. Each file is named after the schema it parses with.
-- `requests/`: bodies the client sends outside the command API: `PushRegistration`.
+- `commands/`: at least one valid command per command shape.
+- `responses/`: bodies of the app API, each named after the schema it parses with (`settings-detail.json`), with `-<case>` for a variant.
+- `requests/`: bodies the client sends outside the command API.
 - `pairing/`: the payload of the pairing QR code, a `Pairing`. Its values are made up.
 - `invalid-commands/`: commands that `parseCommand` must reject.
-- `invalid/`: off-schema files that the schema their name starts with must reject. Each is named `<schema>-<case>.json`, where `<schema>` is `pairing`, `push-registration`, `upload-result`, `run-list`, `run-detail`, `task-result`, `task-list`, `task-detail`, `document-result`, `document-list`, `document-detail`, `revision-accepted`, `idea-result`, `idea-accepted`, `idea-list`, `memory-list`, `memory-result`, `settings-result`, `settings-detail` or `error`.
+- `invalid/`: off-schema files that the schema their name starts with must reject, named `<schema>-<case>.json`.
 - `future/`: events a newer Alfred might send: one with an unknown `type`, one known event with an extra field, and one live event with an unknown `type`.
 
 Every file is pretty-printed JSON with a 2-space indent and a trailing newline. The files in `events/`, `live/`, `commands/`, `responses/`, `requests/` and `pairing/` contain only fields the schema defines, in the schema's key order; `invalid-commands/`, `invalid/` and `future/` are off-schema on purpose.
