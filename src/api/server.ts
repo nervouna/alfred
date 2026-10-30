@@ -443,7 +443,12 @@ export async function startApi(opts: ApiOptions): Promise<() => Promise<void>> {
       return;
     }
     const file = uniquePath(dir, sanitizeFileName(name, `file-${localTime()}.bin`));
-    fs.renameSync(temp, file);
+    try {
+      fs.renameSync(temp, file);
+    } catch (err) {
+      fs.rmSync(temp, { force: true });
+      throw err;
+    }
     const answer: UploadResult = { file: { path: path.relative(WORKSPACE_DIR, file), kind: uploadKind(file) } };
     sendJson(res, 201, answer);
   }

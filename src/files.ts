@@ -27,6 +27,26 @@ export function firstLine(text: string, max: number): string {
   return chars.length > max ? `${chars.slice(0, max - 1).join("")}…` : line;
 }
 
+/** Linux file systems cap a name at 255 bytes; this leaves room for the "_" prefix and uniquePath's "-N". */
+const MAX_NAME_BYTES = 240;
+/** An extension longer than this is not one worth keeping when a name is cut. */
+const MAX_EXT_BYTES = 32;
+
+/** `name` cut to MAX_NAME_BYTES of UTF-8 at a code point, keeping its extension. */
+function fitName(name: string): string {
+  if (Buffer.byteLength(name) <= MAX_NAME_BYTES) return name;
+  const ext = path.extname(name);
+  const keep = Buffer.byteLength(ext) <= MAX_EXT_BYTES ? ext : "";
+  let budget = MAX_NAME_BYTES - Buffer.byteLength(keep);
+  let stem = "";
+  for (const ch of name.slice(0, name.length - keep.length)) {
+    budget -= Buffer.byteLength(ch);
+    if (budget < 0) break;
+    stem += ch;
+  }
+  return stem + keep;
+}
+
 /**
  * Strip path components and characters that are unsafe in file names. Hidden
  * files and received ALFRED.md files get a "_" prefix, so a forwarded file
@@ -34,7 +54,7 @@ export function firstLine(text: string, max: number): string {
  */
 export function sanitizeFileName(name: string | undefined, fallback: string): string {
   const base = path.basename((name ?? "").replace(/\\/g, "/"));
-  const cleaned = base.replace(/[\x00-\x1f<>:"/\\|?*]/g, "_").trim().slice(0, 200);
+  const cleaned = fitName(base.replace(/[\x00-\x1f<>:"/\\|?*]/g, "_").trim());
   if (!cleaned || cleaned === "." || cleaned === "..") return fallback;
   return cleaned.startsWith(".") || isRulesFileName(cleaned) ? `_${cleaned}` : cleaned;
 }
