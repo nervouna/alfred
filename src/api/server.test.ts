@@ -1361,6 +1361,19 @@ test("the name is trimmed and sanitized", async (t) => {
   assert.equal(longest.status, 201, "255 characters is the most a name can have");
 });
 
+test("a name over the file system's 255 bytes is cut, keeps its extension and leaves no temporary file", async (t) => {
+  const { socket } = await start(t);
+  const reply = await upload(socket, `${"报".repeat(90)}.pdf`);
+  assert.equal(reply.status, 201);
+  const { file } = reply.json() as { file: { path: string; kind: string } };
+  assert.equal(path.extname(file.path), ".pdf");
+  assert.ok(Buffer.byteLength(path.basename(file.path)) <= 255);
+  assert.deepEqual(
+    inboxNames().filter((n) => n.startsWith(".upload-")),
+    [],
+  );
+});
+
 test("a name that is missing, empty, unsafe or too long gets 400 and nothing is saved", async (t) => {
   const { socket } = await start(t);
   const before = inboxNames();
