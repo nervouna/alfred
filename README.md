@@ -66,6 +66,55 @@ systemctl --user daemon-reload && systemctl --user start alfred
   systemctl --user daemon-reload
   ```
 
+## Backups
+
+`deploy/alfred-backup.container` and `deploy/alfred-backup.timer` back up `~/data/state`, `~/data/workspace` and `~/data/workbench-app` once a day with [restic](https://restic.net), encrypted on the host, to an S3-compatible bucket such as Cloudflare R2. The data is mounted read-only and Alfred keeps running. Each run backs up, keeps 7 daily, 4 weekly and 6 monthly snapshots (`restic forget --prune`), reads back a tenth of the data (`restic check`) and writes `~/data/backup/status.json`: `ok`, `lastRun` and `error` for the last run, `lastSuccess`, `snapshot`, `files`, `bytes`, `added` and `repoBytes` for the last good one. A failed run fails the unit, so it shows in `systemctl --user --failed` and `journalctl --user -u alfred-backup`. `memory.lock`, `*.tmp`, the API socket and the recreated `workspace-plugin/` are left out.
+
+### Set up
+
+1. Create the bucket and a key that reaches only it. In the Cloudflare dashboard, under R2 Object Storage: **Create bucket** (any name, default location and storage class). Then **Manage API tokens** → **Create Account API token**: permission **Object Read & Write**, **Apply to specific buckets only** with that bucket, TTL forever. The page shows the token once: keep the **Access Key ID**, the **Secret Access Key** and the S3 endpoint, `https://<account id>.r2.cloudflarestorage.com`.
+2. Make a long random repository password in your password manager and keep it there. restic encrypts everything with it: without it the backups cannot be read, and nobody can recover it.
+3. As Alfred's host user, store the three secrets (each `read` waits for a paste and Enter) and the repository:
+
+   ```bash
+   read -rsp "R2 Access Key ID: " V && echo && printf %s "$V" | podman secret create alfred_backup_key_id - && unset V
+   read -rsp "R2 Secret Access Key: " V && echo && printf %s "$V" | podman secret create alfred_backup_secret_key - && unset V
+   read -rsp "restic password: " V && echo && printf %s "$V" | podman secret create alfred_backup_password - && unset V
+   install -Dm600 /dev/null ~/.config/alfred/backup.env
+   echo 'RESTIC_REPOSITORY=s3:https://<account id>.r2.cloudflarestorage.com/<bucket>' > ~/.config/alfred/backup.env
+   ```
+
+4. Install the units, run the first backup (it creates the repository) and turn on the timer:
+
+   ```bash
+   install -m644 deploy/alfred-backup.container ~/.config/containers/systemd/
+   install -Dm644 deploy/alfred-backup.timer ~/.config/systemd/user/alfred-backup.timer
+   systemctl --user daemon-reload
+   systemctl --user start alfred-backup && cat ~/data/backup/status.json
+   systemctl --user enable --now alfred-backup.timer
+   ```
+
+From then on `deploy/update.sh` compares the installed copies with `deploy/`, the same way as `alfred.container`. `systemctl --user list-timers alfred-backup` shows the next run.
+
+### Restore
+
+`deploy/restic.sh` runs restic with the same image, secrets and repository; its `/restore` is `$RESTORE_DIR` on the host (default `~/restore`):
+
+```bash
+deploy/restic.sh snapshots
+RESTORE_DIR=~/restore deploy/restic.sh restore latest --target /restore   # or a snapshot id instead of latest
+```
+
+The files land under `~/restore/data/state`, `~/restore/data/workspace` and `~/restore/data/workbench-app`. To bring a deployment back, on the old host or a new one set up as above (secrets, `backup.env`, no running Alfred), stop Alfred (`deploy/update.sh --stop`), move those three directories to `~/data/`, and start it. The event log goes back to the snapshot's: force-quit the app and open it again, so it replays the restored log from the start.
+
+To test a restore without touching the deployment, restore into a scratch directory and compare it with the live data; only what changed since the snapshot should differ:
+
+```bash
+RESTORE_DIR=~/restore-test deploy/restic.sh restore latest --target /restore
+diff -rq ~/restore-test/data/workspace ~/data/workspace; diff -rq ~/restore-test/data/state ~/data/state | grep -v -e '/api' -e workspace-plugin
+rm -rf ~/restore-test
+```
+
 ## Talking to Alfred
 
 Send a task as text. Photos and files go with a message (the app uploads them to `~/Alfred/inbox/<date>/` first); files sent without text are attached to the next text message. Replies stream in as they are written. Long results arrive as Markdown files, a report with charts as an HTML file the app opens in a sandbox, a PDF only when you ask for one. A delivered file is a document with a version per delivery, open to annotations ([docs/documents.md](docs/documents.md)).
@@ -153,7 +202,7 @@ src/tasks/          schedule arithmetic, the task store, the task commands
 src/workbench/      the read-only workbench: server, Access check, pages, pairing, forwarding to the API, push
 plugin/             the baked skills plugin `alfred`
 scripts/            app-dev, agent-smoke, handler-smoke, local-stack
-deploy/             Quadlet units and update.sh for the container host
+deploy/             Quadlet units, update.sh and the backup for the container host
 fixtures/api/       the client contract's examples
 ios/                the native client (ios/README.md)
 ```

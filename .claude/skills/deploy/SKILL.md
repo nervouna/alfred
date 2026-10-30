@@ -1,6 +1,6 @@
 ---
 name: deploy
-description: Operate the deployed Alfred on its podman host over SSH. Covers updating it after a merge, restarting, rolling back, reading logs, checking whether a task is running, replacing the Anthropic key or the mmx config, and pairing or revoking the app. Use when the user says 部署、上线、更新线上、重启 Alfred、回滚、看日志、换 key、配对 app、撤销设备, or after merging a PR that should go live.
+description: Operate the deployed Alfred on its podman host over SSH. Covers updating it after a merge, restarting, rolling back, reading logs, checking whether a task is running, replacing the Anthropic key or the mmx config, pairing or revoking the app, and the off-host backups (status, restore, restore test). Use when the user says 部署、上线、更新线上、重启 Alfred、回滚、看日志、换 key、配对 app、撤销设备、备份、恢复, or after merging a PR that should go live.
 ---
 
 # Operating the deployed Alfred
@@ -75,6 +75,22 @@ ssh -t $HOST 'podman exec -it workbench node src/cli.ts pair --name <device name
 ```
 
 List devices with `podman exec workbench node src/cli.ts devices` and lock one out with `devices revoke <id>`; a revoke applies to the next request. `podman exec workbench node src/cli.ts apns-test "<text>"` sends one push to every registered device and prints APNs's answer.
+
+## Backups
+
+The daily restic backup to R2 is set up as in the README's Backups section. The repository URL is in `~/.config/alfred/backup.env` on the host and in project memory, never in this repo. Backups need no restart and never stop Alfred.
+
+- Status: `ssh $HOST 'cat data/backup/status.json; systemctl --user list-timers alfred-backup --no-pager; journalctl --user -u alfred-backup -n 30 --no-pager -o cat'`. `ok: false` or a failed unit means the last run failed; its `error` and the journal say why. `lastSuccess` older than two days means the timer is not running.
+- Run one now: `ssh $HOST systemctl --user start alfred-backup` (it blocks until the run ends).
+- If `update.sh` stops on a diff of `alfred-backup.container` or `alfred-backup.timer`, the same `--install-quadlet` and `--keep-quadlet` choice applies; installing them restarts no container.
+- Secrets: the R2 key is `alfred_backup_key_id` and `alfred_backup_secret_key`, the repository password `alfred_backup_password`. Replace one with the same `read -rsp` command as the Anthropic key, e.g.:
+
+  ```bash
+  ssh -t $HOST 'read -rsp "R2 Secret Access Key: " V && echo && printf %s "$V" | podman secret create --replace alfred_backup_secret_key - >/dev/null && echo saved'
+  ```
+
+  The repository password cannot be changed by replacing the secret: the repository stays locked with the old one. Use `deploy/restic.sh key add` and `key remove` for that, then replace the secret. The owner keeps the password in their password manager; without it no backup can be read.
+- Restore test, into a scratch directory, never over `~/data` while Alfred runs: `ssh $HOST 'RESTORE_DIR=$HOME/restore-test alfred/deploy/restic.sh restore latest --target /restore'`, then compare as in the README and remove `~/restore-test`. A real restore follows the README: stop Alfred first.
 
 ## Don't
 

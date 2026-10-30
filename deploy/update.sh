@@ -15,6 +15,8 @@
 #
 # When the workbench pod is installed (workbench.pod next to alfred.container),
 # an update also installs its changed Quadlets and restarts it on a new image.
+# When the backup is installed (alfred-backup.container next to it), an update
+# installs its changed Quadlet and timer too; the next run uses them.
 set -euo pipefail
 
 repo=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
@@ -22,6 +24,7 @@ state_dir=${ALFRED_HOST_STATE_DIR:-$HOME/data/state}
 systemd_dir=${XDG_CONFIG_HOME:-$HOME/.config}/containers/systemd
 quadlet=$systemd_dir/alfred.container
 workbench_units="workbench.pod workbench.container workbench-tunnel.container"
+user_unit_dir=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
 unit=alfred
 image=localhost/alfred:latest
 previous=localhost/alfred:previous
@@ -39,7 +42,7 @@ while [ $# -gt 0 ]; do
     --force) force=1 ;;
     --install-quadlet) quadlet_choice=install ;;
     --keep-quadlet) quadlet_choice=keep ;;
-    -h | --help) sed -n '2,17p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,19p' "$0"; exit 0 ;;
     *) echo "update.sh: unknown option $1" >&2; exit 2 ;;
   esac
   shift
@@ -51,6 +54,35 @@ die() { printf 'update.sh: %s\n' "$*" >&2; exit 1; }
 running_image() { podman inspect "${1:-$unit}" --format '{{.Image}}' 2>/dev/null || true; }
 
 workbench_installed() { [ -f "$systemd_dir/workbench.pod" ]; }
+
+backup_installed() { [ -f "$systemd_dir/alfred-backup.container" ]; }
+
+# Where each backup unit is installed: Quadlets and plain user units live apart.
+backup_target() {
+  case $1 in
+    *.timer) echo "$user_unit_dir/$1" ;;
+    *) echo "$systemd_dir/$1" ;;
+  esac
+}
+
+# A backup run never overlaps an update, so its units are installed right away.
+update_backup() {
+  local u changed=
+  for u in alfred-backup.container alfred-backup.timer; do
+    cmp -s "$repo/deploy/$u" "$(backup_target "$u")" && continue
+    case $quadlet_choice in
+      install) install -Dm644 "$repo/deploy/$u" "$(backup_target "$u")"; changed=1 ;;
+      keep) say "Keeping the installed $u, which differs from deploy/$u." ;;
+      *)
+        diff -u "$(backup_target "$u")" "$repo/deploy/$u" >&2 || true
+        die "the installed $u differs from deploy/$u (diff above); rerun with --install-quadlet to replace it or --keep-quadlet to keep it" ;;
+    esac
+  done
+  [ -n "$changed" ] || return 0
+  systemctl --user daemon-reload
+  systemctl --user restart alfred-backup.timer
+  say "Installed the repo's backup Quadlet and timer."
+}
 
 # The workbench only reads, so it restarts without waiting for a task.
 update_workbench() {
@@ -181,6 +213,8 @@ case $mode in
         esac
       done
     fi
+
+    if backup_installed; then update_backup; fi
 
     podman build --quiet -t "$image" "$repo" >/dev/null
 
