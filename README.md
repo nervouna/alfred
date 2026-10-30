@@ -1,6 +1,24 @@
 # Alfred
 
+[![CI](https://github.com/nervouna/alfred/actions/workflows/ci.yml/badge.svg)](https://github.com/nervouna/alfred/actions/workflows/ci.yml)
+[![iOS](https://github.com/nervouna/alfred/actions/workflows/ios.yml/badge.svg)](https://github.com/nervouna/alfred/actions/workflows/ios.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+![Alfred](docs/images/banner.jpg)
+
 A personal research assistant: web research, material collection and file organization, driven by the Claude Agent SDK. The owner talks to it through a native iOS app, which pairs with the workbench and reaches Alfred through it. Alfred itself listens on a local Unix socket only, so it opens no port.
+
+| Chat | Documents | Ideas | Memory |
+| --- | --- | --- | --- |
+| ![A research request and Alfred's reply with a delivered brief](docs/images/chat.jpg) | ![The delivered brief opened as a document](docs/images/document.jpg) | ![Tasks Alfred suggests on its own](docs/images/ideas.jpg) | ![Alfred's long-term memories about the owner](docs/images/memory.jpg) |
+
+## Status
+
+Alfred is a personal project, built for one owner and run by its author every day. It is open source so others can read, borrow from or run it, but it is not a hosted product: running your own takes a Linux host (or a Mac), an Anthropic API key, a domain behind Cloudflare Access for the workbench, and an Apple developer account to install the app. The app's interface is in Chinese. Expect things to change without notice; there are no releases with upgrade paths yet.
+
+## How it is built
+
+Most of the code is written by Claude Code agents: each issue is a spec, an implementer delivers one pull request per issue, and an orchestrator reviews, re-runs the acceptance commands and merges. `CLAUDE.md` holds the rules they follow, and `docs/` the design notes they keep up to date. See [CONTRIBUTING.md](CONTRIBUTING.md) to report a bug or send a fix, and [SECURITY.md](SECURITY.md) for security problems.
 
 ## Requirements
 

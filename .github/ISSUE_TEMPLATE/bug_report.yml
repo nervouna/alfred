@@ -1,0 +1,46 @@
+name: Bug report
+description: Something in Alfred or the app does not work as described
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens
+      description: What you did and what went wrong. Error messages and log lines help.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: The smallest input that shows it, such as a request, a file name or a message.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Commit
+      description: The commit you run (`git rev-parse --short HEAD`).
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where
+      options:
+        - Alfred (Node service)
+        - Container / deploy
+        - iOS app
+        - Share Extension
+        - Docs
+    validations:
+      required: true
+  - type: textarea
+    id: fix
+    attributes:
+      label: Suggested fix
+      description: Optional. If you know where the cause is, say so.

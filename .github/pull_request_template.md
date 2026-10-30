@@ -12,7 +12,7 @@ Closes #
 
 ## Delivery record
 
-<!-- Filled in by the orchestrator at merge. -->
+<!-- Filled in by the orchestrator at merge. Outside contributors: leave it empty. -->
 
 | Implementer model | Implementer tokens | Rework rounds | Dispatch to merge | Defects found in review | Defects found in acceptance |
 |---|---|---|---|---|---|
