@@ -1,6 +1,6 @@
 # Writing UI tests
 
-How to run them is in `../CLAUDE.md` and `../README.md`.
+How to run them is the `app-test` skill (`.claude/skills/app-test/SKILL.md`).
 
 - XCUITest's "hittable" lies both ways. A control under the keyboard, in a resizing sheet, or under the glass navigation or tab bar counts as hittable (the tap lands on the bar); the chat's avatar can count as not hittable while a tap works. Tap once the frame holds still (`tapWhenSettled` in `IdeasUITests`), scroll rows between the bars first (`scrollBetweenBars`), check the top of a list by frames, not hittability (`scrollToTop` in `MemoryUITests`), and let the page a tap opens be the check.
 - A view combined with `.accessibilityElement(children: .combine)` is not a `staticText` (a chat bubble can be `other`): look it up by identifier in `app.descendants(matching: .any)`.

@@ -74,37 +74,11 @@ The first install needs the developer trusted on the phone (Settings > General >
 
 ## Run against a local Alfred
 
-`node scripts/app-dev.ts` runs the real handler behind the command API, and the workbench on `http://127.0.0.1:8787` without TLS. Point `ALFRED_STATE_DIR` and `ALFRED_WORKSPACE` at new scratch directories and set `ALFRED_ANTHROPIC_API_KEY`. Keep the state path short: the Unix socket path must fit in about 104 bytes. It prints the pairing as one `[pairing]` line to paste into the app; `--repair` pairs a new device. Messages other than commands run the model. The header of `scripts/app-dev.ts` lists every option, including the `--seed-*` ones the suites below use.
+`node scripts/app-dev.ts` runs the real handler behind the command API, and the workbench on `http://127.0.0.1:8787` without TLS. Point `ALFRED_STATE_DIR` and `ALFRED_WORKSPACE` at new scratch directories and set `ALFRED_ANTHROPIC_API_KEY`. Keep the state path short: the Unix socket path must fit in about 104 bytes. It prints the pairing as one `[pairing]` line to paste into the app; `--repair` pairs a new device. Messages other than commands run the model. The header of `scripts/app-dev.ts` lists every option, including the `--seed-*` ones the UI test groups use.
 
 ## Test
 
-`swift test --package-path ios/AlfredKit` runs the package tests on macOS (Swift 6.0). The app has two test targets in the `Alfred` scheme. Use a simulator of your own (`xcrun simctl create "alfred-test" com.apple.CoreSimulator.SimDeviceType.iPhone-18-Pro com.apple.CoreSimulator.SimRuntime.iOS-27-0` prints its id) and `-collect-test-diagnostics never`, so a failed run does not wait on diagnostics.
-
-```bash
-xcodebuild test -project ios/Alfred.xcodeproj -scheme Alfred -destination 'id=<udid>' -derivedDataPath ios/build -only-testing:AlfredTests -collect-test-diagnostics never
-```
-
-`AlfredUITests` drive the app against a running `app-dev`: copy the JSON of its `[pairing]` line and pass it as `TEST_RUNNER_ALFRED_PAIRING` (the test sees `ALFRED_PAIRING`). Without it the tests skip themselves; each starts from the pairing screen, so a stack can be reused.
-
-```bash
-TEST_RUNNER_ALFRED_PAIRING='{"version":1,…}' xcodebuild test -project ios/Alfred.xcodeproj -scheme Alfred -destination 'id=<udid>' -derivedDataPath ios/build -only-testing:AlfredUITests -collect-test-diagnostics never
-```
-
-- **Plain `app-dev`:** `ChatUITests`, `RunsUITests`, `QuestionsUITests`, `TasksUITests`, `ChatHeaderUITests`, `ProfileUITests`, `PushUITests`, `SettingsUITests`, `ShareUITests`. Most run the model on haiku, a fraction of a cent per test; `ChatHeaderUITests`, `ProfileUITests`, `PushUITests` and `SettingsUITests` run none (`/status` and `/model` are answered by Alfred itself). `ProfileUITests` replaces the workspace's `ALFRED.md` with text of its own and leaves it so, and its conflict test saves a second version through the workbench API with the pairing's device token. `SettingsUITests` changes the stack's model and leaves it on haiku.
-- **`--seed-documents`:** `DocumentsUITests` (no model) and `AnnotationsUITests` (its second test runs the model, a few cents).
-- **`--seed-memories`:** `MemoryUITests` (no model). It changes the memories (renames one, adds one, deletes one), so each run needs a new `ALFRED_STATE_DIR` and `ALFRED_WORKSPACE`; its tests run in name order, and the last three change memories behind the app's back through the workbench API, as `ProfileUITests`' conflict test does (the last adds memories, so that the list has to scroll).
-- **`--seed-ideas`:** `IdeasUITests` runs no model but uses up the seeded ideas, so each run needs a new `ALFRED_STATE_DIR` and `ALFRED_WORKSPACE`; its tests run in name order.
-- **`TEST_RUNNER_ALFRED_SHOTS`**, a directory, makes `ChatHeaderUITests`, `ProfileUITests`, `MemoryUITests`, `AnnotationsUITests` and `IdeasUITests` save screenshots there. `ProfileUITests` and `MemoryUITests` save them in the appearance the simulator has (`xcrun simctl ui <udid> appearance dark` for the dark ones).
-- **`ShareUITests`** shares the newest photo of the library: add one first with `xcrun simctl addmedia <udid> <image>`.
-- **`PushUITests`** cannot call `xcrun simctl push` from inside the simulator, so a loop outside it does: the test writes `ready-<n>` into `TEST_RUNNER_ALFRED_PUSH_DIR` whenever it wants a push, and the loop pushes the `payload.json` the test wrote there.
-
-```bash
-# shell 1: the test
-mkdir -p /tmp/push-check && rm -f /tmp/push-check/*
-TEST_RUNNER_ALFRED_PUSH_DIR=/tmp/push-check TEST_RUNNER_ALFRED_PAIRING='{"version":1,…}' xcodebuild test -project ios/Alfred.xcodeproj -scheme Alfred -destination 'id=<udid>' -derivedDataPath ios/build -only-testing:AlfredUITests/PushUITests -collect-test-diagnostics never
-# shell 2: pushes whenever the test asks, until it is done
-n=1; until [ -e /tmp/push-check/done ]; do if [ -e /tmp/push-check/ready-$n ]; then xcrun simctl push <udid> com.example.alfred /tmp/push-check/payload.json; n=$((n+1)); fi; sleep 0.5; done
-```
+The `app-test` skill (`.claude/skills/app-test/SKILL.md`) is how to run them: the package tests, `AlfredTests`, and each `AlfredUITests` group against its `app-dev` stack.
 
 ## Continuous integration
 
