@@ -11,6 +11,7 @@ set -euo pipefail
 
 repo=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
 image=$(sed -n 's/^Image=//p' "$repo/deploy/alfred-backup.container")
+[ -n "$image" ] || { echo "restic.sh: no Image= in deploy/alfred-backup.container" >&2; exit 1; }
 restore_dir=${RESTORE_DIR:-$HOME/restore}
 mkdir -p "$HOME/data/backup/cache" "$restore_dir"
 

@@ -14,7 +14,8 @@ Image=docker.io/restic/restic:0.19.1
 ContainerName=alfred-backup
 Entrypoint=/bin/sh
 Exec=/backup.sh
-LogDriver=journald
+# stdout and stderr go to the unit's journal as they are; journald would log each line twice.
+LogDriver=passthrough
 # The script comes from the checkout, so it updates with `git pull`.
 Volume=%h/alfred/deploy/backup.sh:/backup.sh:ro
 # What is backed up, read-only. The paths inside are the paths in the snapshots.
