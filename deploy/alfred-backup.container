@@ -1,0 +1,41 @@
+# Encrypted off-host backup of Alfred's data with restic, started daily by
+# alfred-backup.timer. Install both as the Alfred host user (README, Backups):
+#   install -m644 deploy/alfred-backup.container ~/.config/containers/systemd/
+#   install -Dm644 deploy/alfred-backup.timer ~/.config/systemd/user/alfred-backup.timer
+# deploy/update.sh compares the installed copies with these files, like alfred.container.
+# The repository goes in ~/.config/alfred/backup.env, never in the repo:
+#   RESTIC_REPOSITORY=s3:https://<account id>.r2.cloudflarestorage.com/<bucket>
+# The bucket's access key and the repository password are podman secrets.
+[Unit]
+Description=Alfred backup
+
+[Container]
+Image=docker.io/restic/restic:0.19.1
+ContainerName=alfred-backup
+Entrypoint=/bin/sh
+Exec=/backup.sh
+LogDriver=journald
+# The script comes from the checkout, so it updates with `git pull`.
+Volume=%h/alfred/deploy/backup.sh:/backup.sh:ro
+# What is backed up, read-only. The paths inside are the paths in the snapshots.
+Volume=%h/data/state:/data/state:ro
+Volume=%h/data/workspace:/data/workspace:ro
+Volume=%h/data/workbench-app:/data/workbench-app:ro
+# restic's cache and status.json, the one writable path.
+Volume=%h/data/backup:/backup
+EnvironmentFile=%h/.config/alfred/backup.env
+Environment=RESTIC_CACHE_DIR=/backup/cache
+Environment=AWS_DEFAULT_REGION=auto
+Secret=alfred_backup_key_id,type=env,target=AWS_ACCESS_KEY_ID
+Secret=alfred_backup_secret_key,type=env,target=AWS_SECRET_ACCESS_KEY
+Secret=alfred_backup_password,type=env,target=RESTIC_PASSWORD
+ReadOnly=true
+NoNewPrivileges=true
+DropCapability=all
+PodmanArgs=--memory=512m --pids-limit=64
+
+[Service]
+Type=oneshot
+ExecStartPre=mkdir -p %h/data/backup
+TimeoutStartSec=2h
+Nice=10

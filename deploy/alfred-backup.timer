@@ -1,0 +1,14 @@
+# Starts alfred-backup.service (alfred-backup.container) once a day. Install as
+# ~/.config/systemd/user/alfred-backup.timer, then
+# `systemctl --user daemon-reload && systemctl --user enable --now alfred-backup.timer`.
+[Unit]
+Description=Daily Alfred backup
+
+[Timer]
+OnCalendar=*-*-* 04:00:00
+RandomizedDelaySec=30m
+# A run missed while the host was down starts at the next boot.
+Persistent=true
+
+[Install]
+WantedBy=timers.target
