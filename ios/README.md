@@ -63,14 +63,7 @@ xcodegen generate --spec ios/project.yml
 xcodebuild -project ios/Alfred.xcodeproj -scheme Alfred -destination 'generic/platform=iOS Simulator' -derivedDataPath ios/build CODE_SIGNING_ALLOWED=NO build
 ```
 
-For the phone, the owner's signing settings are not in the repo: copy `Config/Signing.example.xcconfig` to `Config/Signing.xcconfig` (git ignores it) and fill in the team id and bundle id. `Base.xcconfig` includes it, so it applies to every configuration.
-
-```bash
-xcodebuild -project ios/Alfred.xcodeproj -scheme Alfred -configuration Release -destination 'generic/platform=iOS' -derivedDataPath ios/build -allowProvisioningUpdates build
-xcrun devicectl device install app --device <name> ios/build/Build/Products/Release-iphoneos/Alfred.app
-```
-
-The first install needs the developer trusted on the phone (Settings > General > VPN & Device Management); reinstall when the profile expires.
+For the phone, the `phone-install` skill (`.claude/skills/phone-install/SKILL.md`): the signing settings, the Release build from `origin/main` and the install.
 
 ## Run against a local Alfred
 

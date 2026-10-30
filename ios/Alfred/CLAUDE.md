@@ -9,3 +9,4 @@
 - `defaultScrollAnchor(.bottom)` does not keep the end in view when the container shrinks (the keyboard): scroll there on a container change (`MessageList`).
 - `onChange` of a derived value can miss two model changes between draws (a pending message and its echo): watch the model with `Observations` when every change counts.
 - Observation tells observers before a change (`willSet`), and SwiftUI can update views right then, inside the mutation: a view reading the property gets the old value and misses the write that follows. That dropped the reply right after its echo (#218), so `AppModel.timeline` is written to ignored storage first and an observed version bumped after (`changeTimeline`). To catch such a race, use an in-memory ring buffer and `Thread.callStackSymbols` in the view body.
+- An `AVPlayerLayer` with no frame draws nothing on the simulator but black on a phone: check layer transitions on the phone.
