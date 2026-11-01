@@ -16,6 +16,9 @@ struct ReplyPacing {
     private var showAt: [Key: Date] = [:]
     /// When the latest scheduled bubble of each run shows.
     private var latest: [String: Date] = [:]
+    /// The text of each draft part seen, kept after the draft goes: the first stored message of a reply takes the draft
+    /// away, and the parts after it would otherwise leave the screen until their own messages land.
+    private var drafts: [Key: String] = [:]
 
     /// Starts pacing a run's new bubbles. `existing` are the bubbles it has now, which show at once.
     mutating func follow(_ runId: String, existing: [Key]) {
@@ -31,6 +34,17 @@ struct ReplyPacing {
         let at = max(now, earliest)
         showAt[key] = at
         latest[key.runId] = at
+    }
+
+    /// Keeps the text of a draft part: the latest draft's, when a new stream writes the part again.
+    mutating func remember(_ key: Key, text: String) {
+        guard runs.contains(key.runId) else { return }
+        drafts[key] = text
+    }
+
+    /// The text a draft part had when it was last seen.
+    func draftText(_ key: Key) -> String? {
+        drafts[key]
     }
 
     /// Whether a bubble shows at `now`. A bubble of a paced run that has not been seen yet waits.

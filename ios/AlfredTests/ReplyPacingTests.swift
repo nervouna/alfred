@@ -55,4 +55,14 @@ final class ReplyPacingTests: XCTestCase {
         XCTAssertTrue(pacing.shows(key(0, run: "dddddd"), at: start))
         XCTAssertFalse(pacing.isWaiting(at: start))
     }
+
+    func testADraftPartIsKeptForAFollowedRunOnly() {
+        var pacing = ReplyPacing()
+        pacing.follow("cccccc", existing: [])
+        pacing.remember(key(1), text: "一")
+        pacing.remember(key(1), text: "二")
+        pacing.remember(key(0, run: "dddddd"), text: "三")
+        XCTAssertEqual(pacing.draftText(key(1)), "二")
+        XCTAssertNil(pacing.draftText(key(0, run: "dddddd")))
+    }
 }

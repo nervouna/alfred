@@ -90,16 +90,30 @@ private struct MessageList: View {
                         return pacing.shows(key, at: now)
                     }
                     let pending = model.timeline.pending
-                    let isTyping = model.liveReplies.contains(where: \.isTyping) || pacing.isWaiting(at: now)
-                    // The parts of each draft that show, and its step when the typing bubble does not carry it.
-                    let live = model.liveReplies.compactMap { reply -> LiveReplyRow.Content? in
+                    // Each draft's parts after the run's stored messages, with those the draft no longer holds (a stored
+                    // message took it away) until their own messages land, and the prefix of them that shows.
+                    let drafts = model.liveReplies.map { reply in
                         let offset = replies.counts[reply.runId] ?? 0
-                        let parts = Array(reply.parts.enumerated().prefix {
+                        var parts: [String] = []
+                        while let text = parts.count < reply.parts.count
+                            ? reply.parts[parts.count]
+                            : pacing.draftText(ReplyPacing.Key(runId: reply.runId, index: offset + parts.count)) {
+                            parts.append(text)
+                        }
+                        let shown = parts.enumerated().prefix {
                             pacing.shows(ReplyPacing.Key(runId: reply.runId, index: offset + $0.offset), at: now)
-                        }.map(\.element))
-                        let step = isTyping ? nil : reply.stepText
-                        guard !parts.isEmpty || step != nil else { return nil }
-                        return LiveReplyRow.Content(runId: reply.runId, parts: parts, stepText: step)
+                        }.map(\.element)
+                        return (reply: reply, parts: parts, shown: shown)
+                    }
+                    // Alfred types until every bubble of the reply has shown: the bubble stays between them, so the list
+                    // does not jump as each one comes.
+                    let isTyping = model.liveReplies.contains(where: \.isTyping) || pacing.isWaiting(at: now)
+                        || items.count < model.timeline.items.count || drafts.contains { $0.shown.count < $0.parts.count }
+                    // The parts of each draft that show, and its step when the typing bubble does not carry it.
+                    let live = drafts.compactMap { draft -> LiveReplyRow.Content? in
+                        let step = isTyping ? nil : draft.reply.stepText
+                        guard !draft.shown.isEmpty || step != nil else { return nil }
+                        return LiveReplyRow.Content(runId: draft.reply.runId, parts: draft.shown, stepText: step)
                     }
                     let senders = items.map(sender) + pending.map { _ in RowSender.owner }
                         + live.map { _ in RowSender.alfred } + (isTyping ? [RowSender.alfred] : [])
@@ -111,6 +125,7 @@ private struct MessageList: View {
                             }
                         }
                         .padding(.top, RowSender.gap(at: index, in: senders))
+                        .transition(BubbleArrival.transition)
                     }
                     ForEach(Array(pending.enumerated()), id: \.element.clientId) { index, pending in
                         PendingRow(model: model, pending: pending)
@@ -123,7 +138,7 @@ private struct MessageList: View {
                     if isTyping {
                         TypingRow(steps: model.liveReplies.compactMap(\.stepText))
                             .padding(.top, RowSender.gap(at: senders.count - 1, in: senders))
-                            .transition(.scale(scale: 0.8, anchor: .bottomLeading).combined(with: .opacity))
+                            .transition(BubbleArrival.transition)
                     }
                     Color.clear
                         .frame(height: 1)
@@ -162,13 +177,13 @@ private struct MessageList: View {
                 followEnd(using: proxy)
             }
             // A waiting bubble of Alfred's came out.
-            .onChange(of: now) { followEnd(using: proxy) }
+            .onChange(of: now) { withAnimation(BubbleArrival.animation) { followEnd(using: proxy) } }
             .onChange(of: contentSignature, initial: true) { pace() }
             .task(id: pacing.nextShow(after: now)) {
                 guard let next = pacing.nextShow(after: now) else { return }
                 try? await Task.sleep(for: .seconds(max(0, next.timeIntervalSinceNow)))
                 guard !Task.isCancelled else { return }
-                withAnimation(.snappy(duration: 0.25)) { now = .now }
+                withAnimation(BubbleArrival.animation) { now = .now }
             }
             .task(id: model.revealRequest) {
                 await reveal(model.revealRequest, using: proxy)
@@ -224,10 +239,12 @@ private struct MessageList: View {
         for reply in live {
             let offset = replies.counts[reply.runId] ?? 0
             for (index, part) in reply.parts.enumerated() {
-                pacing.see(ReplyPacing.Key(runId: reply.runId, index: offset + index), length: part.count, now: current)
+                let key = ReplyPacing.Key(runId: reply.runId, index: offset + index)
+                pacing.see(key, length: part.count, now: current)
+                pacing.remember(key, text: part)
             }
         }
-        now = current
+        withAnimation(BubbleArrival.animation) { now = current }
     }
 
     /// Shows the row a tapped notification names, and holds the request until the row has been seen. One scroll is not
@@ -632,15 +649,22 @@ private struct LiveReplyRow: View {
         VStack(alignment: .leading, spacing: RowSender.groupGap) {
             ForEach(Array(content.parts.enumerated()), id: \.offset) { index, part in
                 Bubble(text: part, isOwner: false, identifier: index == 0 ? "message.draft" : "message.draft.\(index)")
-                    .transition(.scale(scale: 0.8, anchor: .bottomLeading).combined(with: .opacity))
+                    .transition(BubbleArrival.transition)
             }
             if let step = content.stepText {
                 StepText(text: step)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .animation(.snappy(duration: 0.25), value: content.parts.count)
+        .animation(BubbleArrival.animation, value: content.parts.count)
     }
+}
+
+/// How one of Alfred's bubbles comes out, as in Messages: it grows from its corner by the edge while it fades in, and
+/// what is below it, the typing bubble, moves down with it.
+private enum BubbleArrival {
+    static let animation = Animation.spring(duration: 0.35, bounce: 0.25)
+    static var transition: AnyTransition { .scale(scale: 0.6, anchor: .bottomLeading).combined(with: .opacity) }
 }
 
 /// Alfred typing, at the end of the list, with the step its run is on under it.
