@@ -688,6 +688,7 @@ private struct Composer: View {
                 Button {
                     let sent = model.composerText
                     model.composerText = ""
+                    Self.resetFocusedTextView()
                     Task { await model.sendDraft(sent) }
                 } label: {
                     Image(systemName: "arrow.up")
@@ -706,6 +707,28 @@ private struct Composer: View {
         }
         .frame(width: Self.rowHeight, height: Self.rowHeight)
         .animation(.easeOut(duration: 0.15), value: canSend)
+    }
+
+    /// Empties the text view that holds focus, through UIKit. After an input method committed text (a picked candidate,
+    /// a dictation result) the text view can still hold it when SwiftUI writes `""` into it, and then pushes it back
+    /// into the binding. Setting the text on the view itself makes the input system drop its state for the old text,
+    /// and the view keeps focus, so the keyboard stays up.
+    private static func resetFocusedTextView() {
+        let windows = UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.windows }.joined()
+        for window in windows {
+            guard let textView = firstResponderTextView(in: window) else { continue }
+            textView.unmarkText()
+            textView.text = ""
+            return
+        }
+    }
+
+    private static func firstResponderTextView(in view: UIView) -> UITextView? {
+        if let textView = view as? UITextView, textView.isFirstResponder { return textView }
+        for subview in view.subviews {
+            if let found = firstResponderTextView(in: subview) { return found }
+        }
+        return nil
     }
 
     /// Reads the photos the picker chose into the app and attaches them.
