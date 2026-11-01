@@ -1322,3 +1322,31 @@ test("a task run its owner paused keeps an estimate of the response it had no re
   assert.equal(record?.costEstimated, true);
   assert.ok(Math.abs((t.state().spendDayUsd as number) - (0.001 + 0.00035)) < 1e-9, "the day's spend counts it");
 });
+
+test("a task run's reply is split at the separator, with the run footer on the last message only", async () => {
+  const s = stack();
+  const task = oneTime(s, "分条");
+  clock = minutesAfterStart(2);
+  const t = start(s, {
+    turn: async (_prompt, _signal, options) => {
+      fs.mkdirSync(path.join(workspace, "notes"), { recursive: true });
+      fs.writeFileSync(path.join(workspace, "notes/split-note.md"), "# 记录\n");
+      const hook = {
+        hook_event_name: "PostToolUse",
+        tool_name: "Write",
+        tool_input: { file_path: "notes/split-note.md" },
+        tool_response: {},
+        tool_use_id: "toolu_s",
+      };
+      for (const matcher of options.hooks?.PostToolUse ?? []) {
+        for (const h of matcher.hooks) await h(hook as never, "toolu_s", { signal: new AbortController().signal });
+      }
+      return "早。\n<!-- split -->\n今天三件事。";
+    },
+  });
+  await until("the task run to end", () => t.finished(task.id));
+
+  const [run] = t.taskRuns(task.id);
+  assert.ok(run);
+  assert.deepEqual(t.messages().filter((m) => m.direction === "out").map((m) => m.text), ["早。", `今天三件事。\n\n（运行 ${run.id}）`]);
+});

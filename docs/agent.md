@@ -9,6 +9,10 @@ How the agent is set up: sessions, memory, workspace rules, skills, the sandbox 
 - **`/new` and `/resume`.** Both keep the retired session as the previous one; only one is kept. `/resume` swaps the two (a second one swaps back) and restarts the idle clock, or the next task would rotate the resumed session at once. Both are refused while a task runs, background subagents included.
 - **A session that cannot be resumed** is dropped, not kept for `/resume`; Alfred starts a new one and says so. Moving the workspace does it: transcripts are keyed by the working directory (`transcriptDirs` in `memory-scan.ts`).
 
+## Replies
+
+A reply may be several messages: the agent separates them with a line holding only `<!-- split -->` (`reply.ts`, which splits outside fenced code blocks), and chat and task runs send one message per part, in order, with the run and background footers on the last. The prompt sets the lengths and the limit of three; code enforces neither. Error and cap replies are never split.
+
 ## Long-term memory
 
 Facts about the owner live in `memory/` in the workspace, one Markdown file per memory, so both can read and edit them. Code: `memory.ts`, `memory-scan.ts`.
