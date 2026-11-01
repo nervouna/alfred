@@ -571,21 +571,33 @@ final class AppModelTests: XCTestCase {
         XCTAssertTrue(model.taskRunBanners.isEmpty)
     }
 
-    func testTheLiveReplyShowsTheDraftAndTheLatestStepOfARunningTask() async throws {
+    func testTheLiveReplyShowsTheFinishedPartsAndTheLatestStepOfARunningTask() async throws {
         let frames = [
             runFrame(id: 1, runId: "cccccc", status: "running"),
             stepFrame(runId: "cccccc", tool: "WebFetch", detail: "https://example.com/pricing"),
-            deltaFrame(runId: "cccccc", streamId: "cccccc.1", text: "我先查"),
-            deltaFrame(runId: "cccccc", streamId: "cccccc.1", text: "一下。"),
+            deltaFrame(runId: "cccccc", streamId: "cccccc.1", text: "第一段。\n<!-- split -->\n"),
+            deltaFrame(runId: "cccccc", streamId: "cccccc.1", text: "第二段还在写"),
         ]
         let (model, _, _) = try makeModel(credentials: true, replies: ["/api/events": [.stream(frames)]])
         model.foreground()
-        await eventually { model.liveReplies.first?.text == "我先查一下。" }
+        await eventually { model.timeline.drafts["cccccc"]?.text.hasSuffix("还在写") == true }
 
         let reply = try XCTUnwrap(model.liveReplies.first)
         XCTAssertEqual(model.liveReplies.count, 1)
         XCTAssertEqual(reply.runId, "cccccc")
+        XCTAssertEqual(reply.parts, ["第一段。"])
+        XCTAssertTrue(reply.isTyping)
         XCTAssertEqual(reply.stepText, "WebFetch：https://example.com/pricing")
+    }
+
+    func testARunningChatRunShowsBeforeItWritesOrSteps() async throws {
+        let frames = [runFrame(id: 1, runId: "cccccc", status: "running")]
+        let (model, _, _) = try makeModel(credentials: true, replies: ["/api/events": [.stream(frames)]])
+        model.foreground()
+        await eventually { model.liveReplies.count == 1 }
+        XCTAssertEqual(model.liveReplies.first?.parts, [])
+        XCTAssertEqual(model.liveReplies.first?.isTyping, true)
+        XCTAssertNil(model.liveReplies.first?.stepText)
     }
 
     func testARunningTaskWithOnlyAStepShowsTheStep() async throws {
@@ -595,8 +607,8 @@ final class AppModelTests: XCTestCase {
         ]
         let (model, _, _) = try makeModel(credentials: true, replies: ["/api/events": [.stream(frames)]])
         model.foreground()
-        await eventually { model.liveReplies.count == 1 }
-        XCTAssertNil(model.liveReplies.first?.text)
+        await eventually { model.liveReplies.first?.stepText != nil }
+        XCTAssertEqual(model.liveReplies.first?.parts, [])
         XCTAssertEqual(model.liveReplies.first?.stepText, "Read：notes.md")
     }
 
@@ -604,7 +616,7 @@ final class AppModelTests: XCTestCase {
         let frames = [
             runFrame(id: 1, runId: "cccccc", status: "running"),
             runFrame(id: 2, runId: "dddddd", status: "running", taskId: "aaaaaa"),
-            deltaFrame(runId: "cccccc", streamId: "cccccc.1", text: "我先查"),
+            deltaFrame(runId: "cccccc", streamId: "cccccc.1", text: "我先查\n<!-- split -->\n"),
             deltaFrame(runId: "dddddd", streamId: "dddddd.1", text: "定时任务的草稿"),
             stepFrame(runId: "dddddd", tool: "WebFetch", detail: "https://example.com/pricing"),
         ]
@@ -613,7 +625,7 @@ final class AppModelTests: XCTestCase {
         await eventually { model.timeline.latestStep["dddddd"] != nil }
 
         XCTAssertEqual(model.liveReplies.map(\.runId), ["cccccc"])
-        XCTAssertEqual(model.liveReplies.first?.text, "我先查")
+        XCTAssertEqual(model.liveReplies.first?.parts, ["我先查"])
         XCTAssertNil(model.liveReplies.first?.stepText)
     }
 
@@ -626,7 +638,9 @@ final class AppModelTests: XCTestCase {
         let (model, _, _) = try makeModel(credentials: true, replies: ["/api/events": [.stream(frames)]])
         model.foreground()
         await eventually { model.timeline.lastEventId == 2 }
-        XCTAssertTrue(model.liveReplies.isEmpty)
+        // The run stays on (its subagents may still report), but it has answered: Alfred is not typing.
+        XCTAssertEqual(model.liveReplies.map(\.parts), [[]])
+        XCTAssertEqual(model.liveReplies.map(\.isTyping), [false])
     }
 
     // MARK: Text and keychain

@@ -42,10 +42,16 @@ final class AppModel {
         }
     }
 
-    /// What the chat shows below the messages for a run: the reply as it is written, and the step the run is on.
+    /// What the chat shows below the messages for a run: the parts of the reply written so far, whether Alfred is
+    /// writing, and the step the run is on.
     struct LiveReply: Identifiable, Hashable {
         let runId: String
-        let text: String?
+        /// The whole parts of the draft: while the run runs, those a separator has closed, so that a bubble shows only
+        /// once its text is complete; afterwards, all of them.
+        let parts: [String]
+        /// Whether the chat shows Alfred typing: the run runs, has not answered since the owner's last message or has
+        /// started writing again, and is not waiting on the owner's answer to a question.
+        let isTyping: Bool
         let stepText: String?
 
         var id: String { runId }
@@ -1198,8 +1204,8 @@ final class AppModel {
             }
     }
 
-    /// The replies being written and the steps being taken, oldest run first. A run shows when it has a draft, or
-    /// when it is a running chat run with a step. A scheduled task's run never shows here: the banner does.
+    /// The replies being written and the steps being taken, oldest run first. A run shows when it is a running chat run,
+    /// or when it has a draft. A scheduled task's run never shows here: the banner does.
     var liveReplies: [LiveReply] {
         let runIds = Set(timeline.drafts.keys).union(
             timeline.runs.values.filter { $0.kind == .task && $0.status == .running }.map(\.id)
@@ -1207,14 +1213,28 @@ final class AppModel {
         return runIds
             .filter { timeline.runs[$0]?.taskId == nil }
             .compactMap { runId -> (Date, LiveReply)? in
-                let draft = timeline.drafts[runId].map(\.text).flatMap { $0.isEmpty ? nil : $0 }
-                let step = stepText(of: runId)
-                guard draft != nil || step != nil else { return nil }
+                let isRunning = timeline.runs[runId]?.status == .running
+                let draft = timeline.drafts[runId]?.text
+                let parts = isRunning ? ReplyParts.finished(draft ?? "") : ReplyParts.split(draft ?? "")
+                guard isRunning || !parts.isEmpty else { return nil }
                 let started = timeline.runs[runId]?.startedAt ?? .distantPast
-                return (started, LiveReply(runId: runId, text: draft, stepText: step))
+                let isTyping = isRunning && (draft != nil || !hasAnswered(runId)) && !asksTheOwner(runId)
+                return (started, LiveReply(runId: runId, parts: parts, isTyping: isTyping, stepText: stepText(of: runId)))
             }
             .sorted { ($0.0, $0.1.runId) < ($1.0, $1.1.runId) }
             .map(\.1)
+    }
+
+    /// Whether the newest message is the run's own reply: a run that stays on after it answered (its background
+    /// subagents are working) is not typing.
+    private func hasAnswered(_ runId: String) -> Bool {
+        guard let last = timeline.messages.last else { return false }
+        return last.direction == .outbound && last.runId == runId
+    }
+
+    /// Whether the run waits on the owner's answer to one of its questions.
+    private func asksTheOwner(_ runId: String) -> Bool {
+        timeline.questions.contains { $0.asked.runId == runId && $0.state == .open }
     }
 
     /// A run's latest step as the chat shows it: `WebFetch：https://…`.
