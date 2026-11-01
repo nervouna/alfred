@@ -78,18 +78,28 @@ private struct MessageList: View {
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(spacing: 12) {
-                    ForEach(model.timeline.items) { item in
-                        switch item {
-                        case let .message(message): MessageRow(message: message, taskTitle: model.taskLabel(for: message))
-                        case let .question(record): QuestionCard(model: model, record: record)
+                // Each row sets the gap above it: small inside a run of one sender's messages, as in Messages.
+                LazyVStack(spacing: 0) {
+                    let items = model.timeline.items
+                    let pending = model.timeline.pending
+                    let live = model.liveReplies
+                    let senders = items.map(sender) + pending.map { _ in RowSender.owner } + live.map { _ in RowSender.alfred }
+                    ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                        Group {
+                            switch item {
+                            case let .message(message): MessageRow(message: message, taskTitle: model.taskLabel(for: message))
+                            case let .question(record): QuestionCard(model: model, record: record)
+                            }
                         }
+                        .padding(.top, RowSender.gap(at: index, in: senders))
                     }
-                    ForEach(model.timeline.pending, id: \.clientId) { pending in
+                    ForEach(Array(pending.enumerated()), id: \.element.clientId) { index, pending in
                         PendingRow(model: model, pending: pending)
+                            .padding(.top, RowSender.gap(at: items.count + index, in: senders))
                     }
-                    ForEach(model.liveReplies) { reply in
+                    ForEach(Array(live.enumerated()), id: \.element.id) { index, reply in
                         LiveReplyRow(reply: reply)
+                            .padding(.top, RowSender.gap(at: items.count + pending.count + index, in: senders))
                     }
                     Color.clear
                         .frame(height: 1)
@@ -197,6 +207,17 @@ private struct MessageList: View {
         }
     }
 
+    /// Who a row of the timeline is from. A message under a task's label starts a group of its own.
+    private func sender(_ item: TimelineItem) -> RowSender {
+        switch item {
+        case let .message(message):
+            if model.taskLabel(for: message) != nil { return .other }
+            return message.direction == .inbound ? .owner : .alfred
+        case .question:
+            return .other
+        }
+    }
+
     /// Changes whenever something is added to the list or grows.
     private var contentSignature: ContentSignature {
         let live = model.liveReplies
@@ -208,7 +229,7 @@ private struct MessageList: View {
                 model.timeline.openQuestions.count,
                 model.answerFailures.count,
                 live.count,
-                live.reduce(0) { $0 + ($1.text?.utf8.count ?? 0) + ($1.stepText?.utf8.count ?? 0) },
+                live.reduce(0) { $0 + $1.parts.count + ($1.isTyping ? 1 : 0) + ($1.stepText?.utf8.count ?? 0) },
             ]
         )
     }
@@ -217,6 +238,25 @@ private struct MessageList: View {
     private struct ContentSignature: Equatable {
         let pending: Int
         let rest: [Int]
+    }
+}
+
+/// Who a row of the list is from, for the gap above it.
+private enum RowSender: Equatable {
+    case owner, alfred
+    /// A row that is in no group: a question card, or a message under a task's label.
+    case other
+
+    /// The gap between bubbles of one sender in a row.
+    static let groupGap: CGFloat = 4
+    /// The gap between groups.
+    static let gap: CGFloat = 12
+
+    /// The gap above the row at `index`: none above the first, the small one when the row above is from the same sender.
+    static func gap(at index: Int, in senders: [RowSender]) -> CGFloat {
+        guard index > 0 else { return 0 }
+        let sender = senders[index]
+        return sender != .other && sender == senders[index - 1] ? groupGap : gap
     }
 }
 
@@ -503,17 +543,21 @@ private struct PendingRow: View {
     }
 }
 
-/// The reply a run is writing, with the step it is on in secondary text under it.
+/// The reply a run is writing, as a person would send it: each part as a whole bubble once it is complete, then a
+/// typing bubble while Alfred writes, and the step it is on in secondary text under it.
 private struct LiveReplyRow: View {
     let reply: AppModel.LiveReply
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            if let text = reply.text {
-                // One bubble per part, as the messages will be once they land.
-                ForEach(Array(ReplyParts.split(text).enumerated()), id: \.offset) { index, part in
-                    Bubble(text: part, isOwner: false, identifier: index == 0 ? "message.draft" : "message.draft.\(index)")
-                }
+        VStack(alignment: .leading, spacing: RowSender.groupGap) {
+            // One bubble per part, as the messages will be once they land.
+            ForEach(Array(reply.parts.enumerated()), id: \.offset) { index, part in
+                Bubble(text: part, isOwner: false, identifier: index == 0 ? "message.draft" : "message.draft.\(index)")
+                    .transition(Self.arrival)
+            }
+            if reply.isTyping {
+                TypingBubble()
+                    .transition(Self.arrival)
             }
             if let step = reply.stepText {
                 Text(step)
@@ -525,6 +569,47 @@ private struct LiveReplyRow: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .animation(.snappy(duration: 0.25), value: reply.parts.count)
+        .animation(.snappy(duration: 0.25), value: reply.isTyping)
+    }
+
+    /// A bubble pops up from its corner by the edge, as in Messages.
+    private static let arrival = AnyTransition.scale(scale: 0.8, anchor: .bottomLeading).combined(with: .opacity)
+}
+
+/// Three dots that pulse in turn in one of Alfred's bubbles: Alfred is writing. Still when the owner reduces motion.
+private struct TypingBubble: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private static let dot: CGFloat = 8
+    private static let period = 1.2
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1 / 30, paused: reduceMotion)) { context in
+            let time = context.date.timeIntervalSinceReferenceDate
+            HStack(spacing: 5) {
+                ForEach(0..<3, id: \.self) { index in
+                    let level = reduceMotion ? 0.5 : Self.level(at: time, dot: index)
+                    Circle()
+                        .frame(width: Self.dot, height: Self.dot)
+                        .opacity(0.35 + 0.65 * level)
+                        .offset(y: -2 * level)
+                }
+            }
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 13)
+        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16))
+        .accessibilityElement()
+        .accessibilityLabel("Alfred 正在输入")
+        .accessibilityIdentifier("chat.typing")
+    }
+
+    /// How far a dot is into its pulse, 0 to 1: each dot a third of a period after the one before.
+    private static func level(at time: TimeInterval, dot: Int) -> Double {
+        let phase = (time / period - Double(dot) / 3).truncatingRemainder(dividingBy: 1)
+        return max(0, sin(phase * 2 * .pi))
     }
 }
 

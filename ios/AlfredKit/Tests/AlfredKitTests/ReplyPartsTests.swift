@@ -60,4 +60,19 @@ final class ReplyPartsTests: XCTestCase {
         XCTAssertEqual(ReplyParts.split("\(split)\none\n\(split)\n\(split)\ntwo\n\(split)"), ["one", "two"])
         XCTAssertEqual(ReplyParts.split("\(split)\n\(split)"), [])
     }
+
+    func testAPartIsFinishedOnceASeparatorFollowsIt() {
+        XCTAssertEqual(ReplyParts.finished("one"), [])
+        XCTAssertEqual(ReplyParts.finished("one\n\(split)\ntw"), ["one"])
+        XCTAssertEqual(ReplyParts.finished("one\n\(split)\ntwo\n\(split)"), ["one", "two"])
+        XCTAssertEqual(ReplyParts.finished("\(split)\n\(split)\none"), [])
+    }
+
+    func testAPartialSeparatorDoesNotFinishAPart() {
+        XCTAssertEqual(ReplyParts.finished("one\n<!-- spl"), [])
+    }
+
+    func testASeparatorInAnOpenCodeBlockDoesNotFinishAPart() {
+        XCTAssertEqual(ReplyParts.finished("a\n```\ncode\n\(split)\nmore"), [])
+    }
 }
