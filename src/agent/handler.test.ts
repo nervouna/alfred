@@ -1856,3 +1856,27 @@ test("the unit prices a result sets are kept in the state file, so a restarted h
   assert.ok(Math.abs((readRunFile(runId)?.costUsd ?? 0) - 0.00085) < 1e-9);
   assert.equal(readRunFile(runId)?.costEstimated, true);
 });
+
+test("a reply with two separators is three messages of the run in order, and the run footer is on the last one only", async () => {
+  const t = setup({
+    turn: async (_prompt, _signal, turn) => {
+      await wrote(turn, "notes/split-reply.md", "# 记录\n");
+      return "一\n<!-- split -->\n二\n  <!-- split -->  \n三";
+    },
+  });
+  await t.send("分三条说");
+  await until("the run to finish", () => t.finished());
+
+  const out = t.messages().filter((m) => m.direction === "out");
+  assert.deepEqual(out.map((m) => m.text), ["一", "二", `三\n\n（运行 ${t.taskId()}）`]);
+  assert.ok(out.every((m) => m.runId === t.taskId()));
+  assert.deepEqual(t.app.texts, out.map((m) => m.text));
+});
+
+test("an error reply that contains the separator is sent as one message", async () => {
+  const t = setup({ turn: async () => ({ is_error: true, result: "坏了\n<!-- split -->\n真的坏了", total_cost_usd: 0, modelUsage: {} }) });
+  await t.send("试试");
+  await until("the run to finish", () => t.finished());
+
+  assert.deepEqual(t.messages().filter((m) => m.direction === "out").map((m) => m.text), ["出错了：坏了\n<!-- split -->\n真的坏了"]);
+});

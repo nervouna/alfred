@@ -119,6 +119,7 @@ import type { AskOwner, QuestionOutcome } from "./questions.ts";
 import { revisionMessage, revisionPrompt, revisionSettings, revisionsSection } from "./revision.ts";
 import { RULES_FILE, type RulesWatch, RulesTracker, rulesDisclosure, seedRules, watchRules } from "./rules.ts";
 import { NO_SESSION, accountModels, accountRun, resumePrevious, retire, rotationDueAt, shouldRotate } from "./session.ts";
+import { splitReply } from "./reply.ts";
 import type { RetireReason } from "./session.ts";
 import { SKILLS_DIR, prepareWorkspacePlugin, skillPlugins } from "./skills.ts";
 import { AgentStateStore, OWNER } from "./state.ts";
@@ -431,6 +432,16 @@ ${brief.prompt}`;
 /** The result of a turn that an interrupt cut short (see stopRun): it has no reply. */
 function interruptedTurn(result: SDKResultMessage): boolean {
   return result.subtype === "error_during_execution" && (result.terminal_reason === "aborted_streaming" || result.terminal_reason === "aborted_tools");
+}
+
+/** Sends a successful reply as one message per part, in order, with the footer on the last; a reply with no parts is "完成。". A failed send does not stop the later parts. */
+async function sendReply(run: { out: Outbound; recorder: RunRecorder }, reply: string, footer: string): Promise<void> {
+  const parts = splitReply(reply);
+  if (!parts.length) parts.push("完成。");
+  for (const [i, part] of parts.entries()) {
+    const text = i === parts.length - 1 ? part + footer : part;
+    await run.out.text(text).catch((err) => log.error(`reply failed run=${run.recorder.id}: ${describeError(err)}`));
+  }
 }
 
 /** The reply for one result of a run that was capped at `budgetUsd`. */
@@ -1158,7 +1169,11 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
       // A reply after subagents ended is about them, whatever started its turn.
       const footer = (notification ? "" : runFooter(recorder)) + backgroundFooter(dispatched, reports);
       // A failed send must not end the query while later turns are still coming.
-      await run.out.text(resultReply(result, run.budgetUsd) + footer).catch((err) => log.error(`reply failed run=${recorder.id}: ${describeError(err)}`));
+      if (result.subtype === "success" && !result.is_error) {
+        await sendReply(run, result.result, footer);
+      } else {
+        await run.out.text(resultReply(result, run.budgetUsd) + footer).catch((err) => log.error(`reply failed run=${recorder.id}: ${describeError(err)}`));
+      }
     };
 
     try {
@@ -1429,7 +1444,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
       label: `task=${task.id}`,
       budgetUsd: task.budgetUsd,
       lostReason: "Alfred 重启，任务中断",
-      onReply: (reply) => run.out.text(reply + runFooter(recorder)).catch((err) => log.error(`reply failed run=${recorder.id}: ${describeError(err)}`)),
+      onReply: (reply) => sendReply(run, reply, runFooter(recorder)),
       onFailure: (failure) =>
         run.out.text(`任务「${task.title}」运行失败：${failure}`).catch((err) => log.error(`failure message failed run=${recorder.id}: ${describeError(err)}`)),
     });

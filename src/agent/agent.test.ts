@@ -6,6 +6,7 @@ import path from "node:path";
 import { after, test } from "node:test";
 
 import { agentEnv, runIdNote, systemPrompt } from "./config.ts";
+import { SPLIT } from "./reply.ts";
 import { checkToolInput, resolveInside } from "./guard.ts";
 import { buildPrompt, lostNote, releaseMessage, runTitle } from "./handler.ts";
 import { PROTECTED_PATHS } from "./subagents.ts";
@@ -294,4 +295,8 @@ test("the delegation rules recommend the roles and no longer forbid other types 
   assert.match(prompt, /general-purpose, Explore, Plan/);
   assert.match(prompt, /Pass model only when/);
   assert.doesNotMatch(prompt, /never pass a model/);
+});
+
+test("the reply rules name the separator the reply is split at", () => {
+  assert.ok(systemPrompt(new Date()).includes(`separated by a line holding only ${SPLIT}`));
 });

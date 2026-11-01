@@ -153,8 +153,8 @@ test("the reply rules are for the app: HTML reports are sent as they are, a PDF 
   assert.ok(section, "the section is there");
   assert.match(section, /Simplified Chinese/);
   assert.match(section, /phone screen/);
-  assert.match(section, /under about 1500 characters/);
-  assert.match(section, /Markdown renders in the app, and an image shows when it is a file in the workspace/);
+  assert.match(section, /up to about 1500 characters/);
+  assert.match(section, /An image shows in the chat when it is a file in the workspace/);
   assert.match(section, /self-contained HTML file with its charts drawn as inline SVG, delivered as it is with the deliver tool/);
   assert.match(section, /inline scripts and SVG charts work, with no network access/);
   assert.match(section, /A file you deliver becomes a document the owner can annotate in the app, and every version of it is kept/);

@@ -4,6 +4,7 @@ import type { AgentDefinition, Settings as ClaudeCodeSettings } from "@anthropic
 
 import type { Settings } from "../api/schema.ts";
 import { STATE_DIR } from "../store.ts";
+import { SPLIT } from "./reply.ts";
 import { rulesPromptSection } from "./rules.ts";
 import type { RulesFile } from "./rules.ts";
 import type { PromptIndex } from "./memory.ts";
@@ -505,8 +506,10 @@ Your working directory is the workspace, and nothing outside it is accessible. F
 
 # Replying in the app
 - Reply in Simplified Chinese unless the user writes in another language.
-- Write for a phone screen: lead with the answer, keep paragraphs short and lists compact. Markdown renders in the app, and an image shows when it is a file in the workspace: deliver it with the deliver tool.
-- Keep chat replies under about 1500 characters. For anything longer, such as full reports, comparisons or collected material, write a Markdown file where the workspace rules put deliverables, deliver it with the deliver tool, and reply with a short summary.
+- Write for a phone screen: lead with the answer. An image shows in the chat when it is a file in the workspace: deliver it with the deliver tool.
+- There are two kinds of reply. An everyday reply (an answer, a confirmation, a short update) is plain text with no Markdown: each message at most about 100 characters, at most three messages, separated by a line holding only ${SPLIT}; split only where a phone chat would.
+- A brief (research results, a task report, anything that needs more room) is one message whose first sentence is the conclusion; Markdown is allowed, up to about 1500 characters. Anything longer, or meant to be kept, revised or forwarded, is a document: write a Markdown file where the workspace rules put deliverables, deliver it with the deliver tool, and reply with a short message.
+- Do not write workspace paths in a reply: a delivered file already shows in the chat. Leave out how the work was done (directories chosen, files appended to, steps taken) unless the owner must act on it.
 - The app opens .md, .pdf, images, video, text files and .html reports. A report with charts or wide tables is one self-contained HTML file with its charts drawn as inline SVG, delivered as it is with the deliver tool: the app opens it in a sandbox where inline scripts and SVG charts work, with no network access.
 - A file you deliver becomes a document the owner can annotate in the app, and every version of it is kept. To change a document you delivered, edit the same file and deliver it again under the same path; never write a copy under a new name.
 - Make a PDF with render_pdf only when the user asks for one, or for a document meant to be kept or forwarded. Rendering is sandboxed: only workspace images, stylesheets and fonts load, by relative path, e.g. ![](../images/<date>/cover.jpg) from reports/; network URLs, files outside the workspace, iframes and scripts do not.
