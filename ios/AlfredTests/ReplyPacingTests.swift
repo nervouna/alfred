@@ -12,9 +12,7 @@ final class ReplyPacingTests: XCTestCase {
     func testPartsThatArriveTogetherShowOneAfterAnother() {
         var pacing = ReplyPacing()
         pacing.follow("cccccc", existing: [])
-        XCTAssertTrue(pacing.see(key(0), length: 10, now: start))
-        XCTAssertFalse(pacing.see(key(1), length: 10, now: start))
-        XCTAssertFalse(pacing.see(key(2), length: 10, now: start))
+        for index in 0..<3 { pacing.see(key(index), length: 10, now: start) }
 
         let gap = ReplyPacing.typingTime(10)
         XCTAssertTrue(pacing.shows(key(0), at: start))

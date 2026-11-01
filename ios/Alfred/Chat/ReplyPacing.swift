@@ -27,15 +27,13 @@ struct ReplyPacing {
     }
 
     /// Schedules a bubble the first time it is seen: when it arrives, but no sooner than the time it takes to type it
-    /// after the run's bubble before. Bubbles of a run are seen in order. Returns whether it was scheduled to show at once.
-    @discardableResult
-    mutating func see(_ key: Key, length: @autoclosure () -> Int, now: Date) -> Bool {
-        guard runs.contains(key.runId), showAt[key] == nil else { return false }
+    /// after the run's bubble before. Bubbles of a run are seen in order.
+    mutating func see(_ key: Key, length: @autoclosure () -> Int, now: Date) {
+        guard runs.contains(key.runId), showAt[key] == nil else { return }
         let earliest = latest[key.runId].map { $0.addingTimeInterval(Self.typingTime(length())) } ?? now
         let at = max(now, earliest)
         showAt[key] = at
         latest[key.runId] = at
-        return at <= now
     }
 
     /// Keeps the text of a draft part: the latest draft's, when a new stream writes the part again.
