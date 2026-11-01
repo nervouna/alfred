@@ -235,29 +235,89 @@ private extension ScrollPhase {
     var isOwners: Bool { self == .interacting || self == .decelerating }
 }
 
+/// How a bubble of Alfred's is cut off when its text is long.
+enum BubbleCollapse {
+    /// The most lines of body text a bubble of Alfred's shows before it is cut off and opens in the reader.
+    static let maxLines = 10
+    /// The height of the fade at the cut.
+    static let fadeHeight: CGFloat = 40
+
+    /// The height of `maxLines` lines of body text at the current text size.
+    static var maxHeight: CGFloat {
+        UIFont.preferredFont(forTextStyle: .body).lineHeight * CGFloat(maxLines)
+    }
+}
+
 private struct Bubble: View {
     let text: String
     let isOwner: Bool
     let identifier: String
+    /// The height the text would take without the cut, measured from the laid-out text.
+    @State private var fullHeight: CGFloat = 0
+    @State private var showsReader = false
+    /// Read so that the cut follows a change of the text size.
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
         // Parsed on every pass, so a draft that grows is laid out again as it is.
         let blocks = MessageText.blocks(text)
         let palette = isOwner ? MessagePalette.owner : .alfred
+        let _ = dynamicTypeSize
+        let limit = BubbleCollapse.maxHeight
+        // Alfred's bubbles collapse, the owner's never do. The half point keeps a text of exactly the limit whole.
+        let isCollapsed = !isOwner && fullHeight > limit + 0.5
         HStack(spacing: 0) {
             if isOwner { Spacer(minLength: 48) }
             MessageMarkdown(blocks: blocks, palette: palette)
+                // The text takes the height it needs whatever the frame below says, and is measured at that.
+                .fixedSize(horizontal: false, vertical: true)
+                .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { fullHeight = $0 }
+                .frame(height: isCollapsed ? limit : nil, alignment: .top)
+                .mask { fade(isCollapsed: isCollapsed, limit: limit) }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
                 .foregroundStyle(palette.text)
                 .background(isOwner ? Color.accentColor : Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16))
+                .contentShape(RoundedRectangle(cornerRadius: 16))
+                .onTapGesture {
+                    if isCollapsed { showsReader = true }
+                }
                 .contextMenu {
                     Button("复制", systemImage: "doc.on.doc") {
                         UIPasteboard.general.string = MessageText.plainText(blocks)
                     }
                 }
                 .modifier(BubbleAccessibility(isSingleText: MessageMarkdown.singleText(blocks) != nil, identifier: identifier))
+                .modifier(CollapsedAccessibility(isCollapsed: isCollapsed))
+                .fullScreenCover(isPresented: $showsReader) {
+                    MessageReader(blocks: blocks)
+                }
             if !isOwner { Spacer(minLength: 48) }
+        }
+    }
+
+    /// Opaque, and at the cut fading out over its last `fadeHeight`.
+    private func fade(isCollapsed: Bool, limit: CGFloat) -> some View {
+        let start = isCollapsed ? max(0, 1 - BubbleCollapse.fadeHeight / limit) : 1
+        return LinearGradient(
+            stops: [.init(color: .black, location: start), .init(color: isCollapsed ? .clear : .black, location: 1)],
+            startPoint: .top,
+            endPoint: .bottom
+        )
+    }
+}
+
+/// A collapsed bubble says it opens: its text stays whole for VoiceOver.
+private struct CollapsedAccessibility: ViewModifier {
+    let isCollapsed: Bool
+
+    func body(content: Content) -> some View {
+        if isCollapsed {
+            content
+                .accessibilityAddTraits(.isButton)
+                .accessibilityHint("打开全文")
+        } else {
+            content
         }
     }
 }
@@ -430,7 +490,10 @@ private struct LiveReplyRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             if let text = reply.text {
-                Bubble(text: text, isOwner: false, identifier: "message.draft")
+                // One bubble per part, as the messages will be once they land.
+                ForEach(Array(ReplyParts.split(text).enumerated()), id: \.offset) { index, part in
+                    Bubble(text: part, isOwner: false, identifier: index == 0 ? "message.draft" : "message.draft.\(index)")
+                }
             }
             if let step = reply.stepText {
                 Text(step)
