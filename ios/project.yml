@@ -34,6 +34,9 @@ targets:
       properties:
         CFBundleDisplayName: Alfred
         CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
+        # The build number and the commit come from Base.xcconfig or the build command; Settings shows them.
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        AlfredCommit: $(ALFRED_COMMIT)
         UILaunchScreen: {}
         # The scanner in the pairing screen uses the camera.
         NSCameraUsageDescription: Alfred 用相机扫描配对二维码。
@@ -98,6 +101,8 @@ targets:
       properties:
         CFBundleDisplayName: Alfred
         CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
+        # The same build number as the app's.
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         # The keychain group the extension reads the app's credentials from, the same one the app writes them to.
         AlfredKeychainAccessGroup: $(AppIdentifierPrefix)$(ALFRED_BUNDLE_ID)
         NSExtension:

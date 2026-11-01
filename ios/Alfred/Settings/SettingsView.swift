@@ -254,8 +254,12 @@ struct SettingsView: View {
 
     private var versionSection: some View {
         Section {
-            LabeledContent("版本", value: SettingsPresentation.version(Bundle.main.infoDictionary))
-                .accessibilityElement(children: .combine)
+            Text(SettingsPresentation.version(Bundle.main.infoDictionary))
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity)
+                .textSelection(.enabled)
+                .listRowBackground(Color.clear)
                 .accessibilityIdentifier("settings.version")
         }
     }
