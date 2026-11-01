@@ -154,6 +154,8 @@ test("the reply rules are for the app: HTML reports are sent as they are, a PDF 
   assert.match(section, /Simplified Chinese/);
   assert.match(section, /phone screen/);
   assert.match(section, /up to about 1500 characters/);
+  assert.match(section, /an everyday reply is the default for everything, including open questions/);
+  assert.match(section, /Write a brief only when the owner asks for research/);
   assert.match(section, /An image shows in the chat when it is a file in the workspace/);
   assert.match(section, /self-contained HTML file with its charts drawn as inline SVG, delivered as it is with the deliver tool/);
   assert.match(section, /inline scripts and SVG charts work, with no network access/);

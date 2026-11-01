@@ -3,7 +3,7 @@
 // device. It opens the workspace's history and the document store as `run` does, so deliveries become documents and the
 // app's revisions and undos run. It prints the pairing to paste into the app, then every event as it happens: [event] for
 // stored ones, [live] for message deltas and steps. Ctrl-C or SIGTERM stops everything; it exits 0.
-// usage: node scripts/app-dev.ts [--port <port>] [--model <sonnet|opus|haiku>] [--repair] [--seed-documents] [--seed-ideas] [--seed-memories] [--seed-chat] [--seed-long-message] [--ideas-at <HH:MM>]
+// usage: node scripts/app-dev.ts [--port <port>] [--model <sonnet|opus|haiku>] [--repair] [--seed-documents] [--seed-ideas] [--seed-memories] [--seed-chat] [--seed-long-chat] [--seed-long-message] [--ideas-at <HH:MM>]
 //   --port            the workbench's loopback port (default 8787)
 //   --model           the model the owner's messages run on (default haiku)
 //   --repair          revoke the simulator's device and pair a new one. A device's token is shown once and
@@ -20,6 +20,10 @@
 //   --seed-chat       before Alfred starts, append 300 messages to the event log for the app's chat: they alternate between the
 //                     owner and Alfred, run from one to eight lines, and are numbered #1 to #300, so the newest is easy to tell.
 //                     A log that already has a message is left alone.
+//   --seed-long-chat  before Alfred starts, append 100 messages to the event log for the app's chat, alternating between the
+//                     owner and Alfred and numbered #1 to #100: every fifth reply of Alfred's (#10, #20, ...) is long (30
+//                     paragraphs, "#n 第 1 段" to "#n 第 30 段"), which the chat collapses; the others are one line. A log
+//                     that already has a message is left alone.
 //   --seed-long-message  before Alfred starts, append three messages to the event log for the app's chat: the owner's, a short
 //                     reply of Alfred's, and a long one (a paragraph "第 1 段" to "第 24 段", then "最后一行"), which the chat
 //                     collapses. A log that already has a message is left alone.
@@ -65,7 +69,7 @@ import { createLocalHandler } from "./local-stack.ts";
 
 const REQUIRED = ["ALFRED_STATE_DIR", "ALFRED_WORKSPACE", "ALFRED_ANTHROPIC_API_KEY"];
 const USAGE =
-  "usage: node scripts/app-dev.ts [--port <port>] [--model <sonnet|opus|haiku>] [--repair] [--seed-documents] [--seed-ideas] [--seed-memories] [--seed-chat] [--seed-long-message] [--ideas-at <HH:MM>]";
+  "usage: node scripts/app-dev.ts [--port <port>] [--model <sonnet|opus|haiku>] [--repair] [--seed-documents] [--seed-ideas] [--seed-memories] [--seed-chat] [--seed-long-chat] [--seed-long-message] [--ideas-at <HH:MM>]";
 const DEVICE_NAME = "simulator";
 /** Placeholder Access values for the pairing. Nothing checks them: the workbench runs here without the Access check. */
 const ACCESS_CLIENT_ID = "app-dev.access";
@@ -78,6 +82,7 @@ interface Options {
   seedIdeas: boolean;
   seedMemories: boolean;
   seedChat: boolean;
+  seedLongChat: boolean;
   seedLongMessage: boolean;
   /** The local time (HH:MM) of the daily generation of ideas; none means the stack never generates them on its own. */
   ideasAt?: string;
@@ -92,6 +97,7 @@ function parseArgs(args: string[]): Options {
     seedIdeas: false,
     seedMemories: false,
     seedChat: false,
+    seedLongChat: false,
     seedLongMessage: false,
   };
   for (let i = 0; i < args.length; i++) {
@@ -107,6 +113,8 @@ function parseArgs(args: string[]): Options {
       options.seedMemories = true;
     } else if (arg === "--seed-chat") {
       options.seedChat = true;
+    } else if (arg === "--seed-long-chat") {
+      options.seedLongChat = true;
     } else if (arg === "--seed-long-message") {
       options.seedLongMessage = true;
     } else if (arg === "--ideas-at" && value !== undefined) {
@@ -454,6 +462,35 @@ function seedChat(): void {
   log.info(`app-dev: appended ${SEED_CHAT_MESSAGES} messages to the event log`);
 }
 
+/** How many messages the long chat seed appends. */
+const SEED_LONG_CHAT_MESSAGES = 100;
+
+/**
+ * Appends 100 messages on the app channel, so the chat has many collapsed bubbles among short ones: the owner's and
+ * Alfred's alternate, and every fifth reply of Alfred's (#10, #20, ...) is 30 paragraphs long. Only when the log has no
+ * message yet.
+ */
+function seedLongChat(): void {
+  const events = sharedEventLog();
+  if (hasMessages(events)) {
+    log.info("app-dev: the event log already has messages, so the long chat is not seeded again");
+    return;
+  }
+  const now = Date.now();
+  for (let n = 1; n <= SEED_LONG_CHAT_MESSAGES; n++) {
+    const direction = n % 2 === 1 ? "in" : "out";
+    const text =
+      direction === "out" && n % 10 === 0
+        ? Array.from({ length: 30 }, (_, i) => `#${n} 第 ${i + 1} 段`).join("\n\n")
+        : `#${n} ${direction === "in" ? "我的消息" : "Alfred 的回复"}`;
+    const at = new Date(now - (SEED_LONG_CHAT_MESSAGES - n) * 60_000).toISOString();
+    if (!events.append("message.created", { id: `seed-${n}`, channel: "app", direction, text, files: [], at })) {
+      throw new Error(`message #${n} of the long chat seed was not appended`);
+    }
+  }
+  log.info(`app-dev: appended ${SEED_LONG_CHAT_MESSAGES} messages to the event log`);
+}
+
 /** Appends the owner's message, a short reply and a long reply of Alfred's, for the chat's collapsed bubble. */
 function seedLongMessage(): void {
   const events = sharedEventLog();
@@ -501,6 +538,7 @@ async function main(options: Options): Promise<void> {
     if (options.seedIdeas) seedIdeas();
     if (options.seedMemories) seedMemories();
     if (options.seedChat) seedChat();
+    if (options.seedLongChat) seedLongChat();
     if (options.seedLongMessage) seedLongMessage();
     // Wired as `run` wires them: the one history and document store (opened after the seed, so it finds the seeded
     // documents and imports nothing), the one task store behind the handler, which runs the tasks, the one idea store,
