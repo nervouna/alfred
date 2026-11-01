@@ -248,6 +248,24 @@ enum BubbleCollapse {
     }
 }
 
+/// Proposes its one subview its ideal height, and is itself as high as that or `limit`, whichever is less, with the subview
+/// at the top: whatever is below the limit is cut off by the mask. A nil limit never cuts.
+private struct CollapsingLayout: Layout {
+    let limit: CGFloat?
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard let subview = subviews.first else { return .zero }
+        let ideal = subview.sizeThatFits(ProposedViewSize(width: proposal.width, height: nil))
+        return CGSize(width: ideal.width, height: limit.map { min(ideal.height, $0) } ?? ideal.height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        guard let subview = subviews.first else { return }
+        let ideal = subview.sizeThatFits(ProposedViewSize(width: bounds.width, height: nil))
+        subview.place(at: bounds.origin, anchor: .topLeading, proposal: ProposedViewSize(width: bounds.width, height: ideal.height))
+    }
+}
+
 private struct Bubble: View {
     let text: String
     let isOwner: Bool
@@ -268,11 +286,13 @@ private struct Bubble: View {
         let isCollapsed = !isOwner && fullHeight > limit + 0.5
         HStack(spacing: 0) {
             if isOwner { Spacer(minLength: 48) }
-            MessageMarkdown(blocks: blocks, palette: palette)
-                // The text takes the height it needs whatever the frame below says, and is measured at that.
-                .fixedSize(horizontal: false, vertical: true)
-                .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { fullHeight = $0 }
-                .frame(height: isCollapsed ? limit : nil, alignment: .top)
+            // The layout gives the bubble its height, the text's own or the limit, in the same pass as the text is laid
+            // out: a bubble the list creates while the owner scrolls is never taller for a moment than it ends up.
+            CollapsingLayout(limit: isOwner ? nil : limit) {
+                MessageMarkdown(blocks: blocks, palette: palette)
+                    // Measured for the mask and the tap only: nothing is sized from it.
+                    .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { fullHeight = $0 }
+            }
                 .mask { fade(isCollapsed: isCollapsed, limit: limit) }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
