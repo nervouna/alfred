@@ -69,6 +69,9 @@ private struct MessageList: View {
     @State private var isNearEnd = true
     /// Whether the owner's finger is on the list, or the list coasts from a flick.
     @State private var isOwnerScrolling = false
+    /// When the bubbles of the reply Alfred is sending show, and the time the list shows them at.
+    @State private var pacing = ReplyPacing()
+    @State private var now = Date()
     private let bottom = "bottom"
 
     /// How often, and how many times, a tapped notification's row is scrolled to until it is seen.
@@ -80,10 +83,26 @@ private struct MessageList: View {
             ScrollView {
                 // Each row sets the gap above it: small inside a run of one sender's messages, as in Messages.
                 LazyVStack(spacing: 0) {
-                    let items = model.timeline.items
+                    let replies = ReplyKeys(model.timeline.messages)
+                    // Alfred's messages that are still being typed wait.
+                    let items = model.timeline.items.filter { item in
+                        guard case let .message(message) = item, let key = replies.keys[message.id] else { return true }
+                        return pacing.shows(key, at: now)
+                    }
                     let pending = model.timeline.pending
-                    let live = model.liveReplies
-                    let senders = items.map(sender) + pending.map { _ in RowSender.owner } + live.map { _ in RowSender.alfred }
+                    let isTyping = model.liveReplies.contains(where: \.isTyping) || pacing.isWaiting(at: now)
+                    // The parts of each draft that show, and its step when the typing bubble does not carry it.
+                    let live = model.liveReplies.compactMap { reply -> LiveReplyRow.Content? in
+                        let offset = replies.counts[reply.runId] ?? 0
+                        let parts = Array(reply.parts.enumerated().prefix {
+                            pacing.shows(ReplyPacing.Key(runId: reply.runId, index: offset + $0.offset), at: now)
+                        }.map(\.element))
+                        let step = isTyping ? nil : reply.stepText
+                        guard !parts.isEmpty || step != nil else { return nil }
+                        return LiveReplyRow.Content(runId: reply.runId, parts: parts, stepText: step)
+                    }
+                    let senders = items.map(sender) + pending.map { _ in RowSender.owner }
+                        + live.map { _ in RowSender.alfred } + (isTyping ? [RowSender.alfred] : [])
                     ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
                         Group {
                             switch item {
@@ -97,9 +116,14 @@ private struct MessageList: View {
                         PendingRow(model: model, pending: pending)
                             .padding(.top, RowSender.gap(at: items.count + index, in: senders))
                     }
-                    ForEach(Array(live.enumerated()), id: \.element.id) { index, reply in
-                        LiveReplyRow(reply: reply)
+                    ForEach(Array(live.enumerated()), id: \.element.runId) { index, content in
+                        LiveReplyRow(content: content)
                             .padding(.top, RowSender.gap(at: items.count + pending.count + index, in: senders))
+                    }
+                    if isTyping {
+                        TypingRow(steps: model.liveReplies.compactMap(\.stepText))
+                            .padding(.top, RowSender.gap(at: senders.count - 1, in: senders))
+                            .transition(.scale(scale: 0.8, anchor: .bottomLeading).combined(with: .opacity))
                     }
                     Color.clear
                         .frame(height: 1)
@@ -135,10 +159,16 @@ private struct MessageList: View {
             .onChange(of: contentSignature) { old, new in
                 // The owner sent a message: it is shown, and what comes after it is followed.
                 if new.pending > old.pending { follows = true }
-                // A tapped notification's row is being shown: new content must not take the list away from it.
-                guard model.revealRequest == nil else { return }
-                guard follows else { return }
-                proxy.scrollTo(bottom, anchor: .bottom)
+                followEnd(using: proxy)
+            }
+            // A waiting bubble of Alfred's came out.
+            .onChange(of: now) { followEnd(using: proxy) }
+            .onChange(of: contentSignature, initial: true) { pace() }
+            .task(id: pacing.nextShow(after: now)) {
+                guard let next = pacing.nextShow(after: now) else { return }
+                try? await Task.sleep(for: .seconds(max(0, next.timeIntervalSinceNow)))
+                guard !Task.isCancelled else { return }
+                withAnimation(.snappy(duration: 0.25)) { now = .now }
             }
             .task(id: model.revealRequest) {
                 await reveal(model.revealRequest, using: proxy)
@@ -169,6 +199,35 @@ private struct MessageList: View {
                 .animation(.snappy(duration: 0.25), value: follows)
             }
         }
+    }
+
+    /// Takes the list to its end, when it follows and no tapped notification's row is being shown.
+    private func followEnd(using proxy: ScrollViewProxy) {
+        guard model.revealRequest == nil, follows else { return }
+        proxy.scrollTo(bottom, anchor: .bottom)
+    }
+
+    /// Schedules the bubbles of Alfred's replies that are new: the stored messages of the runs it is typing in, then the
+    /// parts of their drafts, which come after them.
+    private func pace() {
+        let current = Date()
+        let replies = ReplyKeys(model.timeline.messages)
+        let live = model.liveReplies
+        for reply in live where reply.isTyping {
+            let count = replies.counts[reply.runId] ?? 0
+            pacing.follow(reply.runId, existing: (0..<count).map { ReplyPacing.Key(runId: reply.runId, index: $0) })
+        }
+        for message in model.timeline.messages {
+            guard let key = replies.keys[message.id] else { continue }
+            pacing.see(key, length: message.text.count, now: current)
+        }
+        for reply in live {
+            let offset = replies.counts[reply.runId] ?? 0
+            for (index, part) in reply.parts.enumerated() {
+                pacing.see(ReplyPacing.Key(runId: reply.runId, index: offset + index), length: part.count, now: current)
+            }
+        }
+        now = current
     }
 
     /// Shows the row a tapped notification names, and holds the request until the row has been seen. One scroll is not
@@ -238,6 +297,21 @@ private struct MessageList: View {
     private struct ContentSignature: Equatable {
         let pending: Int
         let rest: [Int]
+    }
+}
+
+/// The pacing key of each of Alfred's stored messages that a run sent, by message id, and how many each run has sent.
+private struct ReplyKeys {
+    var keys: [String: ReplyPacing.Key] = [:]
+    var counts: [String: Int] = [:]
+
+    init(_ messages: [Message]) {
+        for message in messages where message.direction == .outbound {
+            guard let runId = message.runId else { continue }
+            let index = counts[runId, default: 0]
+            keys[message.id] = ReplyPacing.Key(runId: runId, index: index)
+            counts[runId] = index + 1
+        }
     }
 }
 
@@ -543,38 +617,57 @@ private struct PendingRow: View {
     }
 }
 
-/// The reply a run is writing, as a person would send it: each part as a whole bubble once it is complete, then a
-/// typing bubble while Alfred writes, and the step it is on in secondary text under it.
+/// The parts of the reply a run is writing that have shown, each a whole bubble, as the messages will be once they land;
+/// and the step the run is on in secondary text under them, when the typing bubble does not carry it.
 private struct LiveReplyRow: View {
-    let reply: AppModel.LiveReply
+    struct Content {
+        let runId: String
+        let parts: [String]
+        let stepText: String?
+    }
+
+    let content: Content
 
     var body: some View {
         VStack(alignment: .leading, spacing: RowSender.groupGap) {
-            // One bubble per part, as the messages will be once they land.
-            ForEach(Array(reply.parts.enumerated()), id: \.offset) { index, part in
+            ForEach(Array(content.parts.enumerated()), id: \.offset) { index, part in
                 Bubble(text: part, isOwner: false, identifier: index == 0 ? "message.draft" : "message.draft.\(index)")
-                    .transition(Self.arrival)
+                    .transition(.scale(scale: 0.8, anchor: .bottomLeading).combined(with: .opacity))
             }
-            if reply.isTyping {
-                TypingBubble()
-                    .transition(Self.arrival)
-            }
-            if let step = reply.stepText {
-                Text(step)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                    .padding(.horizontal, 4)
-                    .accessibilityIdentifier("run.step")
+            if let step = content.stepText {
+                StepText(text: step)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .animation(.snappy(duration: 0.25), value: reply.parts.count)
-        .animation(.snappy(duration: 0.25), value: reply.isTyping)
+        .animation(.snappy(duration: 0.25), value: content.parts.count)
     }
+}
 
-    /// A bubble pops up from its corner by the edge, as in Messages.
-    private static let arrival = AnyTransition.scale(scale: 0.8, anchor: .bottomLeading).combined(with: .opacity)
+/// Alfred typing, at the end of the list, with the step its run is on under it.
+private struct TypingRow: View {
+    let steps: [String]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: RowSender.groupGap) {
+            TypingBubble()
+            ForEach(steps, id: \.self) { StepText(text: $0) }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// The step a run is on, in secondary text.
+private struct StepText: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .lineLimit(2)
+            .padding(.horizontal, 4)
+            .accessibilityIdentifier("run.step")
+    }
 }
 
 /// Three dots that pulse in turn in one of Alfred's bubbles: Alfred is writing. Still when the owner reduces motion.
