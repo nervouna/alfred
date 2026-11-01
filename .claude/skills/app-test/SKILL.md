@@ -71,6 +71,7 @@ env -u CLAUDE_CODE_ENTRYPOINT ALFRED_STATE_DIR="$S/state" ALFRED_WORKSPACE="$S/w
 | `ShareUITests` | plain | haiku | needs a photo (below) |
 | `DocumentsUITests` | `--seed-documents` | none | |
 | `AnnotationsUITests` | `--seed-documents` | its second test, a few cents | |
+| `CollapsedMessageUITests` | `--seed-long-message` | none | needs a log with no other message: a new stack every run |
 | `MemoryUITests` | `--seed-memories` | none | renames, adds and deletes memories: a new stack every run; tests run in name order, and the last three change memories behind the app's back through the workbench API |
 | `IdeasUITests` | `--seed-ideas` | none | uses up the seeded ideas: a new stack every run; tests run in name order |
 

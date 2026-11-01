@@ -3,7 +3,7 @@
 // device. It opens the workspace's history and the document store as `run` does, so deliveries become documents and the
 // app's revisions and undos run. It prints the pairing to paste into the app, then every event as it happens: [event] for
 // stored ones, [live] for message deltas and steps. Ctrl-C or SIGTERM stops everything; it exits 0.
-// usage: node scripts/app-dev.ts [--port <port>] [--model <sonnet|opus|haiku>] [--repair] [--seed-documents] [--seed-ideas] [--seed-memories] [--seed-chat] [--ideas-at <HH:MM>]
+// usage: node scripts/app-dev.ts [--port <port>] [--model <sonnet|opus|haiku>] [--repair] [--seed-documents] [--seed-ideas] [--seed-memories] [--seed-chat] [--seed-long-message] [--ideas-at <HH:MM>]
 //   --port            the workbench's loopback port (default 8787)
 //   --model           the model the owner's messages run on (default haiku)
 //   --repair          revoke the simulator's device and pair a new one. A device's token is shown once and
@@ -20,6 +20,9 @@
 //   --seed-chat       before Alfred starts, append 300 messages to the event log for the app's chat: they alternate between the
 //                     owner and Alfred, run from one to eight lines, and are numbered #1 to #300, so the newest is easy to tell.
 //                     A log that already has a message is left alone.
+//   --seed-long-message  before Alfred starts, append three messages to the event log for the app's chat: the owner's, a short
+//                     reply of Alfred's, and a long one (a paragraph "第 1 段" to "第 24 段", then "最后一行"), which the chat
+//                     collapses. A log that already has a message is left alone.
 //   --ideas-at        start the daily generation of ideas at this local time (HH:MM). Without it the stack never generates
 //                     ideas on its own, so it spends nothing on them; the app's button (idea.generate) works either way and
 //                     calls the model (Sonnet, at most $0.20 a generation).
@@ -62,7 +65,7 @@ import { createLocalHandler } from "./local-stack.ts";
 
 const REQUIRED = ["ALFRED_STATE_DIR", "ALFRED_WORKSPACE", "ALFRED_ANTHROPIC_API_KEY"];
 const USAGE =
-  "usage: node scripts/app-dev.ts [--port <port>] [--model <sonnet|opus|haiku>] [--repair] [--seed-documents] [--seed-ideas] [--seed-memories] [--seed-chat] [--ideas-at <HH:MM>]";
+  "usage: node scripts/app-dev.ts [--port <port>] [--model <sonnet|opus|haiku>] [--repair] [--seed-documents] [--seed-ideas] [--seed-memories] [--seed-chat] [--seed-long-message] [--ideas-at <HH:MM>]";
 const DEVICE_NAME = "simulator";
 /** Placeholder Access values for the pairing. Nothing checks them: the workbench runs here without the Access check. */
 const ACCESS_CLIENT_ID = "app-dev.access";
@@ -75,6 +78,7 @@ interface Options {
   seedIdeas: boolean;
   seedMemories: boolean;
   seedChat: boolean;
+  seedLongMessage: boolean;
   /** The local time (HH:MM) of the daily generation of ideas; none means the stack never generates them on its own. */
   ideasAt?: string;
 }
@@ -88,6 +92,7 @@ function parseArgs(args: string[]): Options {
     seedIdeas: false,
     seedMemories: false,
     seedChat: false,
+    seedLongMessage: false,
   };
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -102,6 +107,8 @@ function parseArgs(args: string[]): Options {
       options.seedMemories = true;
     } else if (arg === "--seed-chat") {
       options.seedChat = true;
+    } else if (arg === "--seed-long-message") {
+      options.seedLongMessage = true;
     } else if (arg === "--ideas-at" && value !== undefined) {
       let time: string | undefined;
       try {
@@ -447,6 +454,29 @@ function seedChat(): void {
   log.info(`app-dev: appended ${SEED_CHAT_MESSAGES} messages to the event log`);
 }
 
+/** Appends the owner's message, a short reply and a long reply of Alfred's, for the chat's collapsed bubble. */
+function seedLongMessage(): void {
+  const events = sharedEventLog();
+  if (hasMessages(events)) {
+    log.info("app-dev: the event log already has messages, so the long message is not seeded again");
+    return;
+  }
+  const now = Date.now();
+  const paragraphs = Array.from({ length: 24 }, (_, i) => `第 ${i + 1} 段`);
+  const messages: { id: string; direction: "in" | "out"; text: string }[] = [
+    { id: "seed-long-1", direction: "in", text: "给我一份长回复" },
+    { id: "seed-long-2", direction: "out", text: "短回复" },
+    { id: "seed-long-3", direction: "out", text: [...paragraphs, "最后一行"].join("\n\n") },
+  ];
+  messages.forEach((message, i) => {
+    const at = new Date(now - (messages.length - i) * 60_000).toISOString();
+    if (!events.append("message.created", { ...message, channel: "app", files: [], at })) {
+      throw new Error(`message ${message.id} of the long message seed was not appended`);
+    }
+  });
+  log.info("app-dev: appended the long message seed to the event log");
+}
+
 async function main(options: Options): Promise<void> {
   const server = `http://127.0.0.1:${options.port}`;
   // Set here whatever the shell says, so the workbench forwards to this stack's command API and to no other.
@@ -471,6 +501,7 @@ async function main(options: Options): Promise<void> {
     if (options.seedIdeas) seedIdeas();
     if (options.seedMemories) seedMemories();
     if (options.seedChat) seedChat();
+    if (options.seedLongMessage) seedLongMessage();
     // Wired as `run` wires them: the one history and document store (opened after the seed, so it finds the seeded
     // documents and imports nothing), the one task store behind the handler, which runs the tasks, the one idea store,
     // and the commands of both stores.
