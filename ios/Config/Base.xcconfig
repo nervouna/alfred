@@ -3,5 +3,10 @@
 ALFRED_BUNDLE_ID = com.example.alfred
 DEVELOPMENT_TEAM =
 
+// The build number and the commit the build was made from. The phone-install skill passes the commit count and the
+// short hash on the command line, which wins over these defaults.
+CURRENT_PROJECT_VERSION = 1
+ALFRED_COMMIT = dev
+
 // Later assignments win, so the owner's copy overrides the defaults above.
 #include? "Signing.xcconfig"

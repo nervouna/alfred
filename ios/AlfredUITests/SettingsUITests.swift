@@ -72,8 +72,8 @@ final class SettingsUITests: XCTestCase {
         XCTAssertTrue(server.contains("127.0.0.1"), "the server's host is not shown: \(server)")
         let device = try reading("settings.device", in: app).text
         XCTAssertGreaterThan(device.count, "设备, ".count, "the device id is not shown: \(device)")
-        let version = try reading("settings.version", in: app).text
-        XCTAssertTrue(version.hasPrefix("版本, "), "the version is not shown: \(version)")
+        let version = try reading("settings.version", in: app).text.trimmingCharacters(in: .whitespaces)
+        XCTAssertNotNil(version.range(of: #"^版本 \S+ \(\S+ · \S+\)$"#, options: .regularExpression), "the version line is not 版本 <version> (<build> · <commit>): \(version)")
         snapshot("1b-bottom")
     }
 

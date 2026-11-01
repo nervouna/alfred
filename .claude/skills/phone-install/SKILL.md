@@ -28,10 +28,12 @@ T=$(mktemp -d) && git worktree add --detach "$T/alfred" origin/main
 cp ios/Config/Signing.xcconfig "$T/alfred/ios/Config/"
 xcodegen generate --spec "$T/alfred/ios/project.yml"
 xcodebuild -project "$T/alfred/ios/Alfred.xcodeproj" -scheme Alfred -configuration Release -destination 'generic/platform=iOS' \
-  -derivedDataPath "$T/build" -allowProvisioningUpdates build
+  -derivedDataPath "$T/build" -allowProvisioningUpdates \
+  CURRENT_PROJECT_VERSION=$(git -C "$T/alfred" rev-list --count HEAD) ALFRED_COMMIT=$(git -C "$T/alfred" rev-parse --short HEAD) build
 ```
 
 - Git ignores `ios/Config/Signing.xcconfig`, so a worktree has none: copy it from the main checkout. If the main checkout has none either, copy `Signing.example.xcconfig` to it and fill in the team id and the bundle id from memory. `Base.xcconfig` includes it for every configuration.
+- The build number is the commit count and `ALFRED_COMMIT` the short hash, so every build on the phone can be told apart; Settings shows them as `版本 1.0 (412 · c86573c)`. The worktree is detached at `origin/main` with the full history, which the count needs. Without the two settings the build says `1` and `dev`.
 - The project is generated, not tracked: `xcodegen generate` runs in the worktree.
 - Run the build in the background or with a long timeout. It needs no simulator, so it does not go through `simq`.
 
@@ -50,7 +52,7 @@ xcrun devicectl device install app --device "$PHONE" "$T/build/Build/Products/Re
 git worktree remove "$T/alfred" && rm -rf "$T"
 ```
 
-Delete untracked files in the worktree first if `remove` refuses. Tell the owner which commit is now on the phone (`git rev-parse --short origin/main` at build time).
+Delete untracked files in the worktree first if `remove` refuses. Tell the owner the build number with the commit that is now on the phone, as Settings shows it (`412 · c86573c`: the count and `git rev-parse --short origin/main` at build time).
 
 ## Timing on the phone
 

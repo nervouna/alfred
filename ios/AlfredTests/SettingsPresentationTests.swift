@@ -147,17 +147,22 @@ final class SettingsPresentationTests: XCTestCase {
         XCTAssertEqual(SettingsPresentation.serverHost(try XCTUnwrap(URL(string: "https://alfred.example.com/base/path"))), "alfred.example.com")
     }
 
-    func testTheVersionIsTheShortVersionAndTheBuild() {
-        XCTAssertEqual(SettingsPresentation.version(["CFBundleShortVersionString": "1.2", "CFBundleVersion": "34"]), "1.2 (34)")
-        XCTAssertEqual(SettingsPresentation.version(["CFBundleShortVersionString": "1.2"]), "1.2")
-        XCTAssertEqual(SettingsPresentation.version(["CFBundleVersion": "34"]), "(34)")
-        XCTAssertEqual(SettingsPresentation.version([:]), "—")
-        XCTAssertEqual(SettingsPresentation.version(nil), "—")
+    func testTheVersionLineHasTheVersionTheBuildAndTheCommit() {
+        let info = ["CFBundleShortVersionString": "1.2", "CFBundleVersion": "412", "AlfredCommit": "c86573c"]
+        XCTAssertEqual(SettingsPresentation.version(info), "版本 1.2 (412 · c86573c)")
+        XCTAssertEqual(SettingsPresentation.version(info.merging(["AlfredCommit": "dev"]) { $1 }), "版本 1.2 (412 · dev)")
+        XCTAssertEqual(SettingsPresentation.version(["CFBundleShortVersionString": "1.2", "CFBundleVersion": "34"]), "版本 1.2 (34)")
+        XCTAssertEqual(SettingsPresentation.version(["CFBundleShortVersionString": "1.2", "AlfredCommit": "c86573c"]), "版本 1.2 (c86573c)")
+        XCTAssertEqual(SettingsPresentation.version(["CFBundleShortVersionString": "1.2"]), "版本 1.2")
+        XCTAssertEqual(SettingsPresentation.version(["CFBundleVersion": "34", "AlfredCommit": "c86573c"]), "版本 (34 · c86573c)")
+        XCTAssertEqual(SettingsPresentation.version([:]), "版本 —")
+        XCTAssertEqual(SettingsPresentation.version(nil), "版本 —")
     }
 
-    func testTheBuiltAppHasAVersionAndABuild() {
+    func testTheBuiltAppHasAVersionABuildAndACommit() {
         let text = SettingsPresentation.version(Bundle.main.infoDictionary)
-        XCTAssertTrue(text.contains("("), "the bundle has no CFBundleVersion: \(text)")
+        XCTAssertTrue(text.contains(" · "), "the bundle has no CFBundleVersion or AlfredCommit: \(text)")
+        XCTAssertFalse(text.contains("$("), "a build setting was not substituted: \(text)")
     }
 
     // MARK: Failures

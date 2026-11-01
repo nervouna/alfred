@@ -145,15 +145,18 @@ enum SettingsPresentation {
         server.host(percentEncoded: false) ?? server.absoluteString
     }
 
-    /// The app's version and build: `1.0 (3)`. Either is left out when the bundle does not have it.
+    /// The line at the bottom of the tab: `版本 1.0 (412 · c86573c)`, from the short version, the build number and the
+    /// commit the build was made from. A part the bundle does not have is left out.
     static func version(_ info: [String: Any]?) -> String {
         let version = info?["CFBundleShortVersionString"] as? String
-        let build = info?["CFBundleVersion"] as? String
-        switch (version, build) {
-        case let (version?, build?): return "\(version) (\(build))"
-        case let (version?, nil): return version
-        case let (nil, build?): return "(\(build))"
-        case (nil, nil): return "—"
+        let built = [info?["CFBundleVersion"] as? String, info?["AlfredCommit"] as? String]
+            .compactMap { $0 }
+            .joined(separator: " · ")
+        switch (version, built.isEmpty) {
+        case let (version?, false): return "版本 \(version) (\(built))"
+        case let (version?, true): return "版本 \(version)"
+        case (nil, false): return "版本 (\(built))"
+        case (nil, true): return "版本 —"
         }
     }
 

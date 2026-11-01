@@ -4,6 +4,8 @@
 <dict>
 	<key>AlfredAPNsEnvironment</key>
 	<string>development</string>
+	<key>AlfredCommit</key>
+	<string>$(ALFRED_COMMIT)</string>
 	<key>AlfredKeychainAccessGroup</key>
 	<string>$(AppIdentifierPrefix)$(ALFRED_BUNDLE_ID)</string>
 	<key>CFBundleDevelopmentRegion</key>
@@ -23,7 +25,7 @@
 	<key>CFBundleShortVersionString</key>
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>
