@@ -271,6 +271,50 @@ final class ChatUITests: XCTestCase {
         return (response as? HTTPURLResponse)?.statusCode
     }
 
+    /// With the Pinyin keyboard, a candidate picked from the candidate bar commits the marked text. Sending right
+    /// after that must leave the composer empty: the text view used to take the sent text back. It needs no model
+    /// (`/new` is answered by Alfred).
+    @MainActor
+    func testSendingAfterPickingACandidateClearsTheComposer() throws {
+        guard let pairing = ProcessInfo.processInfo.environment["ALFRED_PAIRING"], !pairing.isEmpty else {
+            throw XCTSkip("ALFRED_PAIRING is not set: start scripts/app-dev.ts and pass its pairing to run this test")
+        }
+        continueAfterFailure = false
+
+        let app = XCUIApplication()
+        app.launchArguments += ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN", "-AppleKeyboards", "(zh_Hans-Pinyin)"]
+        app.launch()
+        unpairIfPaired(app)
+        UIPasteboard.general.string = pairing
+        app.buttons["粘贴配对信息"].tap()
+        XCTAssertTrue(composer(in: app).waitForExistence(timeout: patience), "the chat did not appear\n\(app.debugDescription)")
+        XCTAssertTrue(app.staticTexts["连接中…"].waitForNonExistence(timeout: patience), "the stream never connected")
+        waitUntilStable { messageIds(in: app).count }
+
+        // The slash is committed at once; the letters after it are marked text until a candidate is picked.
+        let field = composer(in: app)
+        field.tap()
+        field.typeText("/")
+        for letter in ["n", "e", "w"] { app.keys[letter].tap() }
+        let candidate = app.descendants(matching: .any).matching(NSPredicate(format: "label == 'new'")).matching(NSPredicate(format: "elementType != %d", XCUIElement.ElementType.textView.rawValue)).firstMatch
+        XCTAssertTrue(candidate.waitForExistence(timeout: patience), "no candidate new in the candidate bar\n\(app.debugDescription)")
+        candidate.tap()
+
+        let known = messageIds(in: app)
+        app.buttons["发送"].tap()
+        let sent = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'message.in.' AND NOT (identifier IN %@) AND label == '/new'", known)).firstMatch
+        XCTAssertTrue(sent.waitForExistence(timeout: patience), "the message was not sent\n\(app.debugDescription)")
+
+        // The input method commits asynchronously, so look a while.
+        let deadline = Date().addingTimeInterval(3)
+        while Date() < deadline {
+            let now = (field.value as? String) ?? ""
+            XCTAssertTrue(now.isEmpty || now == "消息", "the composer holds \"\(now)\" after the send")
+            usleep(250_000)
+        }
+        XCTAssertTrue(app.keyboards.firstMatch.exists, "the keyboard went away after the send")
+    }
+
     /// A pairing whose device token the server does not know leaves the app on the pairing screen, with the reason.
     @MainActor
     func testARefusedDeviceStaysOnThePairingScreen() throws {
