@@ -108,6 +108,7 @@ TEST_RUNNER_ALFRED_PAIRING="$PAIRING" simq run --device "$UDID" -- \
 - Known first-run flakes: rerun once on the same simulator before blaming a change. They are the share tests and `SettingsUITests.test1TheTabIsTheFifthAndShowsEveryRow` on a new simulator, and `ChatUITests.testPairThenChat` as the first test against a fresh `app-dev`.
 - `BUILD INTERRUPTED` or exit 143 while another session's `xcodebuild` runs is not your failure: leave the other run alone and rerun on your own simulator.
 - When a test fails while the `app-dev` log shows the answer was sent, find which side lacks it with a probe (`ios/AlfredUITests/CLAUDE.md`).
+- `ChatScrollUITests.testSendingFromTheComposerGoesToTheEnd` failing on `no reply to the message sent` against a stack that has run for an hour or more: `/status` has grown past ten lines and collapsed into a Button, and the test looks for a staticText. Rerun on a fresh stack.
 
 ## Screenshots
 
@@ -115,3 +116,4 @@ TEST_RUNNER_ALFRED_PAIRING="$PAIRING" simq run --device "$UDID" -- \
 - For a state the app has to be driven into, add a temporary UI test that drives there and waits, take the screenshot meanwhile, and do not commit the test. Driving the simulator by hand needs the owner's grant.
 - For a bare `xcrun simctl io "$UDID" screenshot <file>` after installing a differently built app, pair through a short UI test first (`ChatHeaderUITests/testTheMenuStillOffersUnpairing`): until then the notification prompt covers the chat. The first keyboard shows a "Speed up your typing" tip that needs a tap on Continue.
 - Check bar and edge-effect changes in dark too (`XCUIDevice.shared.appearance` did not switch it). Judge flicker frame by frame from `xcrun simctl io "$UDID" recordVideo --codec=h264 <file>`, stopped with SIGINT.
+- To see whether a list moves smoothly, record the run and slit-scan it: `ffmpeg -i rec.mp4 -vf "fps=30,crop=12:1650:150:0,tile=360x1,scale=1440:-1" -frames:v 1 slit.png` gives 12 s with time across and position down; a vertical step is a jump. A new simulator shows the notification prompt after the first message, so a test that records taps `XCUIApplication(bundleIdentifier: "com.apple.springboard").buttons["Allow"]` first.
