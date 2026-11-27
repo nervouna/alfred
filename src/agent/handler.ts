@@ -79,7 +79,7 @@ import { describeError, log } from "../log.ts";
 import { RunRecorder, findRun, markLostRuns, newRunId, pruneRunFiles, runIdCandidates, stepDetail } from "../runs.ts";
 import type { RunRecord, RunStatus } from "../runs.ts";
 import type { SettingsStore } from "../settings/store.ts";
-import { writeSpendMirror } from "../spend.ts";
+import { externalSpendOfMonth, writeSpendMirror } from "../spend.ts";
 import { WORKSPACE_DIR } from "../store.ts";
 import type { TaskStore } from "../tasks/store.ts";
 import {
@@ -110,7 +110,7 @@ import type { ModelKey } from "./config.ts";
 import { BackgroundRuns } from "./background.ts";
 import type { QueuedBrief } from "./background.ts";
 import { ResponseLedger, subagentTranscript, unitPrices } from "./cost.ts";
-import { externalOffer, externalServersForRun, externalToolGuard } from "./external.ts";
+import { externalOffer, externalServersForRun, externalSpendHooks, externalToolGuard } from "./external.ts";
 import { resolveInside, workspaceGuard } from "./guard.ts";
 import { TaskInput, answeredBy } from "./input.ts";
 import { EXTRACT_MODEL, MEMORY_LOCK_FILE, MemoryScanScheduler, SCAN_TIMEOUT_MS, failedScanCost, scanTranscripts, transcriptDirs } from "./memory-scan.ts";
@@ -129,7 +129,7 @@ import type { AgentUserState, RevisionDelivery, RunRef, TaskDelivery } from "./s
 import { PROTECTED_PATHS, SubagentTracker, agentFailureHook, subagentGuard, subagentRulesHook, unattendedAdmission } from "./subagents.ts";
 import type { AgentAdmission, LiveSubagent } from "./subagents.ts";
 import { TASK_TOOL_NAMES, taskToolDefinitions } from "./task-tools.ts";
-import { ALFRED_TOOL_NAMES, REVISION_TOOL_NAMES, createAlfredTools } from "./tools.ts";
+import { ALFRED_TOOL_NAMES, REVISION_TOOL_NAMES, SPEND_TOOL_NAMES, createAlfredTools } from "./tools.ts";
 
 const PRUNE_INTERVAL_MS = 24 * 3_600_000;
 /** On shutdown, how long running tasks get to stop and write their records. */
@@ -360,6 +360,16 @@ export interface AgentHandler extends Intake {
 
 function usd(n: number): string {
   return `$${n.toFixed(n < 1 ? 3 : 2)}`;
+}
+
+/** This month's external spend for /status; a log that cannot be read counts as none, since a status must not fail on it. */
+function externalMonth(): number {
+  try {
+    return externalSpendOfMonth(localMonth());
+  } catch (err) {
+    log.warn(`reading the external spend log failed: ${describeError(err)}`);
+    return 0;
+  }
 }
 
 function toolSummary(counts: Map<string, number>): string {
@@ -617,7 +627,13 @@ export function agentOptions(params: {
   // The owner's external MCP servers, read now: an edit of the file applies to the next run.
   const external = externalServersForRun();
   const offer = externalOffer(external, Boolean(unattended));
-  const postToolUseFailure = admission ? [disclosure, agentFailureHook(admission)] : [disclosure];
+  // Calls of priced external tools count in the run they belong to; a run with no record of its own (a bare query) gets a fresh id.
+  const runId = params.run?.id ?? crypto.randomUUID();
+  const spend = externalSpendHooks(external, runId);
+  postToolUse.push(spend.postToolUse);
+  const postToolUseFailure = [disclosure, ...(admission ? [agentFailureHook(admission)] : []), spend.postToolUseFailure];
+  // spend_query is the chat's: it needs the owner to ask (like the task tools), and no unattended run has one.
+  const spendQuery = Boolean(params.ask) && !unattended;
   return {
     model: MODELS[params.model],
     cwd: WORKSPACE_DIR,
@@ -626,7 +642,7 @@ export function agentOptions(params: {
     settings: AGENT_SETTINGS,
     systemPrompt: systemPrompt(new Date(), { rootRules: rules.loadRoot(), memory, subagents, questions: Boolean(params.ask), tasks: Boolean(taskTools) }),
     tools,
-    allowedTools: [...builtin, ...ALFRED_TOOL_NAMES, ...(replying ? REVISION_TOOL_NAMES : []), ...(taskTools ? TASK_TOOL_NAMES : []), ...offer.allowedTools],
+    allowedTools: [...builtin, ...ALFRED_TOOL_NAMES, ...(replying ? REVISION_TOOL_NAMES : []), ...(taskTools ? TASK_TOOL_NAMES : []), ...(spendQuery ? SPEND_TOOL_NAMES : []), ...offer.allowedTools],
     plugins: skillPlugins(),
     skills: "all",
     agents: subagents ? subagentDefinitions() : undefined,
@@ -635,13 +651,13 @@ export function agentOptions(params: {
     disallowedTools: ["Agent(fork)"],
     // Not a way to grant anything: the CLI enables AskUserQuestion only when a canUseTool is set (see questions.ts).
     canUseTool: params.ask ? denyPermissionPrompts : undefined,
-    mcpServers: { alfred: createAlfredTools(params.out, params.abortController?.signal, params.run, taskTools, params.documents, replying), ...offer.mcpServers },
+    mcpServers: { alfred: createAlfredTools(params.out, params.abortController?.signal, params.run, taskTools, params.documents, replying, spendQuery), ...offer.mcpServers },
     // A server's headers travel in the initialize request, never on the command line.
     mcpServersDelivery: "initialize",
     hooks: {
       PreToolUse: [
         workspaceGuard(WORKSPACE_DIR, unattended ? { readOnly: PROTECTED_PATHS } : {}),
-        externalToolGuard(external, { unattended: Boolean(unattended) }),
+        externalToolGuard(external, { unattended: Boolean(unattended), runId }),
         subagentGuard(WORKSPACE_DIR, admission),
         ...(params.ask ? [questionHook(params.ask)] : []),
       ],
@@ -2026,6 +2042,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
         if (user.previousSession) lines.push(`上一个会话：${user.previousSession.sessionId.slice(0, 8)}，发 /resume 接回`);
         lines.push(
           `累计花费：${usd(user.totalCostUsd)}，今天 ${usd(spentToday(user))} / 上限 ${usd(dailyBudget())}，本月 ${usd(spentMonth(user))} / 上限 ${usd(monthlyBudget())}`,
+          `本月外部花费（估算，不计入上限）：${usd(externalMonth())}`,
           rt.run ? `运行：${rt.run.recorder.id}，进行中 ${humanAge(now - rt.run.startedAt)}，${runSummary(rt.run, now)}` : "运行：空闲",
         );
         for (const b of rt.run?.background.running ?? []) {

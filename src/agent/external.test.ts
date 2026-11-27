@@ -196,3 +196,119 @@ test("a header value is read from the environment and appears neither in a log l
   assert.ok(!spawned.args.includes("--mcp-config"), "the servers are not sent on the command line");
   assert.ok(!lines.join("\n").includes(SECRET), "no header value in the log");
 });
+
+// Spend: the price of a call and the most calls a run may make.
+
+const { EXTERNAL_SPEND_LOG, readExternalSpend } = await import("../spend.ts");
+const { externalSpendHooks } = await import("./external.ts");
+
+const priced = { ...entry, subagents: ["read", "post"], spend: { post: { priceUsd: 0.04, maxPerRun: 2 }, search: { priceUsd: 0 }, read: { maxPerRun: 1 } } };
+const pricedServers = () => parseExternalServers({ ext: priced });
+
+afterEach(() => fs.rmSync(EXTERNAL_SPEND_LOG, { force: true }));
+
+function preInput(tool_name: string, extra: object = {}) {
+  return { hook_event_name: "PreToolUse", tool_name, tool_input: {}, tool_use_id: "t", session_id: "s", transcript_path: "", cwd: "", ...extra };
+}
+
+function pre(runId: string, tool_name: string, extra: object = {}) {
+  const hook = externalToolGuard(pricedServers(), { unattended: false, runId }).hooks[0]!;
+  return hook(preInput(tool_name, extra) as never, "t", { signal: new AbortController().signal });
+}
+
+const denied = (out: unknown): boolean => (out as { hookSpecificOutput?: { permissionDecision?: string } }).hookSpecificOutput?.permissionDecision === "deny";
+
+function post(hooks: ReturnType<typeof externalSpendHooks>, tool_name: string, ok: boolean, response: unknown = "done") {
+  const input = ok
+    ? { hook_event_name: "PostToolUse", tool_name, tool_input: {}, tool_response: response, tool_use_id: "t" }
+    : { hook_event_name: "PostToolUseFailure", tool_name, tool_input: {}, error: "boom", tool_use_id: "t" };
+  const matcher = ok ? hooks.postToolUse : hooks.postToolUseFailure;
+  return matcher.hooks[0]!({ session_id: "s", transcript_path: "", cwd: "", ...input } as never, "t", { signal: new AbortController().signal });
+}
+
+test("price and limit are read per tool, and a value that does not fit stops the load naming the entry", () => {
+  assert.deepEqual(pricedServers()[0]?.spend, { post: { priceUsd: 0.04, maxPerRun: 2 }, search: { priceUsd: 0 }, read: { maxPerRun: 1 } });
+  assert.deepEqual(servers()[0]?.spend, {}, "a file without spend prices nothing");
+  const cases: Array<[unknown, RegExp]> = [
+    [{ post: { priceUsd: -1 } }, /"ext": spend priceUsd for post must be a number of at least 0/],
+    [{ post: { priceUsd: "0.04" } }, /"ext": spend priceUsd for post/],
+    [{ post: { maxPerRun: 0 } }, /"ext": spend maxPerRun for post must be a whole number of at least 1/],
+    [{ post: { maxPerRun: 1.5 } }, /"ext": spend maxPerRun for post/],
+    [{ delete: { priceUsd: 1 } }, /"ext": spend names delete, which tools does not offer/],
+    [{ post: { price: 1 } }, /"ext": spend for post has an unknown field price/],
+    [{ post: 5 }, /"ext": spend for post must be an object/],
+    [[], /"ext": spend must be an object/],
+  ];
+  for (const [spend, message] of cases) {
+    writeFile({ ext: { ...entry, spend } });
+    assert.throws(() => loadExternalServers(), message);
+  }
+});
+
+test("a call that succeeded is appended with the tool's price, and a failed call leaves no entry", async () => {
+  const hooks = externalSpendHooks(pricedServers(), "run-a");
+  await post(hooks, "mcp__ext__post", false);
+  assert.deepEqual(readExternalSpend(), [], "a failed call");
+  await post(hooks, "mcp__ext__post", true, { isError: true, content: [] });
+  assert.deepEqual(readExternalSpend(), [], "a result that reports an error");
+  await post(hooks, "mcp__ext__post", true);
+  await post(hooks, "mcp__ext__post", true, [{ type: "text", text: "ok" }]);
+  const [first, second, ...rest] = readExternalSpend();
+  assert.equal(rest.length, 0);
+  assert.deepEqual({ ...first, at: "" }, { at: "", runId: "run-a", server: "ext", tool: "post", units: 1, usd: 0.04, estimated: true });
+  assert.ok(second && !Number.isNaN(Date.parse(second.at)));
+  // No price, no entry; a price of 0 is still a call on record; a tool of another server or Alfred's own is none of this hook's business.
+  await post(hooks, "mcp__ext__read", true);
+  await post(hooks, "mcp__ext__search", true);
+  await post(hooks, "mcp__ext__unknown", true);
+  await post(hooks, "mcp__alfred__deliver", true);
+  assert.deepEqual(readExternalSpend().map((e) => [e.tool, e.usd]), [["post", 0.04], ["post", 0.04], ["search", 0]]);
+});
+
+test("maxPerRun denies the next call of the run with a reason that says not to retry, in a subagent too", async () => {
+  assert.ok(!denied(await pre("run-b", "mcp__ext__post")));
+  assert.ok(!denied(await pre("run-b", "mcp__ext__post", { agent_id: "a1", agent_type: "researcher" })), "a subagent's call counts in the run's count");
+  const third = await pre("run-b", "mcp__ext__post");
+  assert.ok(denied(third));
+  const reason = (third as { hookSpecificOutput: { permissionDecisionReason: string } }).hookSpecificOutput.permissionDecisionReason;
+  assert.match(reason, /limit of 2 calls in this run/);
+  assert.match(reason, /Do not retry/);
+  assert.ok(denied(await pre("run-b", "mcp__ext__post", { agent_id: "a1" })), "the subagent is stopped as well");
+  assert.ok(!denied(await pre("run-c", "mcp__ext__post")), "another run has its own count");
+  assert.ok(!denied(await pre("run-b", "mcp__ext__search")), "a tool without a limit is not stopped");
+});
+
+test("a call that failed is given back to the run's count, and a call the guard denies for other reasons is not counted", async () => {
+  const hooks = externalSpendHooks(pricedServers(), "run-d");
+  assert.ok(!denied(await pre("run-d", "mcp__ext__read")));
+  assert.ok(denied(await pre("run-d", "mcp__ext__read")), "limit of 1 reached");
+  await post(hooks, "mcp__ext__read", false);
+  assert.ok(!denied(await pre("run-d", "mcp__ext__read")), "the failed call was given back");
+  const unattended = externalToolGuard(pricedServers(), { unattended: true, runId: "run-e" }).hooks[0]!;
+  const input = preInput("mcp__ext__post");
+  assert.ok(denied(await unattended(input as never, "t", { signal: new AbortController().signal })), "not offered to unattended runs");
+  assert.ok(!denied(await pre("run-e", "mcp__ext__post")), "and that denial used none of the run's calls");
+});
+
+test("agentOptions wires the guard's limit and the spend hooks to the run's record", async () => {
+  writeFile({ ext: priced });
+  prepareWorkspace();
+  const { RunRecorder } = await import("../runs.ts");
+  const recorder = new RunRecorder({ kind: "task", title: "spend wiring" });
+  const options = agentOptions({ out: appOutbound(), model: "sonnet", run: recorder });
+  const fire = async (event: "PreToolUse" | "PostToolUse" | "PostToolUseFailure", input: object) => {
+    const results: unknown[] = [];
+    for (const matcher of options.hooks?.[event] ?? []) {
+      for (const hook of matcher.hooks) results.push(await hook({ hook_event_name: event, session_id: "s", transcript_path: "", cwd: "", ...input } as never, "t", { signal: new AbortController().signal }));
+    }
+    return results;
+  };
+  const call = { tool_name: "mcp__ext__post", tool_input: {}, tool_use_id: "t" };
+  assert.ok(!(await fire("PreToolUse", call)).some(denied));
+  await fire("PostToolUse", { ...call, tool_response: "ok" });
+  assert.ok(!(await fire("PreToolUse", call)).some(denied));
+  await fire("PostToolUse", { ...call, tool_response: "ok" });
+  assert.ok((await fire("PreToolUse", call)).some(denied), "the third call of the run is denied");
+  assert.deepEqual(readExternalSpend().map((e) => e.runId), [recorder.id, recorder.id]);
+  recorder.finish("done");
+});

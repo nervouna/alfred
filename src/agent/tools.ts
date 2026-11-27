@@ -13,13 +13,17 @@ import type { ReplyRefusal } from "../documents/store.ts";
 import { humanSize } from "../files.ts";
 import { describeError, log } from "../log.ts";
 import { PDF_SOURCE_EXTS, isRendererMissing, renderPdf } from "../pdf.ts";
+import { readRunLog } from "../runs.ts";
 import type { RunRecorder } from "../runs.ts";
+import { SPEND_GROUPS, formatSpendReport, querySpend, readExternalSpend, spendPeriod } from "../spend.ts";
 import { WORKSPACE_DIR } from "../store.ts";
 import { resolveInside } from "./guard.ts";
 import { ASPECT_RATIOS, MAX_IMAGES_PER_CALL, MAX_IMAGES_PER_TASK, createImageGenerator } from "./image.ts";
 import { QUESTION_HOOK_TIMEOUT_SECONDS } from "./questions.ts";
 
 export const ALFRED_TOOL_NAMES = ["mcp__alfred__deliver", "mcp__alfred__move_file", "mcp__alfred__render_pdf", "mcp__alfred__generate_image"];
+/** The tool only a chat run has: read-only, and denied to subagents (subagents.ts). */
+export const SPEND_TOOL_NAMES = ["mcp__alfred__spend_query"];
 /** The tools only a revision run has, beside ALFRED_TOOL_NAMES. */
 export const REVISION_TOOL_NAMES = ["mcp__alfred__reply_annotation"];
 
@@ -58,7 +62,7 @@ export function anySignal(run: AbortSignal | undefined, call: AbortSignal | unde
  * the document store: with it, a file delivered becomes a document, and a file moved takes its document along.
  * `revision` is set for a revision run, whose `run` is its record: it also gets reply_annotation.
  */
-export function alfredToolDefinitions(out: Outbound, signal?: AbortSignal, run?: RunRecorder, documents?: Documents, revision = false) {
+export function alfredToolDefinitions(out: Outbound, signal?: AbortSignal, run?: RunRecorder, documents?: Documents, revision = false, chat = false) {
   const deliver = tool(
     "deliver",
     "Deliver a file from the workspace to the owner in the app. A delivered file becomes a document the owner can annotate in the app. Revise a delivered document in place, under the same path, since every version is kept: change the file and deliver it again, and do not write a copy under a new name. The app opens Markdown, PDF, images, video, text files and HTML reports; an HTML report opens in a sandbox where inline scripts and SVG charts work, with no network access.",
@@ -197,7 +201,32 @@ export function alfredToolDefinitions(out: Outbound, signal?: AbortSignal, run?:
 
   const tools: SdkMcpToolDefinition<any>[] = [deliver, moveFile, renderPdfTool, generateImage];
   if (revision && documents && run) tools.push(replyAnnotationTool(documents, run, signal));
+  if (chat) tools.push(spendQueryTool());
   return tools;
+}
+
+/** spend_query: what Alfred spent, from its own records; read-only, and the two kinds of spend are never added together. */
+function spendQueryTool() {
+  return tool(
+    "spend_query",
+    "Answer questions about Alfred's own spend from its records, read-only. Pick a period (a day, a month, or two dates) and one grouping: day, kind (chat, task, scan, revision, ideas), model, role (subagent roles), task or server. The answer has two separate figures: run records (Anthropic usage, what the daily and monthly caps count) and external tools (the owner's price estimates for tools outside Anthropic, not in the caps). Never add them up as one number without saying so. Chat runs of the current moment are not in the records until they end.",
+    {
+      period: z.enum(["day", "month"]).optional().describe("A day or a month; default day. Ignored when from and to are given"),
+      date: z.string().optional().describe("The day (YYYY-MM-DD) or month (YYYY-MM); default today or this month, in the owner's time zone"),
+      from: z.string().optional().describe("First day of a range, YYYY-MM-DD; give it with to"),
+      to: z.string().optional().describe("Last day of a range, YYYY-MM-DD, included"),
+      group_by: z.enum(SPEND_GROUPS).describe("How to group the figures"),
+    },
+    async ({ period, date, from, to, group_by }) => {
+      const days = spendPeriod({ period, date, from, to });
+      if (typeof days === "string") return fail(days);
+      try {
+        return ok(formatSpendReport(querySpend({ ...days, groupBy: group_by }, readRunLog(), readExternalSpend())));
+      } catch (err) {
+        return fail(`Spend records could not be read: ${describeError(err)}`);
+      }
+    },
+  );
 }
 
 /** What the agent is told when the store refuses a reply. */
@@ -233,7 +262,8 @@ function replyAnnotationTool({ store }: Documents, run: RunRecorder, signal?: Ab
 /**
  * Alfred's tools as the in-process MCP server the agent's query gets (see alfredToolDefinitions). `asking` are tools
  * that wait for the owner's answer to a question (the task tools): the server waits for them as long as a question
- * does, not for the SDK's default of about a day. `revision` is set for a revision run (see alfredToolDefinitions).
+ * does, not for the SDK's default of about a day. `revision` is set for a revision run, and `chat` for a chat run, which also gets
+ * spend_query (see alfredToolDefinitions).
  */
 export function createAlfredTools(
   out: Outbound,
@@ -242,11 +272,12 @@ export function createAlfredTools(
   asking: SdkMcpToolDefinition<any>[] = [],
   documents?: Documents,
   revision = false,
+  chat = false,
 ) {
   return createSdkMcpServer({
     name: "alfred",
     version: "0.1.0",
-    tools: [...alfredToolDefinitions(out, signal, run, documents, revision), ...asking],
+    tools: [...alfredToolDefinitions(out, signal, run, documents, revision, chat), ...asking],
     alwaysLoad: true,
     ...(asking.length ? { timeout: QUESTION_HOOK_TIMEOUT_SECONDS * 1000 } : {}),
   });

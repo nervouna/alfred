@@ -6,8 +6,9 @@ import { after, test } from "node:test";
 
 import type { HookInput, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 
-import { SUBAGENT_RULES } from "./config.ts";
+import { SUBAGENT_RULES, subagentDefinitions } from "./config.ts";
 import { TASK_TOOL_NAMES } from "./task-tools.ts";
+import { SPEND_TOOL_NAMES } from "./tools.ts";
 import { SubagentTracker, checkAgentCall, checkSubagentTool, checkSubagentWrite, subagentGuard, subagentRulesHook } from "./subagents.ts";
 
 const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "alfred-subagents-")));
@@ -118,6 +119,17 @@ test("subagentGuard denies the task tools to every subagent, with a reason, and 
     }
   }
   for (const [tool, input] of Object.entries(inputs)) assert.equal(await decide(preToolUse(tool, input)), undefined, `the main thread calls ${tool}`);
+});
+
+test("subagentGuard denies spend_query to every subagent, with a reason, and lets the main thread call it", async () => {
+  assert.deepEqual(SPEND_TOOL_NAMES, ["mcp__alfred__spend_query"]);
+  assert.match(checkSubagentTool("mcp__alfred__spend_query") ?? "", /Subagents may not query Alfred's spend/);
+  for (const type of ["researcher", "general-purpose", "alfred:scout"]) {
+    const out = await decide(preToolUse("mcp__alfred__spend_query", { group_by: "day" }, { id: "agent-1", type }));
+    assert.equal(out && "permissionDecision" in out ? out.permissionDecision : undefined, "deny", type);
+  }
+  assert.equal(await decide(preToolUse("mcp__alfred__spend_query", { group_by: "day" })), undefined);
+  for (const role of Object.values(subagentDefinitions())) assert.ok(role.disallowedTools?.includes("mcp__alfred__spend_query"));
 });
 
 test("subagentGuard lets Agent calls of any type and model through, from the main thread and from subagents", async () => {

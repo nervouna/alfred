@@ -237,7 +237,7 @@ function response(id: string, model: string, usage: object, outputTokens: number
   ];
 }
 
-/** Input 100, 1000 cache read and a 1-hour cache write of 200: 100 + 5×50 + 0.1×1000 + 2×200 = 850 input-token equivalents with 50 output tokens. */
+/** Input 100, 1000 cache read and a 1-hour cache write of 200: 100 + 5×50 + 0.05×1000 (Sonnet 5.5 reads at half the usual weight) + 2×200 = 800 input-token equivalents with 50 output tokens. */
 const FIRST = { input_tokens: 100, output_tokens: 1, cache_read_input_tokens: 1000, cache_creation_input_tokens: 200, cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 200 } };
 /** Input 10 and a 5-minute cache write of 1000: 10 + 5×20 + 1.25×1000 = 1360 input-token equivalents with 20 output tokens, and two searches at 0.01. */
 const SECOND = { input_tokens: 10, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 1000, cache_creation: { ephemeral_5m_input_tokens: 1000, ephemeral_1h_input_tokens: 0 } };
@@ -384,6 +384,24 @@ test("a command is answered at once, during a run too", async () => {
 
   hold.release("好了");
   await until("the run to finish", () => t.finished());
+});
+
+test("/status gives this month's external spend on a line of its own, apart from the caps' figures", async () => {
+  const { EXTERNAL_SPEND_LOG, appendExternalSpend } = await import("../spend.ts");
+  fs.rmSync(EXTERNAL_SPEND_LOG, { force: true });
+  const t = setup({ turn: async () => "好" });
+  await t.send("/status");
+  const lineOf = (text: string) => text.split("\n").find((l) => l.startsWith("本月外部花费"));
+  assert.equal(lineOf(t.app.texts.at(-1) ?? ""), "本月外部花费（估算，不计入上限）：$0.000");
+
+  const call = { runId: "r1", server: "img", tool: "generate", units: 1, usd: 0.04, estimated: true as const };
+  appendExternalSpend({ ...call, at: new Date().toISOString() });
+  appendExternalSpend({ ...call, at: new Date(2020, 0, 15).toISOString() });
+  await t.send("/status");
+  const text = t.app.texts.at(-1) ?? "";
+  assert.equal(lineOf(text), "本月外部花费（估算，不计入上限）：$0.040", "only this month's calls");
+  assert.match(text, /^累计花费：.*上限/m, "the caps' line is unchanged and does not hold it");
+  fs.rmSync(EXTERNAL_SPEND_LOG, { force: true });
 });
 
 test("a message during a run steers it: it is acknowledged, and the same run answers it", async () => {
@@ -1771,12 +1789,12 @@ test("a stopped run keeps an estimate of the responses no result reported, marke
   await until("the run to stop", () => t.statusOf(runId) === "stopped");
 
   const run = readRunFile(runId);
-  assert.ok(Math.abs((run?.costUsd ?? 0) - (0.00085 + 0.02136)) < 1e-9, `the estimate of both responses, got ${run?.costUsd}`);
+  assert.ok(Math.abs((run?.costUsd ?? 0) - (0.0008 + 0.02136)) < 1e-9, `the estimate of both responses, got ${run?.costUsd}`);
   assert.equal(run?.costEstimated, true);
   assert.deepEqual(Object.keys(run?.modelCostUsd ?? {}), [SONNET]);
   const owner = JSON.parse(fs.readFileSync(stateFile, "utf8")).owner;
-  assert.ok(Math.abs(owner.spendDayUsd - (0.001 + 0.00085 + 0.02136)) < 1e-9, "the day's spend counts it");
-  assert.ok(Math.abs(owner.totalCostUsd - (0.001 + 0.00085 + 0.02136)) < 1e-9, "and the owner's total");
+  assert.ok(Math.abs(owner.spendDayUsd - (0.001 + 0.0008 + 0.02136)) < 1e-9, "the day's spend counts it");
+  assert.ok(Math.abs(owner.totalCostUsd - (0.001 + 0.0008 + 0.02136)) < 1e-9, "and the owner's total");
 });
 
 test("a run whose last turn has a result records the result's cost, with no estimate on top of the responses it reported", async () => {
@@ -1853,7 +1871,7 @@ test("the unit prices a result sets are kept in the state file, so a restarted h
   await second.send("/stop");
   const runId = second.taskId();
   await until("the run to stop", () => second.statusOf(runId) === "stopped");
-  assert.ok(Math.abs((readRunFile(runId)?.costUsd ?? 0) - 0.00085) < 1e-9);
+  assert.ok(Math.abs((readRunFile(runId)?.costUsd ?? 0) - 0.0008) < 1e-9);
   assert.equal(readRunFile(runId)?.costEstimated, true);
 });
 

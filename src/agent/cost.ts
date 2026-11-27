@@ -14,10 +14,17 @@ import path from "node:path";
 import type { ModelUsage, SDKPartialAssistantMessage } from "@anthropic-ai/claude-agent-sdk";
 
 /**
- * Anthropic's prices relative to the input-token price: output 5×, cache reads 0.1×, cache writes 1.25× with the 5-minute TTL
- * and 2× with the 1-hour TTL.
+ * Anthropic's prices relative to the input-token price: output 5×, cache writes 1.25× with the 5-minute TTL and 2× with the
+ * 1-hour TTL. Cache reads are 0.1×, except on Opus 5.5 and Sonnet 5.5, where they are 0.05× (see cacheReadWeight).
  */
-const WEIGHTS = { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25, cacheWrite1h: 2 };
+const WEIGHTS = { input: 1, output: 5, cacheWrite: 1.25, cacheWrite1h: 2 };
+/** The models whose cache reads cost half the usual weight: Opus 5.5 and Sonnet 5.5, under any id that names them (dated, with a context suffix, on a cloud provider). */
+const HALF_PRICE_CACHE_READ = /(?:^|[^a-z])(?:opus|sonnet)-5-5(?!\d)/;
+
+/** What a cache read costs relative to the input-token price on `model`: 0.05× on Opus 5.5 and Sonnet 5.5, else 0.1× (Haiku 5.5 and any model not known). */
+export function cacheReadWeight(model: string): number {
+  return HALF_PRICE_CACHE_READ.test(model.toLowerCase()) ? 0.05 : 0.1;
+}
 /** Server-side web search, per request. */
 const WEB_SEARCH_USD = 0.01;
 const MAX_LINE_BYTES = 1024 * 1024;
@@ -33,19 +40,19 @@ export interface Usage {
   webSearches: number;
 }
 
-function weighted(u: Omit<Usage, "webSearches">): number {
+function weighted(u: Omit<Usage, "webSearches">, model: string): number {
   return (
     u.input * WEIGHTS.input +
     u.output * WEIGHTS.output +
-    u.cacheRead * WEIGHTS.cacheRead +
+    u.cacheRead * cacheReadWeight(model) +
     u.cacheWrite * WEIGHTS.cacheWrite +
     u.cacheWrite1h * WEIGHTS.cacheWrite1h
   );
 }
 
 /** USD of a usage at `price` per input-token equivalent, web searches included. */
-function priceUsage(u: Usage, price: number): number {
-  return weighted(u) * price + u.webSearches * WEB_SEARCH_USD;
+function priceUsage(u: Usage, model: string, price: number): number {
+  return weighted(u, model) * price + u.webSearches * WEB_SEARCH_USD;
 }
 
 /** USD per input-token equivalent of each model, from a result's modelUsage. */
@@ -53,7 +60,7 @@ export function unitPrices(modelUsage: Record<string, ModelUsage>): Record<strin
   const prices: Record<string, number> = {};
   for (const [model, u] of Object.entries(modelUsage)) {
     // Every agent call caches for an hour (#125) and modelUsage does not split the cache writes by TTL, so they are weighted at the 1-hour rate.
-    const tokens = weighted({ input: u.inputTokens, output: u.outputTokens, cacheRead: u.cacheReadInputTokens, cacheWrite: 0, cacheWrite1h: u.cacheCreationInputTokens });
+    const tokens = weighted({ input: u.inputTokens, output: u.outputTokens, cacheRead: u.cacheReadInputTokens, cacheWrite: 0, cacheWrite1h: u.cacheCreationInputTokens }, model);
     if (tokens > 0) prices[model] = Math.max(0, u.costUSD - u.webSearchRequests * WEB_SEARCH_USD) / tokens;
   }
   return prices;
@@ -151,7 +158,7 @@ export class TranscriptUsage {
       if (model.startsWith("<")) continue;
       const price = prices[model];
       if (price === undefined) return undefined;
-      usd += priceUsage(usage, price);
+      usd += priceUsage(usage, model, price);
     }
     return usd;
   }
@@ -208,7 +215,7 @@ export class ResponseLedger {
         unpriced.add(model);
         continue;
       }
-      const spent = priceUsage(usage, price);
+      const spent = priceUsage(usage, model, price);
       usd += spent;
       byModel[model] = (byModel[model] ?? 0) + spent;
     }
