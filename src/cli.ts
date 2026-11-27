@@ -6,6 +6,7 @@ import path from "node:path";
 import qrcode from "qrcode-terminal";
 
 import { checkMemoryScanSettings } from "./agent/config.ts";
+import { loadExternalServers } from "./agent/external.ts";
 import { resolveInside } from "./agent/guard.ts";
 import { createAgentHandler } from "./agent/handler.ts";
 import { memoryCommands } from "./agent/memory-edit.ts";
@@ -84,6 +85,9 @@ async function cmdRun(args: string[]): Promise<void> {
   // The only settings store: it is the only writer of settings.json and of the copy the workbench reads. A malformed
   // environment variable fails here, before anything is opened.
   const settings = new SettingsStore();
+  // The owner's external MCP servers: a malformed mcp-servers.json fails here too, naming the entry.
+  const externalServers = loadExternalServers();
+  if (externalServers.length) log.info(`external MCP servers: ${externalServers.map((s) => s.name).join(", ")}`);
   const startedAt = new Date();
   // The one history of the workspace and the one document store, shared by the handler and its tools, and by whatever
   // else works on documents. Opened first: it commits what changed while Alfred was down, and imports earlier deliveries.
