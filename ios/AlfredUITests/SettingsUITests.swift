@@ -372,16 +372,27 @@ final class SettingsUITests: XCTestCase {
         XCTAssertTrue(wait(timeout: patience) {
             let frame = target.frame
             defer { previous = frame }
-            if frame.minY < top {
-                app.swipeDown()
-                return false
-            }
-            if frame.maxY > bottom {
-                app.swipeUp()
+            if frame.minY < top || frame.maxY > bottom {
+                // A swipe carries a row the whole way across the gap between the bars and back, so the loop would
+                // swing for ever: drag by the distance to the middle of the gap instead.
+                drag(by: (top + bottom - frame.height) / 2 - frame.minY, between: top, and: bottom, in: app)
                 return false
             }
             return frame == previous
         }, "the element did not come to rest between the bars\n\(app.debugDescription)")
+    }
+
+    /// Drags the list down by `points` (up when negative) along a line between the bars and holds it there, so that it
+    /// stops where the finger does. The drag loses its first points to the touch slop: the caller looks again.
+    @MainActor
+    private func drag(by points: CGFloat, between top: CGFloat, and bottom: CGFloat, in app: XCUIApplication) {
+        let window = app.windows.firstMatch.frame
+        let reach = min(abs(points), (bottom - top) * 0.8)
+        let middle = (top + bottom) / 2
+        let direction: CGFloat = points < 0 ? -1 : 1
+        let from = CGVector(dx: 0.05, dy: (middle - direction * reach / 2) / window.height)
+        let start = app.windows.firstMatch.coordinate(withNormalizedOffset: from)
+        start.press(forDuration: 0.1, thenDragTo: start.withOffset(CGVector(dx: 0, dy: direction * reach)), withVelocity: .slow, thenHoldForDuration: 0.5)
     }
 
     /// Taps `target` once it is hittable and has kept the same frame over three looks in a row: a menu or a dialog that
