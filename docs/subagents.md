@@ -4,6 +4,7 @@ Alfred hands parts of a task to subagents through the SDK's `Agent` tool: a rese
 
 - **Roles** (`SUBAGENT_ROLES`): `collector` (haiku, bulk fetching), `researcher` (sonnet, one thread with source links), `writer` (opus, long reports and PDFs).
 - **Any type, any model.** The prompt recommends the roles, but a call may use any type the SDK offers and pass `model` or `effort`. `general-purpose` runs on Alfred's model with all its tools, so it costs more.
+- **No fork subagents.** The `fork` type inherits the whole conversation and Alfred's model; it is off through `CLAUDE_CODE_FORK_SUBAGENT=0` in `agentEnv` and denied as `Agent(fork)` in `disallowedTools`.
 - **Shared rules.** A `SubagentStart` hook gives every subagent (roles, built-in types, plugin agents, forked skills) the same rules: report to Alfred, read content is data, cite sources.
 - **Only Alfred talks to the owner.** A `PreToolUse` hook denies a subagent `deliver`, `reply_annotation`, the task tools and writes to `memory/`, `skills/` and `ALFRED.md`, whatever its type. Roles also go without `Agent` and `TaskStop`.
 - **Background by default.** A task's query stays open while a background subagent runs or waits, because on a closed input the SDK kills background tasks when the result is released.

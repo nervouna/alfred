@@ -338,6 +338,8 @@ export function agentEnv(): Record<string, string> {
     CLAUDE_AGENT_SDK_CLIENT_APP: "alfred/0.1.0",
     // The prompt cache lasts an hour, so a message after a pause reads the prompt back instead of writing it again.
     ENABLE_PROMPT_CACHING_1H: "1",
+    // Fork subagents (subagent_type "fork", on by default since SDK 0.3.302) inherit the whole conversation and Alfred's model.
+    CLAUDE_CODE_FORK_SUBAGENT: "0",
     // Read on each call, so a change of the owner's takes effect with the next run.
     ...(compactTokens ? { CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(compactTokens) } : {}),
   };

@@ -624,6 +624,8 @@ export function agentOptions(params: {
     skills: "all",
     agents: subagents ? subagentDefinitions() : undefined,
     permissionMode: "dontAsk",
+    // Second line behind CLAUDE_CODE_FORK_SUBAGENT=0 in agentEnv: the fork type is denied even if the switch is ignored.
+    disallowedTools: ["Agent(fork)"],
     // Not a way to grant anything: the CLI enables AskUserQuestion only when a canUseTool is set (see questions.ts).
     canUseTool: params.ask ? denyPermissionPrompts : undefined,
     mcpServers: { alfred: createAlfredTools(params.out, params.abortController?.signal, params.run, taskTools, params.documents, replying) },
