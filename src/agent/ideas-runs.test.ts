@@ -38,7 +38,7 @@ const { IdeaListSchema, IdeaGenerationAcceptedSchema } = await import("../api/sc
 const { MEMORY_LOCK_FILE } = await import("./memory-scan.ts");
 const { MemoryLock } = await import("./memory.ts");
 const { MODELS, IDEAS_BUDGET_USD } = await import("./config.ts");
-const { localDate } = await import("../files.ts");
+const { localDate, localMonth } = await import("../files.ts");
 
 const cleanups: (() => Promise<void>)[] = [];
 after(async () => {
@@ -771,4 +771,17 @@ test("the idea commands hand idea.generate to the handler, and the answers are t
   await until("the call", () => hold.waiting === 1);
   hold.release(answers([]));
   await until("the run to end", () => t.ended(first.body.runId));
+});
+
+test("over the monthly cap a generation is refused with 409, and nothing is recorded", async () => {
+  const s = stack();
+  fs.mkdirSync(path.dirname(s.stateFile), { recursive: true });
+  fs.writeFileSync(s.stateFile, JSON.stringify({ owner: { model: "sonnet", sessionCostUsd: 0, totalCostUsd: 250, spendMonth: localMonth(), spendMonthUsd: 250 } }));
+  const t = start(s);
+
+  assert.deepEqual(t.handler.generateIdeas("requested"), { ok: false, status: 409, error: "this month's spend cap is reached" });
+  assert.deepEqual(t.ideasRuns(), []);
+  assert.equal(s.ideas.generatingRunId(), undefined);
+  await sleep(50);
+  assert.equal(t.agent.ideasCalls.length, 0);
 });

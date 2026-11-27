@@ -23,6 +23,8 @@ const { DOCUMENTS_FILE, DocumentStore } = await import("../documents/store.ts");
 const { VERSIONS_GIT_DIR, Versions } = await import("../documents/versions.ts");
 const { IDEAS_FILE } = await import("../ideas/store.ts");
 const { SETTINGS_MIRROR_FILE } = await import("../settings/store.ts");
+const { SPEND_MIRROR_FILE } = await import("../spend.ts");
+const { localDate } = await import("../files.ts");
 const { DocumentDetailSchema, DocumentListSchema, ErrorResponseSchema, IdeaListSchema, MemoryListSchema, RulesSchema, RunDetailSchema, RunListSchema, SettingsDetailSchema, TaskDetailSchema, TaskListSchema } = await import("../api/schema.ts");
 const { AccessVerifier } = await import("./access.ts");
 const { DeviceStore } = await import("./devices.ts");
@@ -869,7 +871,7 @@ function spendRun(kind: RunRecord["kind"], costUsd: number, ago = 0): RunRecord 
   return { ...taskRun(undefined, `${kind} run`, Date.now() - ago), kind, costUsd, startedAt: at, endedAt: at };
 }
 
-async function settingsDetail(): Promise<{ settings: Settings; spentTodayUsd: number }> {
+async function settingsDetail(): Promise<{ settings: Settings; spentTodayUsd: number; spentMonthUsd?: number }> {
   const res = await fetch(`${open}/api/settings`, { headers: bearer(paired.token) });
   assert.equal(res.status, 200);
   assert.equal(res.headers.get("content-type"), "application/json; charset=utf-8");
@@ -877,12 +879,12 @@ async function settingsDetail(): Promise<{ settings: Settings; spentTodayUsd: nu
   return SettingsDetailSchema.parse(await res.json());
 }
 
-test("GET /api/settings gives the settings of the mirror as the store wrote them, with today's spend", async () => {
+test("GET /api/settings gives the settings of the mirror as the store wrote them, with today's and the month's spend", async () => {
   writeMirror();
   const body = await settingsDetail();
   assert.deepEqual(body.settings, settingsMirror);
   assert.ok(body.spentTodayUsd >= 0);
-  assert.equal(body.spentTodayUsd, Math.round(body.spentTodayUsd * 1e9) / 1e9, "a plain number of USD");
+  assert.ok((body.spentMonthUsd ?? -1) >= 0);
 });
 
 test("GET /api/settings follows the mirror: a rewritten file is the next answer, with values beyond the write ranges", async () => {
@@ -892,24 +894,50 @@ test("GET /api/settings follows the mirror: a rewritten file is the next answer,
   assert.deepEqual((await settingsDetail()).settings, changed);
 });
 
-test("GET /api/settings counts the runs that started today in the owner's day, by the overview page's rule: subagents leave out", async () => {
-  writeMirror();
-  const before = (await settingsDetail()).spentTodayUsd;
-  for (const run of [
-    spendRun("task", 1.25),
-    spendRun("scan", 0.5),
-    spendRun("ideas", 0.25),
-    spendRun("subagent", 7), // its cost is part of the run that started it
-    spendRun("task", 3, 36 * 3_600_000), // yesterday, or the day before
-  ]) {
-    appendRunLog(run);
-  }
-  const after = (await settingsDetail()).spentTodayUsd;
-  assert.equal(after - before, 2, "1.25 + 0.5 + 0.25");
+/** Writes the spend mirror as Alfred does; `mirror` is the file's content, or its text. */
+function writeSpendMirror(mirror: unknown): void {
+  fs.mkdirSync(path.dirname(SPEND_MIRROR_FILE), { recursive: true });
+  fs.writeFileSync(SPEND_MIRROR_FILE, typeof mirror === "string" ? mirror : JSON.stringify(mirror));
+}
 
-  // The overview page shows the same sum.
-  const page = await (await fetch(`${open}/`)).text();
-  assert.ok(page.includes(`今天 $${after.toFixed(2)}`) || page.includes(`今天 $${after.toFixed(3)}`), page.match(/今天[^<]*/)?.[0]);
+test("GET /api/settings answers the day's and the month's spend from Alfred's spend mirror, not from the run records", async () => {
+  writeMirror();
+  const day = localDate();
+  writeSpendMirror({ day, dayUsd: 1.5, month: day.slice(0, 7), monthUsd: 12.25 });
+  appendRunLog(spendRun("task", 40)); // a run record the caps never counted
+  const body = await settingsDetail();
+  assert.equal(body.spentTodayUsd, 1.5);
+  assert.equal(body.spentMonthUsd, 12.25);
+});
+
+test("GET /api/settings counts a mirror of another day or month as 0, and no mirror as no spend yet", async () => {
+  writeMirror();
+  const day = localDate();
+  const spent = async () => {
+    const body = await settingsDetail();
+    return [body.spentTodayUsd, body.spentMonthUsd];
+  };
+  writeSpendMirror({ day: "2020-01-31", dayUsd: 9, month: day.slice(0, 7), monthUsd: 20 });
+  assert.deepEqual(await spent(), [0, 20], "another day of this month");
+  writeSpendMirror({ day: "2020-01-31", dayUsd: 9, month: "2020-01", monthUsd: 20 });
+  assert.deepEqual(await spent(), [0, 0]);
+  fs.rmSync(SPEND_MIRROR_FILE, { force: true });
+  assert.deepEqual(await spent(), [0, 0]);
+});
+
+test("GET /api/settings answers 503 when the spend mirror cannot be read or does not fit", async () => {
+  const lines = mock.method(console, "error", () => {});
+  try {
+    writeMirror();
+    for (const body of ["{ not json", "[]", JSON.stringify({ day: "2026-11-27", dayUsd: -1, month: "2026-11", monthUsd: 0 }), JSON.stringify({ day: "2026-11-27" })]) {
+      writeSpendMirror(body);
+      await assertApiError(await fetch(`${open}/api/settings`, { headers: bearer(paired.token) }), 503, body);
+    }
+  } finally {
+    lines.mock.restore();
+    fs.rmSync(SPEND_MIRROR_FILE, { force: true });
+  }
+  assert.ok(lines.mock.calls.some((call) => String(call.arguments[0]).includes(SPEND_MIRROR_FILE)), "the log names the file");
 });
 
 test("GET /api/settings needs a device token, and refuses other methods with 405", async () => {

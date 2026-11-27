@@ -80,6 +80,9 @@ export interface AgentUserState {
   /** Spend on `spendDay` (YYYY-MM-DD in the owner's time zone), for the daily cap. */
   spendDay?: string;
   spendDayUsd?: number;
+  /** Spend in `spendMonth` (YYYY-MM in the owner's time zone), for the monthly cap. */
+  spendMonth?: string;
+  spendMonthUsd?: number;
   /** USD per input-token equivalent of each model, from the last results' modelUsage (see cost.ts): what a run that ended without its last result is estimated at. */
   unitPrices?: Record<string, number>;
 }

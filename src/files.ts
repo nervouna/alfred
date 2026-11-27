@@ -11,6 +11,11 @@ export function localDate(d = new Date()): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
+/** The local month, YYYY-MM. */
+export function localMonth(d = new Date()): string {
+  return localDate(d).slice(0, 7);
+}
+
 export function localTime(d = new Date()): string {
   return `${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
 }
