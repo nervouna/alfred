@@ -109,6 +109,7 @@ import type { ModelKey } from "./config.ts";
 import { BackgroundRuns } from "./background.ts";
 import type { QueuedBrief } from "./background.ts";
 import { ResponseLedger, subagentTranscript, unitPrices } from "./cost.ts";
+import { externalOffer, externalServersForRun, externalToolGuard } from "./external.ts";
 import { resolveInside, workspaceGuard } from "./guard.ts";
 import { TaskInput, answeredBy } from "./input.ts";
 import { EXTRACT_MODEL, MEMORY_LOCK_FILE, MemoryScanScheduler, SCAN_TIMEOUT_MS, scanTranscripts, transcriptDirs } from "./memory-scan.ts";
@@ -610,6 +611,9 @@ export function agentOptions(params: {
   const admission = unattended ? unattendedAdmission : params.admission;
   // The task tools confirm with the owner through `ask`, and only the chat has an owner to ask: an unattended run never gets them.
   const taskTools = params.tasks && params.ask && !unattended ? taskToolDefinitions(params.tasks, params.ask, params.abortController?.signal) : undefined;
+  // The owner's external MCP servers, read now: an edit of the file applies to the next run.
+  const external = externalServersForRun();
+  const offer = externalOffer(external, Boolean(unattended));
   const postToolUseFailure = admission ? [disclosure, agentFailureHook(admission)] : [disclosure];
   return {
     model: MODELS[params.model],
@@ -619,7 +623,7 @@ export function agentOptions(params: {
     settings: AGENT_SETTINGS,
     systemPrompt: systemPrompt(new Date(), { rootRules: rules.loadRoot(), memory, subagents, questions: Boolean(params.ask), tasks: Boolean(taskTools) }),
     tools,
-    allowedTools: [...builtin, ...ALFRED_TOOL_NAMES, ...(replying ? REVISION_TOOL_NAMES : []), ...(taskTools ? TASK_TOOL_NAMES : [])],
+    allowedTools: [...builtin, ...ALFRED_TOOL_NAMES, ...(replying ? REVISION_TOOL_NAMES : []), ...(taskTools ? TASK_TOOL_NAMES : []), ...offer.allowedTools],
     plugins: skillPlugins(),
     skills: "all",
     agents: subagents ? subagentDefinitions() : undefined,
@@ -628,10 +632,13 @@ export function agentOptions(params: {
     disallowedTools: ["Agent(fork)"],
     // Not a way to grant anything: the CLI enables AskUserQuestion only when a canUseTool is set (see questions.ts).
     canUseTool: params.ask ? denyPermissionPrompts : undefined,
-    mcpServers: { alfred: createAlfredTools(params.out, params.abortController?.signal, params.run, taskTools, params.documents, replying) },
+    mcpServers: { alfred: createAlfredTools(params.out, params.abortController?.signal, params.run, taskTools, params.documents, replying), ...offer.mcpServers },
+    // A server's headers travel in the initialize request, never on the command line.
+    mcpServersDelivery: "initialize",
     hooks: {
       PreToolUse: [
         workspaceGuard(WORKSPACE_DIR, unattended ? { readOnly: PROTECTED_PATHS } : {}),
+        externalToolGuard(external, { unattended: Boolean(unattended) }),
         subagentGuard(WORKSPACE_DIR, admission),
         ...(params.ask ? [questionHook(params.ask)] : []),
       ],
