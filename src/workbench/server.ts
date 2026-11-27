@@ -25,6 +25,7 @@ import { apiSocketPath } from "../api/server.ts";
 import { isTrashedPath, readDocumentFile } from "../documents/store.ts";
 import { VERSIONS_GIT_DIR, Versions } from "../documents/versions.ts";
 import { describeError, log } from "../log.ts";
+import { readSpend } from "../spend.ts";
 import type { AccessVerifier } from "./access.ts";
 import {
   allRuns,
@@ -37,7 +38,6 @@ import {
   readTranscript,
   runDetail,
   spendByDay,
-  spendOnDay,
   tailLog,
 } from "./data.ts";
 import { DeviceStore } from "./devices.ts";
@@ -394,9 +394,9 @@ function ideaListReply(): Response {
 }
 
 /**
- * GET /api/settings: the effective settings Alfred mirrors for the workbench, and what the owner has spent today, by the
- * overview page's rule for "today" (the runs that started on the local day, subagents left out). The mirror is missing
- * until Alfred first starts; one that cannot be read or does not fit is answered the same way, 503, and logged.
+ * GET /api/settings: the effective settings Alfred mirrors for the workbench, and what the owner has spent today and this
+ * month, as the caps count it (the spend mirror, src/spend.ts). The settings mirror is missing until Alfred first starts;
+ * one that cannot be read or does not fit is answered the same way, 503, and logged, as is a spend mirror that does not fit.
  */
 function settingsReply(): Response {
   let settings: SettingsDetail["settings"];
@@ -406,7 +406,14 @@ function settingsReply(): Response {
     log.error(`GET /api/settings: ${describeError(err)}`);
     return jsonError(503, "The settings are not available yet.");
   }
-  const body: SettingsDetail = { settings, spentTodayUsd: spendOnDay(allRuns(), localDay(new Date().toISOString())) };
+  let spent: ReturnType<typeof readSpend>;
+  try {
+    spent = readSpend(localDay(new Date().toISOString()));
+  } catch (err) {
+    log.error(`GET /api/settings: ${describeError(err)}`);
+    return jsonError(503, "The spend is not available.");
+  }
+  const body: SettingsDetail = { settings, ...spent };
   return jsonReply(200, body);
 }
 

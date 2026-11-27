@@ -261,7 +261,7 @@ const TaskOriginSchema = z.enum(["manual", "chat", "idea"]);
 /** A run a task missed or skipped: when it was due, and why it did not run. */
 export const TaskSkipSchema = z.object({
   at: IsoTimestampSchema,
-  reason: z.enum(["missed", "daily-cap"]),
+  reason: z.enum(["missed", "daily-cap", "monthly-cap"]),
 });
 
 /** A task: a brief the agent runs on a schedule. `nextRunAt` is absent unless the task is active. */

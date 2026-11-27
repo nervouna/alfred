@@ -61,7 +61,7 @@ function parseDailyBudget(env: Env): number {
   return value;
 }
 
-/** Spend per calendar month; not enforced yet. */
+/** Spend per calendar month in the owner's time zone: once reached, no new run starts this month. */
 function parseMonthlyBudget(env: Env): number {
   const text = envValue(env, "ALFRED_MONTHLY_BUDGET_USD") ?? "200";
   const value = Number(text);

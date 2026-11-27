@@ -66,7 +66,7 @@ test("foreground calls are always admitted and not tracked", () => {
 
 test("over the daily budget, no background subagent starts", () => {
   const { bg, call } = setup({ overBudget: () => true });
-  assert.match(bg.admit(call(1)) ?? "", /daily spend cap/);
+  assert.match(bg.admit(call(1)) ?? "", /spend cap/);
   assert.equal(bg.idle, true);
 });
 

@@ -1880,3 +1880,31 @@ test("an error reply that contains the separator is sent as one message", async 
 
   assert.deepEqual(t.messages().filter((m) => m.direction === "out").map((m) => m.text), ["出错了：坏了\n<!-- split -->\n真的坏了"]);
 });
+
+test("a background subagent is not admitted once the monthly cap is reached, though its run started under it", async (ctx) => {
+  // The day's cap is out of the way, so it is the month's that denies.
+  process.env.ALFRED_DAILY_BUDGET_USD = "1000";
+  ctx.after(() => void delete process.env.ALFRED_DAILY_BUDGET_USD);
+  let denied = "";
+  let turns = 0;
+  const t = setup({
+    turn: async (_prompt, _signal, turn) => {
+      if (++turns === 1) return priced("第一轮", 250); // over the default monthly cap of 200
+      const input = {
+        hook_event_name: "PreToolUse",
+        tool_name: "Agent",
+        tool_use_id: "toolu_late",
+        tool_input: { subagent_type: "collector", description: "晚了", prompt: "brief", run_in_background: true },
+      };
+      for (const matcher of turn.options.hooks?.PreToolUse ?? []) {
+        for (const hook of matcher.hooks) denied += JSON.stringify(await hook(input as never, "toolu_late", { signal: new AbortController().signal }));
+      }
+      return "第二轮";
+    },
+  });
+  await t.send("first");
+  await t.send("second");
+  await until("both turns", () => turns === 2 && t.finished());
+  assert.match(denied, /spend cap/);
+  assert.match(denied, /deny/);
+});

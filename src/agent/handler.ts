@@ -72,13 +72,14 @@ import { TRASH_RETENTION_DAYS, pruneTrash } from "../documents/purge.ts";
 import type { Documents } from "../documents/register.ts";
 import { DocumentRefused, TRASH_DIR } from "../documents/store.ts";
 import { type EventLog, sharedEventLog } from "../events.ts";
-import { firstLine, humanAge, localDate, localStamp } from "../files.ts";
+import { firstLine, humanAge, localDate, localMonth, localStamp } from "../files.ts";
 import { IdeaGenerationFailed, collectInputs, generateIdeas as askForIdeas, inputsLine } from "../ideas/generate.ts";
 import type { IdeaStore } from "../ideas/store.ts";
 import { describeError, log } from "../log.ts";
 import { RunRecorder, findRun, markLostRuns, newRunId, pruneRunFiles, runIdCandidates, stepDetail } from "../runs.ts";
 import type { RunRecord, RunStatus } from "../runs.ts";
 import type { SettingsStore } from "../settings/store.ts";
+import { writeSpendMirror } from "../spend.ts";
 import { WORKSPACE_DIR } from "../store.ts";
 import type { TaskStore } from "../tasks/store.ts";
 import {
@@ -112,7 +113,7 @@ import { ResponseLedger, subagentTranscript, unitPrices } from "./cost.ts";
 import { externalOffer, externalServersForRun, externalToolGuard } from "./external.ts";
 import { resolveInside, workspaceGuard } from "./guard.ts";
 import { TaskInput, answeredBy } from "./input.ts";
-import { EXTRACT_MODEL, MEMORY_LOCK_FILE, MemoryScanScheduler, SCAN_TIMEOUT_MS, scanTranscripts, transcriptDirs } from "./memory-scan.ts";
+import { EXTRACT_MODEL, MEMORY_LOCK_FILE, MemoryScanScheduler, SCAN_TIMEOUT_MS, failedScanCost, scanTranscripts, transcriptDirs } from "./memory-scan.ts";
 import type { ScanReport } from "./memory-scan.ts";
 import { type Locked, MemoryLock, capIndex, loadMemories, syncMemoryIndex } from "./memory.ts";
 import { QUESTION_TOOL, answersFromReply, denyPermissionPrompts, questionHook } from "./questions.ts";
@@ -320,6 +321,8 @@ export interface AgentHandlerOptions {
    * them the settings are the environment's, as they were at startup.
    */
   settings?: SettingsStore;
+  /** The memory scan itself; `scanTranscripts` by default. Tests pass a fake, so no model is called. */
+  scanTranscripts?: typeof scanTranscripts;
 }
 
 /** What the handler offers: the intake queue and the stop for the channel, a run of a task, and a shutdown for the process. */
@@ -659,15 +662,16 @@ export function agentOptions(params: {
   };
 }
 
+/** The spend cap that stopped a start: the day's or the month's. */
+type Cap = "day" | "month";
+
 /** Runs a memory scan and records it as a run when it called the model or failed; idle scans leave no record. */
 async function recordScan(scan: () => Promise<ScanReport>): Promise<ScanReport> {
   const startedAt = new Date().toISOString();
-  const record = (status: "done" | "failed", report?: ScanReport, error?: string) => {
+  const record = (status: "done" | "failed", report: Pick<ScanReport, "costUsd" | "applied">, error?: string) => {
     const run = new RunRecorder({ kind: "scan", title: "记忆扫描", model: EXTRACT_MODEL, startedAt });
-    if (report) {
-      run.update({ costUsd: report.costUsd });
-      for (const a of report.applied) run.wrote(`memory/${a.file}`, a.action === "create" ? "Write" : "Edit");
-    }
+    run.update({ costUsd: report.costUsd });
+    for (const a of report.applied) run.wrote(`memory/${a.file}`, a.action === "create" ? "Write" : "Edit");
     run.finish(status, error);
   };
   try {
@@ -675,7 +679,7 @@ async function recordScan(scan: () => Promise<ScanReport>): Promise<ScanReport> 
     if (!report.skipped) record("done", report);
     return report;
   } catch (err) {
-    record("failed", undefined, describeError(err));
+    record("failed", { costUsd: failedScanCost(err), applied: [] }, describeError(err));
     throw err;
   }
 }
@@ -748,6 +752,8 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
   settings?.useModel(() => store.get(owner).model);
   /** The spend cap of the day, read at each check so a change takes effect at once. */
   const dailyBudget = (): number => setting("dailyBudgetUsd");
+  /** The spend cap of the month, read at each check like the day's. */
+  const monthlyBudget = (): number => setting("monthlyBudgetUsd");
   // Runs still marked running or queued belonged to a process that is gone: their cards show
   // them as lost, and the owner's next message gets a note naming them.
   const lost = markLostRuns();
@@ -832,7 +838,52 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
   }
 
   const spentToday = (user: AgentUserState): number => (user.spendDay === localDate() ? (user.spendDayUsd ?? 0) : 0);
-  const overBudget = (userId: string): boolean => spentToday(store.get(userId)) >= dailyBudget();
+  const spentMonth = (user: AgentUserState): number => (user.spendMonth === localMonth() ? (user.spendMonthUsd ?? 0) : 0);
+  /**
+   * Which cap the owner's spend has reached: the month's first, since it ends later. `monthOnly` leaves the day's out, for the
+   * runs the daily cap never stopped (memory scans).
+   */
+  const capReached = (userId: string, monthOnly = false): Cap | undefined => {
+    const user = store.get(userId);
+    if (spentMonth(user) >= monthlyBudget()) return "month";
+    return !monthOnly && spentToday(user) >= dailyBudget() ? "day" : undefined;
+  };
+  const overBudget = (userId: string): boolean => capReached(userId) !== undefined;
+  /** What the owner is told, and what a run records, when `cap` stopped a start. */
+  const capText = (userId: string, cap: Cap): string => {
+    const user = store.get(userId);
+    return cap === "month"
+      ? `本月的花费已到每月上限 ${usd(monthlyBudget())}（已花 ${usd(spentMonth(user))}）`
+      : `今天的花费已到每日上限 ${usd(dailyBudget())}（已花 ${usd(spentToday(user))}）`;
+  };
+  const capError = (cap: Cap): string => (cap === "month" ? "this month's spend cap is reached" : "today's spend cap is reached");
+  /** The mirror of the day's and the month's counters the workbench reads (src/spend.ts); a failed write is logged, never fatal. */
+  const mirrorSpend = (user: AgentUserState): void => {
+    try {
+      writeSpendMirror({ day: localDate(), dayUsd: spentToday(user), month: localMonth(), monthUsd: spentMonth(user) });
+    } catch (err) {
+      log.error(`writing the spend mirror failed: ${describeError(err)}`);
+    }
+  };
+  mirrorSpend(store.get(owner));
+  /**
+   * The one place spend is counted: adds `costUsd` to the user's total, the day and the month, so to both caps and to the
+   * workbench's mirror. `patch` carries whatever else the same state write holds (a chat session's running totals).
+   * Anthropic usage only; a cost of 0 with no patch writes nothing.
+   */
+  function chargeSpend(userId: string, costUsd: number, patch: Partial<AgentUserState> = {}): void {
+    if (costUsd <= 0 && Object.keys(patch).length === 0) return;
+    const user = store.get(userId);
+    const next = store.update(userId, {
+      ...patch,
+      totalCostUsd: user.totalCostUsd + costUsd,
+      spendDay: localDate(),
+      spendDayUsd: spentToday(user) + costUsd,
+      spendMonth: localMonth(),
+      spendMonthUsd: spentMonth(user) + costUsd,
+    });
+    mirrorSpend(next);
+  }
   const runtime = (userId: string): UserRuntime => {
     let rt = runtimes.get(userId);
     if (!rt) runtimes.set(userId, (rt = { busy: false, queue: [], attachments: [], questions: new Map() }));
@@ -845,7 +896,27 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
   const scheduler = new MemoryScanScheduler({
     lock: memoryLock,
     isBusy: () => [...runtimes.values()].some((rt) => rt.busy),
-    scan: () => recordScan(() => scanTranscripts({ workspace: WORKSPACE_DIR })),
+    scan: async () => {
+      // A scan was never held back by the daily cap, so only the month's stops it; what it cost counts toward both.
+      if (capReached(owner, true)) return { files: 0, messages: 0, applied: [], costUsd: 0, skipped: "the monthly spend cap is reached" };
+      const charge = (costUsd: number) => {
+        try {
+          chargeSpend(owner, costUsd);
+        } catch (err) {
+          log.error(`saving the cost of a memory scan failed: ${describeError(err)}`);
+        }
+      };
+      let report: ScanReport;
+      try {
+        report = await recordScan(() => (opts.scanTranscripts ?? scanTranscripts)({ workspace: WORKSPACE_DIR }));
+      } catch (err) {
+        // A scan that failed after calling the model spent money all the same.
+        charge(failedScanCost(err));
+        throw err;
+      }
+      charge(report.costUsd);
+      return report;
+    },
   });
   /** The interval between memory scans in milliseconds, read from the setting at each use; 0 means off. */
   const scanIntervalMs = (): number => setting("memoryScanMinutes") * 60_000;
@@ -887,8 +958,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
     }
     if (estimate.usd === 0) return estimate;
     try {
-      const user = store.get(owner);
-      store.update(owner, { totalCostUsd: user.totalCostUsd + estimate.usd, spendDay: localDate(), spendDayUsd: spentToday(user) + estimate.usd });
+      chargeSpend(owner, estimate.usd);
     } catch (err) {
       log.error(`saving the estimate of run ${run.recorder.id} failed: ${describeError(err)}`);
     }
@@ -1097,12 +1167,12 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
   async function runAgent(userId: string, start: Start): Promise<void> {
     const { prompt } = start;
     const rt = runtime(userId);
-    if (overBudget(userId)) {
-      const spent = spentToday(store.get(userId));
-      log.warn(`daily spend cap reached (${usd(spent)} of ${usd(dailyBudget())}); not starting a task`);
+    const cap = capReached(userId);
+    if (cap) {
+      log.warn(`${cap === "month" ? "monthly" : "daily"} spend cap reached (${capText(userId, cap)}); not starting a task`);
       start.recordInbound?.(undefined);
       await outbound()
-        .text(`今天的花费已到每日上限 ${usd(dailyBudget())}（已花 ${usd(spent)}），新运行明天再开始。`)
+        .text(`${capText(userId, cap)}，新运行${cap === "month" ? "下月" : "明天"}再开始。`)
         .catch(() => {});
       return;
     }
@@ -1156,12 +1226,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
       const { deltaUsd, ...spend } = accountRun(user, result.total_cost_usd);
       const reported = Object.fromEntries(Object.entries(result.modelUsage ?? {}).map(([model, u]) => [model, u.costUSD]));
       const models = accountModels(user, reported);
-      store.update(userId, {
-        ...spend,
-        sessionModelCostUsd: models.sessionModelCostUsd,
-        spendDay: localDate(),
-        spendDayUsd: spentToday(user) + deltaUsd,
-      });
+      chargeSpend(userId, deltaUsd, { ...spend, sessionModelCostUsd: models.sessionModelCostUsd });
       for (const [model, usd] of Object.entries(models.deltaUsd)) modelCosts.set(model, (modelCosts.get(model) ?? 0) + usd);
       cost += deltaUsd;
       recorder.update({ costUsd: cost, modelCostUsd: Object.fromEntries(modelCosts) });
@@ -1338,7 +1403,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
       const models = accountModels({ ...user, ...seen }, reported);
       seen = { sessionCostUsd, sessionModelCostUsd: models.sessionModelCostUsd };
       // The run's spend counts toward the owner's day and total, so toward the daily cap.
-      store.update(owner, { totalCostUsd: user.totalCostUsd + deltaUsd, spendDay: localDate(), spendDayUsd: spentToday(user) + deltaUsd });
+      chargeSpend(owner, deltaUsd);
       for (const [model, spent] of Object.entries(models.deltaUsd)) modelCosts.set(model, (modelCosts.get(model) ?? 0) + spent);
       cost += deltaUsd;
       recorder.update({ costUsd: cost, modelCostUsd: Object.fromEntries(modelCosts) });
@@ -1398,19 +1463,22 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
       log.info(`task ${task.id} is ${task.status}: dropping its queued run due ${item.scheduledAt.toISOString()}`);
       return;
     }
-    if (overBudget(owner)) {
-      const spent = spentToday(store.get(owner));
-      log.warn(`daily spend cap reached (${usd(spent)} of ${usd(dailyBudget())}); not running task ${task.id}`);
+    const cap = capReached(owner);
+    if (cap) {
+      log.warn(`${cap === "month" ? "monthly" : "daily"} spend cap reached (${capText(owner, cap)}); not running task ${task.id}`);
       if (item.scheduled) {
         try {
-          tasks.recordSkip(task.id, item.scheduledAt, "daily-cap");
+          tasks.recordSkip(task.id, item.scheduledAt, cap === "month" ? "monthly-cap" : "daily-cap");
         } catch (err) {
           log.error(`recording the skipped run of task ${task.id} failed: ${describeError(err)}`);
         }
       }
-      await outbound(undefined, task.id)
-        .text(`任务「${task.title}」该运行了，但今天的花费已到每日上限 ${usd(dailyBudget())}（已花 ${usd(spent)}），这次不运行。`)
-        .catch(() => {});
+      // An occurrence skipped for the month's cap would say so every time it fell due: only the owner's own run now is told.
+      if (cap === "day" || !item.scheduled) {
+        await outbound(undefined, task.id)
+          .text(`任务「${task.title}」该运行了，但${capText(owner, cap)}，这次不运行。`)
+          .catch(() => {});
+      }
       return;
     }
 
@@ -1489,10 +1557,10 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
    */
   async function runRevisionRun(item: QueuedRevisionRun): Promise<void> {
     const { recorder, documentId, title, taskId, model, budgetUsd } = item;
-    if (overBudget(owner)) {
-      const spent = spentToday(store.get(owner));
-      log.warn(`daily spend cap reached (${usd(spent)} of ${usd(dailyBudget())}); not running revision ${recorder.id}`);
-      await endRevision(item, { status: "failed", failure: `今天的花费已到每日上限 ${usd(dailyBudget())}（已花 ${usd(spent)}），这次不运行。` });
+    const cap = capReached(owner);
+    if (cap) {
+      log.warn(`${cap === "month" ? "monthly" : "daily"} spend cap reached (${capText(owner, cap)}); not running revision ${recorder.id}`);
+      await endRevision(item, { status: "failed", failure: `${capText(owner, cap)}，这次不运行。` });
       return;
     }
     recorder.start();
@@ -1635,7 +1703,8 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
   function reviseDocument(command: DocumentRevise): DocumentReply<RevisionAccepted> {
     if (!documents) return { ok: false, status: 404, error: "no such document" };
     if (closing) return { ok: false, status: 409, error: "Alfred is shutting down" };
-    if (overBudget(owner)) return { ok: false, status: 409, error: "today's spend cap is reached" };
+    const cap = capReached(owner);
+    if (cap) return { ok: false, status: 409, error: capError(cap) };
     // The batch is recorded against the run's id first: a refusal leaves no run behind, not even a failed one.
     const runId = newRunId();
     let annotations: Annotation[];
@@ -1670,17 +1739,11 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
     return { ok: true, body: { runId, annotations } };
   }
 
-  /** Adds a cost to the owner's day and total, as the results of a task run's turns are: it counts toward the daily cap. */
-  function chargeOwner(costUsd: number): void {
-    if (costUsd <= 0) return;
-    const user = store.get(owner);
-    store.update(owner, { totalCostUsd: user.totalCostUsd + costUsd, spendDay: localDate(), spendDayUsd: spentToday(user) + costUsd });
-  }
-
   function generateIdeas(trigger: IdeaTrigger): IdeaReply<IdeaGenerationAccepted> {
     if (!ideas) return { ok: false, status: 503, error: "idea generation is not available" };
     if (closing) return { ok: false, status: 409, error: "Alfred is shutting down" };
-    if (overBudget(owner)) return { ok: false, status: 409, error: "today's spend cap is reached" };
+    const cap = capReached(owner);
+    if (cap) return { ok: false, status: 409, error: capError(cap) };
     if (ideas.generatingRunId() !== undefined) return { ok: false, status: 409, error: "ideas are being generated" };
     const recorder = new RunRecorder({ kind: "ideas", title: IDEAS_RUN_TITLE, model: MODELS.sonnet, events });
     try {
@@ -1743,7 +1806,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
         failure = "Alfred 重启，想法生成中断";
       }
       try {
-        chargeOwner(cost);
+        chargeSpend(owner, cost);
       } catch (err) {
         log.error(`saving the cost of run ${recorder.id} failed: ${describeError(err)}`);
       }
@@ -1962,7 +2025,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
         if (user.sessionId && !rt.run) lines.push(`空闲：${idleStatus(user, now)}`);
         if (user.previousSession) lines.push(`上一个会话：${user.previousSession.sessionId.slice(0, 8)}，发 /resume 接回`);
         lines.push(
-          `累计花费：${usd(user.totalCostUsd)}，今天 ${usd(spentToday(user))} / 上限 ${usd(dailyBudget())}`,
+          `累计花费：${usd(user.totalCostUsd)}，今天 ${usd(spentToday(user))} / 上限 ${usd(dailyBudget())}，本月 ${usd(spentMonth(user))} / 上限 ${usd(monthlyBudget())}`,
           rt.run ? `运行：${rt.run.recorder.id}，进行中 ${humanAge(now - rt.run.startedAt)}，${runSummary(rt.run, now)}` : "运行：空闲",
         );
         for (const b of rt.run?.background.running ?? []) {

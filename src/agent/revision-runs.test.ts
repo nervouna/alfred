@@ -41,7 +41,7 @@ const { TaskStore } = await import("../tasks/store.ts");
 const { RunRecorder, readRunFile } = await import("../runs.ts");
 const { RevisionAcceptedSchema, MessageSchema } = await import("../api/schema.ts");
 const { notificationFor } = await import("../workbench/push.ts");
-const { localDate } = await import("../files.ts");
+const { localDate, localMonth } = await import("../files.ts");
 const { TASK_TOOL_NAMES } = await import("./task-tools.ts");
 
 const REPLY_TOOL = "mcp__alfred__reply_annotation";
@@ -1187,4 +1187,18 @@ test("a revision run the owner stops keeps an estimate of the response it had no
   assert.ok(Math.abs((readRunFile(runId)?.costUsd ?? 0) - 0.00035) < 1e-9, `the estimate, got ${readRunFile(runId)?.costUsd}`);
   assert.equal(readRunFile(runId)?.costEstimated, true);
   assert.ok(Math.abs((t.state().spendDayUsd as number) - (0.001 + 0.00035)) < 1e-9, "the day's spend counts it");
+});
+
+test("over the monthly cap a batch is refused with 409, and nothing is recorded", async () => {
+  const s = await stack();
+  const document = await deliver(s, NOTE);
+  fs.mkdirSync(path.dirname(s.stateFile), { recursive: true });
+  fs.writeFileSync(s.stateFile, JSON.stringify({ owner: { model: "sonnet", sessionCostUsd: 0, totalCostUsd: 250, spendMonth: localMonth(), spendMonthUsd: 250 } }));
+  const t = start(s);
+
+  assert.deepEqual(t.handler.reviseDocument(batchOf(document)), { ok: false, status: 409, error: "this month's spend cap is reached" });
+  assert.equal(t.revisionRuns().length, 0);
+  assert.deepEqual(s.store.annotations(document.id), []);
+  await sleep(50);
+  assert.equal(t.agent.queries.length, 0);
 });

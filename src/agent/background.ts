@@ -126,7 +126,7 @@ export class BackgroundRuns implements AgentAdmission {
 
   admit(call: AgentCall): string | undefined {
     if (!call.background) return undefined;
-    if (this.overBudget()) return "The daily spend cap is reached, so no new subagent starts today. Tell the user, and do the work yourself only if it is small.";
+    if (this.overBudget()) return "A spend cap (the day's or the month's) is reached, so no new subagent starts. Tell the user, and do the work yourself only if it is small.";
     if (this.live.size + this.launching.size >= this.max) {
       const recorder = this.recorder(call, true);
       this.queue.push({ recorder, role: call.role, model: call.model, description: call.description, prompt: call.prompt });

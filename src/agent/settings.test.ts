@@ -25,6 +25,7 @@ Object.assign(process.env, {
 // The scans of the environment's own settings are on: a test turns the timer by its store's settings.
 delete process.env.ALFRED_MEMORY_SCAN_MINUTES;
 delete process.env.ALFRED_DAILY_BUDGET_USD;
+delete process.env.ALFRED_MONTHLY_BUDGET_USD;
 delete process.env.ALFRED_SESSION_IDLE_HOURS;
 delete process.env.ALFRED_MAX_BUDGET_USD;
 delete process.env.ALFRED_COMPACT_TOKENS;
@@ -36,6 +37,10 @@ const { SettingsStore } = await import("../settings/store.ts");
 const { settingsCommands } = await import("../settings/commands.ts");
 const { parseCommand } = await import("../api/schema.ts");
 const { RunRecorder } = await import("../runs.ts");
+const { localDate, localMonth } = await import("../files.ts");
+const { SPEND_MIRROR_FILE, readSpend } = await import("../spend.ts");
+const { ScanFailure } = await import("./memory-scan.ts");
+const { listRunFiles } = await import("../runs.ts");
 
 const cleanups: (() => Promise<void>)[] = [];
 after(async () => {
@@ -169,6 +174,8 @@ interface SetupOptions {
   owner?: Record<string, unknown>;
   /** Run without a settings store. */
   noStore?: boolean;
+  /** Stands in for the memory scan. */
+  scan?: () => Promise<{ files: number; messages: number; applied: []; costUsd: number; skipped?: string }>;
 }
 
 /** A handler on a fake channel and agent, over a settings store of its own and the command that changes it. */
@@ -183,7 +190,7 @@ function setup(options: SetupOptions = {}) {
   const store = options.noStore
     ? undefined
     : new SettingsStore({ file: path.join(dir, "settings.json"), mirror: path.join(dir, "mirror.json"), events, env: () => envSettings(options.env ?? {}) });
-  const handler = createAgentHandler({ out: app.out, events, stateFile, runQuery: agent.runQuery, settings: store });
+  const handler = createAgentHandler({ out: app.out, events, stateFile, runQuery: agent.runQuery, settings: store, scanTranscripts: options.scan });
   cleanups.push(() => handler.shutdown());
   const commands = store && settingsCommands(store, handler);
   const messages = (): Message[] => events.readSince(0).flatMap((e) => (e.type === "message.created" ? [e.data] : []));
@@ -479,4 +486,115 @@ test("a handler without a store reads the environment alone, and a store's handl
   } finally {
     delete process.env.ALFRED_SESSION_IDLE_HOURS;
   }
+});
+
+// --- the monthly cap -----------------------------------------------------------------------------------------------
+
+const ownerState = (stateFile: string) => JSON.parse(fs.readFileSync(stateFile, "utf8")).owner as Record<string, number | string | undefined>;
+const ownerSpent = (spendMonthUsd: number, spendMonth = localMonth()) => ({
+  model: "sonnet",
+  sessionCostUsd: 0,
+  totalCostUsd: spendMonthUsd,
+  spendMonth,
+  spendMonthUsd,
+});
+
+test("a message over the monthly cap starts no run and is answered once, and a cap changed meanwhile is read at once", async () => {
+  const s = setup({ env: { ALFRED_MONTHLY_BUDGET_USD: "50" }, owner: ownerSpent(55) });
+  const notice = "本月的花费已到每月上限 $50.00（已花 $55.00），新运行下月再开始。";
+  const notices = () => s.app.texts.filter((t) => t === notice).length;
+  await s.send("one");
+  await until("the first answer", () => notices() === 1);
+  await s.send("two");
+  await until("the second answer", () => notices() === 2);
+  await sleep(50);
+  assert.equal(notices(), 2, "one answer per blocked message");
+  assert.equal(s.agent.queries.length, 0, "no run started");
+  assert.deepEqual(s.runs(), []);
+
+  await s.update({ monthlyBudgetUsd: 80 });
+  await s.runOnce("three");
+  assert.equal(s.agent.queries.length, 1, "the raised cap lets a run start");
+  await s.update({ monthlyBudgetUsd: 20 });
+  await s.send("four");
+  assert.equal(s.agent.queries.length, 1);
+  assert.equal(s.app.texts.at(-1), "本月的花费已到每月上限 $20.00（已花 $55.00），新运行下月再开始。");
+});
+
+test("the month counter starts again when the local month changes", async () => {
+  const s = setup({ turn: async () => priced("done", 4), env: { ALFRED_MONTHLY_BUDGET_USD: "50" }, owner: ownerSpent(500, "2000-01") });
+  await s.runOnce("new month");
+  assert.equal(s.agent.queries.length, 1, "last month's spend does not count");
+  const owner = ownerState(s.stateFile);
+  assert.equal(owner.spendMonth, localMonth());
+  assert.equal(owner.spendMonthUsd, 4);
+  assert.equal(owner.totalCostUsd, 504, "the total goes on");
+});
+
+test("the day's cap still stops a run that the month's allows, and the month's is named first when both are reached", async () => {
+  const s = setup({ env: { ALFRED_DAILY_BUDGET_USD: "5", ALFRED_MONTHLY_BUDGET_USD: "50" }, owner: { ...ownerSpent(10), spendDay: localDate(), spendDayUsd: 6 } });
+  await s.send("a");
+  assert.equal(s.app.texts.at(-1), "今天的花费已到每日上限 $5.00（已花 $6.00），新运行明天再开始。");
+  await s.update({ monthlyBudgetUsd: 8 });
+  await s.send("b");
+  assert.equal(s.agent.queries.length, 0);
+  assert.equal(s.app.texts.at(-1), "本月的花费已到每月上限 $8.00（已花 $10.00），新运行下月再开始。");
+});
+
+test("a run's cost, a scan's cost and /status count the same: the state file, the mirror for the workbench and the caps agree", async () => {
+  let scans = 0;
+  const s = setup({
+    turn: async () => ({ result: "done", total_cost_usd: 3, modelUsage: { [MODELS.sonnet]: { costUSD: 2.5 }, [MODELS.haiku]: { costUSD: 0.5 } } }),
+    env: { ALFRED_DAILY_BUDGET_USD: "10", ALFRED_MONTHLY_BUDGET_USD: "40" },
+    // The handler asks for a scan as it starts.
+    scan: async () => {
+      scans++;
+      return { files: 1, messages: 1, applied: [], costUsd: 0.25 };
+    },
+  });
+  await s.runOnce("with a subagent");
+  await until("the run's and the scan's cost to be booked", () => ownerState(s.stateFile).spendMonthUsd === 3.25);
+  assert.equal(scans, 1);
+
+  const owner = ownerState(s.stateFile);
+  assert.equal(owner.spendDayUsd, 3.25);
+  assert.equal(owner.totalCostUsd, 3.25);
+  assert.deepEqual(JSON.parse(fs.readFileSync(SPEND_MIRROR_FILE, "utf8")), { day: localDate(), dayUsd: 3.25, month: localMonth(), monthUsd: 3.25 });
+  assert.deepEqual(readSpend(localDate()), { spentTodayUsd: 3.25, spentMonthUsd: 3.25 });
+  await s.send("/status");
+  assert.match(s.app.texts.at(-1) ?? "", /今天 \$3\.25 \/ 上限 \$10\.00，本月 \$3\.25 \/ 上限 \$40\.00/);
+});
+
+test("a scan that fails after calling the model counts what it spent: day, month, the mirror and its run record", async () => {
+  let scans = 0;
+  const s = setup({
+    env: { ALFRED_MONTHLY_BUDGET_USD: "40" },
+    // The handler asks for a scan as it starts.
+    scan: async () => {
+      scans++;
+      throw new ScanFailure("extraction returned malformed output", 0.4);
+    },
+  });
+  await until("the failed scan's cost to be booked", () => fs.existsSync(s.stateFile) && ownerState(s.stateFile).spendMonthUsd === 0.4);
+  assert.equal(scans, 1);
+  assert.equal(ownerState(s.stateFile).spendDayUsd, 0.4);
+  assert.deepEqual(readSpend(localDate()), { spentTodayUsd: 0.4, spentMonthUsd: 0.4 });
+  const run = listRunFiles().find((r) => r.kind === "scan" && r.status === "failed" && r.costUsd === 0.4);
+  assert.ok(run, "a failed scan run with its cost");
+});
+
+test("a memory scan is held back by the monthly cap, and not by the daily one", async () => {
+  let scans = 0;
+  const scan = async () => {
+    scans++;
+    return { files: 1, messages: 1, applied: [] as [], costUsd: 1 };
+  };
+  setup({ env: { ALFRED_DAILY_BUDGET_USD: "5", ALFRED_MONTHLY_BUDGET_USD: "50" }, owner: { ...ownerSpent(10), spendDay: localDate(), spendDayUsd: 6 }, scan });
+  await until("a scan over the daily cap", () => scans === 1);
+
+  scans = 0;
+  const month = setup({ env: { ALFRED_MONTHLY_BUDGET_USD: "50" }, owner: ownerSpent(50), scan });
+  await sleep(200);
+  assert.equal(scans, 0, "the scan did not call the model");
+  assert.equal(ownerState(month.stateFile).spendMonthUsd, 50);
 });

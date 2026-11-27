@@ -37,7 +37,7 @@ const { Versions } = await import("../documents/versions.ts");
 const { TaskStore } = await import("../tasks/store.ts");
 const { taskCommands } = await import("../tasks/commands.ts");
 const { readRunFile } = await import("../runs.ts");
-const { localDate } = await import("../files.ts");
+const { localDate, localMonth } = await import("../files.ts");
 const { TASK_TOOL_NAMES } = await import("./task-tools.ts");
 
 const cleanups: (() => Promise<void>)[] = [];
@@ -1349,4 +1349,39 @@ test("a task run's reply is split at the separator, with the run footer on the l
   const [run] = t.taskRuns(task.id);
   assert.ok(run);
   assert.deepEqual(t.messages().filter((m) => m.direction === "out").map((m) => m.text), ["早。", `今天三件事。\n\n（运行 ${run.id}）`]);
+});
+
+test("over the monthly cap a scheduled run does not start: it is skipped as monthly-cap, and no message says so", async () => {
+  const s = stack();
+  const task = oneTime(s, "晨报");
+  fs.mkdirSync(path.dirname(s.stateFile), { recursive: true });
+  fs.writeFileSync(s.stateFile, JSON.stringify({ owner: { model: "sonnet", sessionCostUsd: 0, totalCostUsd: 250, spendMonth: localMonth(), spendMonthUsd: 250 } }));
+  clock = minutesAfterStart(2);
+  const t = start(s);
+  await until("the skip", () => s.store.get(task.id)?.skips.length === 1);
+  await sleep(100);
+
+  assert.equal(t.agent.queries.length, 0, "no query");
+  assert.deepEqual(s.store.get(task.id)?.skips[0], { at: minutesAfterStart(1).toISOString(), reason: "monthly-cap" });
+  assert.equal(s.store.get(task.id)?.lastRunId, undefined);
+  assert.deepEqual(t.messages().filter((m) => m.direction === "out"), [], "no message per occurrence");
+  assert.equal(t.taskRuns().length, 0);
+});
+
+test("over the monthly cap a run now does not start either: no skip, and one message says so", async () => {
+  const s = stack();
+  const task = evening(s, "晚报");
+  fs.mkdirSync(path.dirname(s.stateFile), { recursive: true });
+  fs.writeFileSync(s.stateFile, JSON.stringify({ owner: { model: "sonnet", sessionCostUsd: 0, totalCostUsd: 250, spendMonth: localMonth(), spendMonthUsd: 250 } }));
+  const t = start(s);
+
+  assert.equal(t.handler.runTask(task.id), true);
+  await until("the message", () => t.messages().some((m) => m.direction === "out"));
+  await sleep(100);
+
+  assert.equal(t.agent.queries.length, 0);
+  assert.deepEqual(s.store.get(task.id)?.skips, []);
+  const out = t.messages().filter((m) => m.direction === "out");
+  assert.equal(out.length, 1);
+  assert.match(out[0]?.text ?? "", /每月上限 \$200\.00（已花 \$250\.00）/);
 });

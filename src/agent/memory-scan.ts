@@ -378,6 +378,21 @@ export function extractionOptions(budgetUsd: number, abortController: AbortContr
   };
 }
 
+/** A scan that failed after the model was called: `costUsd` is what it spent, which still counts toward the caps. */
+export class ScanFailure extends Error {
+  readonly costUsd: number;
+  constructor(message: string, costUsd: number) {
+    super(message);
+    this.name = "ScanFailure";
+    this.costUsd = costUsd;
+  }
+}
+
+/** What a failed scan spent: 0 unless it failed after calling the model. */
+export function failedScanCost(err: unknown): number {
+  return err instanceof ScanFailure ? err.costUsd : 0;
+}
+
 async function extract(prompt: string, budgetUsd: number, signal: AbortSignal): Promise<{ candidates: Candidate[]; costUsd: number }> {
   const abortController = new AbortController();
   if (signal.aborted) abortController.abort();
@@ -389,10 +404,10 @@ async function extract(prompt: string, budgetUsd: number, signal: AbortSignal): 
   if (!result) throw new Error("extraction ended without a result");
   if (result.subtype !== "success" || result.is_error) {
     const detail = result.subtype === "success" ? result.result : result.errors.join("; ") || result.subtype;
-    throw new Error(`extraction failed (cost $${result.total_cost_usd.toFixed(4)}): ${detail}`);
+    throw new ScanFailure(`extraction failed (cost $${result.total_cost_usd.toFixed(4)}): ${detail}`, result.total_cost_usd);
   }
   const parsed = ExtractionSchema.safeParse(result.structured_output);
-  if (!parsed.success) throw new Error(`extraction returned malformed output: ${parsed.error.message}`);
+  if (!parsed.success) throw new ScanFailure(`extraction returned malformed output: ${parsed.error.message}`, result.total_cost_usd);
   return { candidates: parsed.data.memories.slice(0, MAX_CANDIDATES), costUsd: result.total_cost_usd };
 }
 
@@ -514,16 +529,23 @@ export async function scanTranscripts(opts: ScanOptions): Promise<ScanReport> {
   } catch (err) {
     // Only retries of exactly the same batch count; new entries reset the count.
     const count = state.failed && sameOffsets(state.failed.ends, offsets) ? state.failed.count + 1 : 1;
+    const spent = failedScanCost(err);
     if (count >= MAX_FAILURES) {
-      save(0);
-      throw new Error(`${describeError(err)}; this batch failed ${count} times in a row, skipping it`);
+      save(spent);
+      throw new ScanFailure(`${describeError(err)}; this batch failed ${count} times in a row, skipping it`, spent);
     }
-    save(0, { ends: offsets, count });
+    save(spent, { ends: offsets, count });
     throw err;
   }
   const { candidates, costUsd } = extracted;
-  const applied = applyCandidates(opts.workspace, candidates, today);
-  syncMemoryIndex(opts.workspace);
+  let applied: AppliedMemory[];
+  try {
+    applied = applyCandidates(opts.workspace, candidates, today);
+    syncMemoryIndex(opts.workspace);
+  } catch (err) {
+    // The batch is retried, as before; what the extraction spent still counts.
+    throw new ScanFailure(describeError(err), costUsd);
+  }
   save(costUsd);
   return { files: scannedFiles, messages: messages.length, applied, costUsd };
 }

@@ -36,7 +36,7 @@ A task is a brief the agent runs on a schedule. Alfred emits `task.updated` with
 - `schedule.kind` is `once` (at an ISO timestamp), `daily` (at a time), `weekly` (`days` then a time) or `interval` (`hours`). A time is `HH:MM` from `00:00` to `23:59`. `days` are 1 to 7, 1 being Monday, in strictly ascending order. `hours` are 1 to 168.
 - Schedules are computed in the zone `timeZone` that `GET /api/tasks` names. A task list is newest created first, and a task detail's runs are newest first.
 - `nextRunAt` is present only while the task is `active`.
-- `skips` are the runs a task missed (`missed`) or skipped because the day's spend cap was reached (`daily-cap`), newest first.
+- `skips` are the runs a task missed (`missed`) or skipped because the day's (`daily-cap`) or the month's (`monthly-cap`) spend cap was reached, newest first. A reader must accept a reason it does not know.
 - `task.create` leaves the model and budget to Alfred's defaults when the command omits them. `task.update` changes at least one field besides `taskId`, and `task.run` runs the task now without moving its next scheduled time.
 
 ## Documents
