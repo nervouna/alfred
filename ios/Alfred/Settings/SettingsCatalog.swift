@@ -17,6 +17,8 @@ struct SettingsCatalog: Hashable {
     private(set) var settings: AlfredSettings?
     /// What the owner has spent today, in USD, as the last read said; nil until a read has.
     private(set) var spentTodayUsd: Double?
+    /// What the owner has spent this month, in USD, as the last read said; nil until a read has, and when the server does not send it.
+    private(set) var spentMonthUsd: Double?
     /// How many `settings.updated` events have been applied.
     private(set) var revision = 0
     private var lastEventId: Int64 = 0
@@ -29,6 +31,7 @@ struct SettingsCatalog: Hashable {
     /// been applied since, the settings it carries are newer than the read's and stay.
     mutating func load(_ detail: SettingsDetail, requestedAt revision: Int? = nil) {
         spentTodayUsd = detail.spentTodayUsd
+        spentMonthUsd = detail.spentMonthUsd
         if revision == nil || revision == self.revision {
             settings = detail.settings
         }
@@ -91,6 +94,8 @@ struct SettingsCatalog: Hashable {
 
     var model: TaskModel? { shown(\.model, or: \.model) }
     var dailyBudgetUsd: Double? { shown(\.dailyBudgetUsd, or: \.dailyBudgetUsd) }
+    /// Nil when the settings were read from an event logged before the monthly budget existed.
+    var monthlyBudgetUsd: Double? { staged.monthlyBudgetUsd ?? inFlight.monthlyBudgetUsd ?? settings?.monthlyBudgetUsd }
     var runBudgetUsd: Double? { shown(\.runBudgetUsd, or: \.runBudgetUsd) }
     var sessionIdleHours: Double? { shown(\.sessionIdleHours, or: \.sessionIdleHours) }
     var compactTokens: Int? { shown(\.compactTokens, or: \.compactTokens) }
@@ -138,6 +143,7 @@ extension SettingsChanges {
         return SettingsChanges(
             model: choose(.model, model, later.model),
             dailyBudgetUsd: choose(.dailyBudgetUsd, dailyBudgetUsd, later.dailyBudgetUsd),
+            monthlyBudgetUsd: choose(.monthlyBudgetUsd, monthlyBudgetUsd, later.monthlyBudgetUsd),
             runBudgetUsd: choose(.runBudgetUsd, runBudgetUsd, later.runBudgetUsd),
             sessionIdleHours: choose(.sessionIdleHours, sessionIdleHours, later.sessionIdleHours),
             compactTokens: choose(.compactTokens, compactTokens, later.compactTokens),
@@ -153,6 +159,7 @@ extension SettingsChanges {
         var keys: Set<SettingKey> = []
         if model != nil { keys.insert(.model) }
         if dailyBudgetUsd != nil { keys.insert(.dailyBudgetUsd) }
+        if monthlyBudgetUsd != nil { keys.insert(.monthlyBudgetUsd) }
         if runBudgetUsd != nil { keys.insert(.runBudgetUsd) }
         if sessionIdleHours != nil { keys.insert(.sessionIdleHours) }
         if compactTokens != nil { keys.insert(.compactTokens) }

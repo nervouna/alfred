@@ -118,12 +118,19 @@ struct SettingsView: View {
                 value: \.dailyBudgetUsd, text: SettingsPresentation.cap
             ) { SettingsChanges(dailyBudgetUsd: $0) }
             stepper(
+                "每月上限", id: "settings.monthlyBudget", range: SettingsPresentation.monthlyBudget,
+                value: \.monthlyBudgetUsd, text: SettingsPresentation.cap
+            ) { SettingsChanges(monthlyBudgetUsd: $0) }
+            stepper(
                 "单次运行上限", id: "settings.runBudget", range: SettingsPresentation.runBudget,
                 value: \.runBudgetUsd, text: SettingsPresentation.cap
             ) { SettingsChanges(runBudgetUsd: $0) }
             LabeledContent("今日已花", value: catalog.spentTodayUsd.map(SettingsPresentation.spent) ?? "—")
                 .accessibilityElement(children: .combine)
                 .accessibilityIdentifier("settings.spentToday")
+            LabeledContent("本月已花", value: catalog.spentMonthUsd.map(SettingsPresentation.spent) ?? "—")
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("settings.spentMonth")
         }
     }
 
