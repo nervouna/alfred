@@ -47,6 +47,8 @@ export const MAX_IDEA_NOTE_CHARS = 500;
 export const MAX_NEW_IDEAS = 3;
 /** The most the owner may set the day's spend to, in USD. */
 export const MAX_DAILY_BUDGET_USD = 100;
+/** The most the owner may set the month's spend to, in USD. */
+export const MAX_MONTHLY_BUDGET_USD = 1000;
 /** The most the owner may set one chat run's spend cap to, in USD: a task's run's cap. */
 export const MAX_RUN_BUDGET_USD = MAX_TASK_BUDGET_USD;
 /** The longest idle time before a new session, in hours: one week. */
@@ -469,10 +471,11 @@ export const IdeaSchema = z
     message: "must be set exactly when the idea is rejected",
   });
 
-/** A setting the owner can change: the eight keys of the settings table, in the table's order. */
+/** A setting the owner can change: the nine keys of the settings table, in the table's order. */
 export const SettingKeySchema = z.enum([
   "model",
   "dailyBudgetUsd",
+  "monthlyBudgetUsd",
   "runBudgetUsd",
   "sessionIdleHours",
   "compactTokens",
@@ -495,6 +498,8 @@ const settingKeysInTableOrder = (keys: z.infer<typeof SettingKeySchema>[]) =>
 export const SettingsSchema = z.object({
   model: ModelSchema,
   dailyBudgetUsd: z.number(),
+  // Optional so that settings.updated events logged before the key existed still parse on replay. Alfred always writes it.
+  monthlyBudgetUsd: z.number().optional(),
   runBudgetUsd: z.number(),
   sessionIdleHours: z.number(),
   compactTokens: z.int(),
@@ -510,10 +515,11 @@ type SettingsKeysMatch = Expect<Equals<Exclude<keyof z.infer<typeof SettingsSche
 /** The body of a successful settings.update: the settings as Alfred now holds them. */
 export const SettingsResultSchema = z.object({ settings: SettingsSchema });
 
-/** The body of GET /api/settings: the settings, and what the owner has spent today, in USD. */
+/** The body of GET /api/settings: the settings, and what the owner has spent today and this month, in USD. */
 export const SettingsDetailSchema = z.object({
   settings: SettingsSchema,
   spentTodayUsd: z.number().min(0, "must be at least 0"),
+  spentMonthUsd: z.number().min(0, "must be at least 0").optional(),
 });
 
 const EventEnvelope = { id: z.int().positive(), at: IsoTimestampSchema };
@@ -955,6 +961,10 @@ const DailyBudgetSchema = z
   .number()
   .min(1, "must be at least 1")
   .max(MAX_DAILY_BUDGET_USD, `must be at most ${MAX_DAILY_BUDGET_USD}`);
+const MonthlyBudgetSchema = z
+  .number()
+  .min(1, "must be at least 1")
+  .max(MAX_MONTHLY_BUDGET_USD, `must be at most ${MAX_MONTHLY_BUDGET_USD}`);
 const RunBudgetSchema = z
   .number()
   .min(1, "must be at least 1")
@@ -992,6 +1002,7 @@ export const SettingsUpdateSchema = z
     type: z.literal("settings.update"),
     model: ModelSchema.optional(),
     dailyBudgetUsd: DailyBudgetSchema.optional(),
+    monthlyBudgetUsd: MonthlyBudgetSchema.optional(),
     runBudgetUsd: RunBudgetSchema.optional(),
     sessionIdleHours: SessionIdleHoursSchema.optional(),
     compactTokens: CompactTokensSchema.optional(),

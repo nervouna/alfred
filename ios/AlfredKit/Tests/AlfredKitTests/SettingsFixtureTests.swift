@@ -22,6 +22,7 @@ final class SettingsFixtureTests: XCTestCase {
         }
         XCTAssertEqual(settings.model, .opus)
         XCTAssertEqual(settings.dailyBudgetUsd, 30)
+        XCTAssertNil(settings.monthlyBudgetUsd)
         XCTAssertEqual(settings.runBudgetUsd, 10)
         XCTAssertEqual(settings.sessionIdleHours, 4)
         XCTAssertEqual(settings.compactTokens, 100_000)
@@ -29,6 +30,41 @@ final class SettingsFixtureTests: XCTestCase {
         XCTAssertEqual(settings.memoryScanBudgetUsd, 0.1)
         XCTAssertEqual(settings.ideasAt, TimeOfDay(hour: 8, minute: 0))
         XCTAssertEqual(settings.overridden, [.model, .dailyBudgetUsd])
+    }
+
+    func testTheMonthlyBudgetEventCarriesTheMonthlyBudget() throws {
+        let event = try decodeEvent("events/settings-updated-monthly-budget.json")
+        guard case let .settingsUpdated(settings) = event.payload else {
+            return XCTFail("expected a settings.updated event, got \(event.payload)")
+        }
+        XCTAssertEqual(settings.monthlyBudgetUsd, 300)
+        XCTAssertEqual(settings.overridden, [.model, .dailyBudgetUsd, .monthlyBudgetUsd])
+    }
+
+    func testAnEventFromBeforeTheMonthlyBudgetDecodesWithoutIt() throws {
+        let event = try decodeEvent("events/settings-updated.json")
+        guard case let .settingsUpdated(settings) = event.payload else {
+            return XCTFail("expected a settings.updated event, got \(event.payload)")
+        }
+        XCTAssertNil(settings.monthlyBudgetUsd)
+        XCTAssertEqual(settings.dailyBudgetUsd, 30)
+    }
+
+    func testSettingsResultCarriesTheMonthlyBudgetWhenThereIsOne() throws {
+        let result = try decodeFixture(SettingsResult.self, "responses/settings-result-monthly-budget.json")
+        XCTAssertEqual(result.settings.monthlyBudgetUsd, 300)
+        XCTAssertEqual(result.settings.overridden, [.model, .dailyBudgetUsd, .monthlyBudgetUsd, .ideasAt])
+        let old = try decodeFixture(SettingsResult.self, "responses/settings-result.json")
+        XCTAssertNil(old.settings.monthlyBudgetUsd)
+    }
+
+    func testSettingsDetailCarriesTheSpendThisMonthWhenThereIsOne() throws {
+        let detail = try decodeFixture(SettingsDetail.self, "responses/settings-detail-monthly-budget.json")
+        XCTAssertEqual(detail.spentTodayUsd, 4.82)
+        XCTAssertEqual(detail.spentMonthUsd, 61.37)
+        XCTAssertEqual(detail.settings.monthlyBudgetUsd, 300)
+        let old = try decodeFixture(SettingsDetail.self, "responses/settings-detail.json")
+        XCTAssertNil(old.spentMonthUsd)
     }
 
     func testSettingsResultTurnsTheIdeasTimeOffToNil() throws {
@@ -66,6 +102,14 @@ final class SettingsFixtureTests: XCTestCase {
                 .compactTokens, .memoryScanMinutes, .memoryScanBudgetUsd, .ideasAt,
             ]))
         )
+    }
+
+    func testAMonthlyBudgetChangeIsEncodedUnderItsKey() throws {
+        let set = try json(.settingsUpdate(SettingsChanges(monthlyBudgetUsd: 300)))
+        XCTAssertEqual(set["monthlyBudgetUsd"] as? Double, 300)
+        XCTAssertNil(set["dailyBudgetUsd"])
+        let untouched = try json(.settingsUpdate(SettingsChanges(dailyBudgetUsd: 30)))
+        XCTAssertNil(untouched["monthlyBudgetUsd"])
     }
 
     func testAnUntouchedIdeasTimeIsLeftOutAndOffIsNull() throws {

@@ -1,0 +1,21 @@
+{
+  "settings": {
+    "model": "opus",
+    "dailyBudgetUsd": 30,
+    "monthlyBudgetUsd": 300,
+    "runBudgetUsd": 10,
+    "sessionIdleHours": 4,
+    "compactTokens": 100000,
+    "memoryScanMinutes": 60,
+    "memoryScanBudgetUsd": 0.1,
+    "ideasAt": null,
+    "overridden": [
+      "model",
+      "dailyBudgetUsd",
+      "monthlyBudgetUsd",
+      "ideasAt"
+    ]
+  },
+  "spentTodayUsd": 4.82,
+  "spentMonthUsd": 61.37
+}

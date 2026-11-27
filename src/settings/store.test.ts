@@ -24,6 +24,7 @@ const { STATE_DIR } = await import("../store.ts");
 const DEFAULTS = {
   model: "sonnet",
   dailyBudgetUsd: 20,
+  monthlyBudgetUsd: 200,
   runBudgetUsd: 10,
   sessionIdleHours: 4,
   compactTokens: 100000,
@@ -133,6 +134,7 @@ test("an invalid or unknown stored override is dropped with a warning naming the
     files.file,
     JSON.stringify({
       dailyBudgetUsd: 150, // above the write range
+      monthlyBudgetUsd: 1500, // above the write range
       runBudgetUsd: 7,
       sessionIdleHours: "four",
       compactTokens: 19999,
@@ -147,7 +149,7 @@ test("an invalid or unknown stored override is dropped with a warning naming the
   const { store } = setup({ dir: root });
   assert.deepEqual(store.get(), { ...DEFAULTS, runBudgetUsd: 7, overridden: ["runBudgetUsd"] });
   const text = warnings().join("\n");
-  for (const key of ["dailyBudgetUsd", "sessionIdleHours", "compactTokens", "memoryScanMinutes", "memoryScanBudgetUsd", "ideasAt", "model", "favouriteColour"]) {
+  for (const key of ["dailyBudgetUsd", "monthlyBudgetUsd", "sessionIdleHours", "compactTokens", "memoryScanMinutes", "memoryScanBudgetUsd", "ideasAt", "model", "favouriteColour"]) {
     assert.ok(text.includes(key), `a warning names ${key}`);
   }
   assert.ok(!text.includes("runBudgetUsd"), "the valid one is not warned about");
@@ -190,6 +192,7 @@ test("a file that cannot be read does not stop the store either", () => {
 test("a malformed environment value still stops the store, naming the variable", () => {
   const bad: Record<string, string> = {
     ALFRED_DAILY_BUDGET_USD: "abc",
+    ALFRED_MONTHLY_BUDGET_USD: "0",
     ALFRED_MAX_BUDGET_USD: "-1",
     ALFRED_SESSION_IDLE_HOURS: "-2",
     ALFRED_COMPACT_TOKENS: "19999",
@@ -363,6 +366,9 @@ test("an update outside the write ranges, naming the model, or setting and reset
   const { store, announced, files } = setup();
   const refused: [object, RegExp][] = [
     [{ dailyBudgetUsd: 0 }, /dailyBudgetUsd/],
+    [{ monthlyBudgetUsd: 0 }, /monthlyBudgetUsd/],
+    [{ monthlyBudgetUsd: 1001 }, /monthlyBudgetUsd/],
+    [{ monthlyBudgetUsd: 5, reset: ["monthlyBudgetUsd"] }, /monthlyBudgetUsd/],
     [{ dailyBudgetUsd: 101 }, /dailyBudgetUsd/],
     [{ runBudgetUsd: 21 }, /runBudgetUsd/],
     [{ sessionIdleHours: 169 }, /sessionIdleHours/],
@@ -400,4 +406,29 @@ test("an update that cannot be saved is an error, and leaves the settings, the m
   assert.deepEqual(blocked.get(), DEFAULTS);
   assert.equal(announced().length, 0);
   assert.deepEqual(store.get(), DEFAULTS);
+});
+
+test("the monthly budget comes from the environment, an override beats it, and a reset returns to the environment", () => {
+  const { store, files, json, announced } = setup({ env: { ALFRED_MONTHLY_BUDGET_USD: "300" } });
+  assert.equal(store.get().monthlyBudgetUsd, 300, "the environment beats the default");
+  assert.deepEqual(store.get().overridden, []);
+  assert.equal((json(files.mirror) as Settings).monthlyBudgetUsd, 300, "the mirror holds it at startup");
+
+  store.update({ monthlyBudgetUsd: 400 });
+  assert.equal(store.get().monthlyBudgetUsd, 400, "the override beats the environment");
+  assert.deepEqual(store.get().overridden, ["monthlyBudgetUsd"]);
+  assert.equal((json(files.mirror) as Settings).monthlyBudgetUsd, 400, "the mirror holds the override");
+  assert.deepEqual(json(files.file), { monthlyBudgetUsd: 400 });
+
+  store.update({ reset: ["monthlyBudgetUsd"] });
+  assert.equal(store.get().monthlyBudgetUsd, 300, "a reset returns to the environment's value");
+  assert.deepEqual(store.get().overridden, []);
+  assert.equal(announced().length, 2, "one event per change of the effective value");
+});
+
+test("the monthly budget equal to the default is no override, so nothing is announced", () => {
+  const { store, announced } = setup();
+  assert.equal(store.update({ monthlyBudgetUsd: 200 }).monthlyBudgetUsd, 200);
+  assert.deepEqual(store.get().overridden, []);
+  assert.equal(announced().length, 0);
 });

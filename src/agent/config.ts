@@ -32,7 +32,9 @@ type Env = Record<string, string | undefined>;
  * the second layer of a setting, under the owner's override (src/settings/store.ts); `ideasAt` is null when the daily
  * generation is off. The ranges the app may write (src/api/schema.ts) do not bind the environment.
  */
-export type EnvSettings = Omit<Settings, "model" | "overridden">;
+export type EnvSettings = Omit<Settings, "model" | "overridden" | "monthlyBudgetUsd"> & { monthlyBudgetUsd: number };
+/** The settings as Alfred holds them now, every key present: the schema leaves the monthly budget optional for replay, the store always has it. */
+export type EffectiveSettings = Settings & EnvSettings;
 
 /** The variable's trimmed value; undefined when it is unset or blank. */
 function envValue(env: Env, name: string): string | undefined {
@@ -56,6 +58,14 @@ function parseDailyBudget(env: Env): number {
   const text = envValue(env, "ALFRED_DAILY_BUDGET_USD") ?? "20";
   const value = Number(text);
   if (!Number.isFinite(value) || value <= 0) throw new Error(`ALFRED_DAILY_BUDGET_USD must be a finite number of USD > 0, got "${text}"`);
+  return value;
+}
+
+/** Spend per calendar month; not enforced yet. */
+function parseMonthlyBudget(env: Env): number {
+  const text = envValue(env, "ALFRED_MONTHLY_BUDGET_USD") ?? "200";
+  const value = Number(text);
+  if (!Number.isFinite(value) || value <= 0) throw new Error(`ALFRED_MONTHLY_BUDGET_USD must be a finite number of USD > 0, got "${text}"`);
   return value;
 }
 
@@ -123,6 +133,7 @@ function parseIdeasAtVariable(env: Env): string | null {
 
 const ENV_PARSERS: { [K in keyof EnvSettings]: (env: Env) => EnvSettings[K] } = {
   dailyBudgetUsd: parseDailyBudget,
+  monthlyBudgetUsd: parseMonthlyBudget,
   runBudgetUsd: parseRunBudget,
   sessionIdleHours: parseSessionIdleHours,
   compactTokens: parseCompactTokens,
@@ -135,6 +146,7 @@ const ENV_PARSERS: { [K in keyof EnvSettings]: (env: Env) => EnvSettings[K] } = 
 export function envSettings(env: Env = process.env): EnvSettings {
   return {
     dailyBudgetUsd: ENV_PARSERS.dailyBudgetUsd(env),
+    monthlyBudgetUsd: ENV_PARSERS.monthlyBudgetUsd(env),
     runBudgetUsd: ENV_PARSERS.runBudgetUsd(env),
     sessionIdleHours: ENV_PARSERS.sessionIdleHours(env),
     compactTokens: ENV_PARSERS.compactTokens(env),
@@ -146,7 +158,7 @@ export function envSettings(env: Env = process.env): EnvSettings {
 
 /** Where the settings are read from while Alfred runs: the owner's store, once the handler has been given one. */
 export interface SettingsSource {
-  get(): Settings;
+  get(): EffectiveSettings;
 }
 
 let installed: SettingsSource | undefined;

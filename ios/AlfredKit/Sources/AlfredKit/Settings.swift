@@ -1,6 +1,6 @@
 import Foundation
 
-/// A setting the owner can change: the eight keys of the settings table. A key this client does not know decodes as it
+/// A setting the owner can change: the nine keys of the settings table. A key this client does not know decodes as it
 /// is, so a newer Alfred can add one.
 public struct SettingKey: ExtensibleString {
     public let rawValue: String
@@ -11,6 +11,7 @@ public struct SettingKey: ExtensibleString {
 
     public static let model = SettingKey(rawValue: "model")
     public static let dailyBudgetUsd = SettingKey(rawValue: "dailyBudgetUsd")
+    public static let monthlyBudgetUsd = SettingKey(rawValue: "monthlyBudgetUsd")
     public static let runBudgetUsd = SettingKey(rawValue: "runBudgetUsd")
     public static let sessionIdleHours = SettingKey(rawValue: "sessionIdleHours")
     public static let compactTokens = SettingKey(rawValue: "compactTokens")
@@ -25,6 +26,8 @@ public struct AlfredSettings: Decodable, Hashable, Sendable {
     public let model: TaskModel
     /// The spend per day, in USD.
     public let dailyBudgetUsd: Double
+    /// The spend per calendar month, in USD. Nil in a settings.updated event logged before the key existed.
+    public let monthlyBudgetUsd: Double?
     /// The spend cap of one chat run, in USD.
     public let runBudgetUsd: Double
     /// Idle hours before a new session. 0 turns rotation off.
@@ -51,6 +54,7 @@ public struct SettingsChanges: Hashable, Sendable {
 
     public let model: TaskModel?
     public let dailyBudgetUsd: Double?
+    public let monthlyBudgetUsd: Double?
     public let runBudgetUsd: Double?
     public let sessionIdleHours: Double?
     public let compactTokens: Int?
@@ -63,6 +67,7 @@ public struct SettingsChanges: Hashable, Sendable {
     public init(
         model: TaskModel? = nil,
         dailyBudgetUsd: Double? = nil,
+        monthlyBudgetUsd: Double? = nil,
         runBudgetUsd: Double? = nil,
         sessionIdleHours: Double? = nil,
         compactTokens: Int? = nil,
@@ -73,6 +78,7 @@ public struct SettingsChanges: Hashable, Sendable {
     ) {
         self.model = model
         self.dailyBudgetUsd = dailyBudgetUsd
+        self.monthlyBudgetUsd = monthlyBudgetUsd
         self.runBudgetUsd = runBudgetUsd
         self.sessionIdleHours = sessionIdleHours
         self.compactTokens = compactTokens
@@ -87,4 +93,6 @@ public struct SettingsChanges: Hashable, Sendable {
 public struct SettingsDetail: Decodable, Hashable, Sendable {
     public let settings: AlfredSettings
     public let spentTodayUsd: Double
+    /// What the owner has spent this calendar month, in USD. Nil from a server that does not send it.
+    public let spentMonthUsd: Double?
 }
