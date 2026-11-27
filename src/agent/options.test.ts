@@ -250,3 +250,11 @@ test("the Tasks section is short and says: only on request, the tap is the owner
   assert.match(section, /per-run cap/);
   assert.match(section, /[Pp]ause or end .* without asking/);
 });
+
+test("tasks refuse fork subagents: the SDK's fork switch is off and the Agent tool is denied the fork type", () => {
+  prepareWorkspace();
+  const options = agentOptions({ out: appOutbound(), model: "sonnet" });
+  assert.equal(options.env?.CLAUDE_CODE_FORK_SUBAGENT, "0");
+  assert.ok(options.disallowedTools?.includes("Agent(fork)"));
+  assert.ok(!options.allowedTools?.includes("Agent(fork)"));
+});
