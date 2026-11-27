@@ -148,7 +148,7 @@ curl --unix-socket "$STATE_DIR/api/alfred.sock" -N http://localhost/events
 
 A malformed value of a setting that `src/agent/config.ts` validates stops Alfred at startup with a message naming the variable.
 
-The variables are defaults. The app can override `ALFRED_MAX_BUDGET_USD`, `ALFRED_DAILY_BUDGET_USD`, `ALFRED_SESSION_IDLE_HOURS`, `ALFRED_COMPACT_TOKENS`, `ALFRED_MEMORY_SCAN_MINUTES`, `ALFRED_MEMORY_SCAN_BUDGET_USD` and `ALFRED_IDEAS_AT` while Alfred runs, and the model with `/model`; an override beats the environment, and the environment beats the built-in default.
+The variables are defaults. The app can override `ALFRED_MAX_BUDGET_USD`, `ALFRED_DAILY_BUDGET_USD`, `ALFRED_MONTHLY_BUDGET_USD`, `ALFRED_SESSION_IDLE_HOURS`, `ALFRED_COMPACT_TOKENS`, `ALFRED_MEMORY_SCAN_MINUTES`, `ALFRED_MEMORY_SCAN_BUDGET_USD` and `ALFRED_IDEAS_AT` while Alfred runs, and the model with `/model`; an override beats the environment, and the environment beats the built-in default.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -156,6 +156,7 @@ The variables are defaults. The app can override `ALFRED_MAX_BUDGET_USD`, `ALFRE
 | `ALFRED_LOG` | `info` | `debug` logs the agent's stderr |
 | `ALFRED_MAX_BUDGET_USD` | `10` | spend cap per query, follow-ups and background subagents included |
 | `ALFRED_DAILY_BUDGET_USD` | `20` | spend per day (owner's time zone), scheduled runs and idea generations included; once reached, nothing new starts |
+| `ALFRED_MONTHLY_BUDGET_USD` | `200` | spend per calendar month; not enforced yet |
 | `ALFRED_SESSION_IDLE_HOURS` | `4` | idle hours before the next task starts a new session; `0` disables |
 | `ALFRED_COMPACT_TOKENS` | `100000` | context size at which Claude Code compacts; `0` keeps its own window, else at least 20000 |
 | `ALFRED_MMX_BIN` | `$CLAUDE_CONFIG_DIR/skills/mmx/bin/mmx` (`~/.claude/…` when unset) | `mmx` executable for `generate_image` |

@@ -12,8 +12,8 @@
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
-import { DEFAULT_MODEL, type EnvSettings, type ModelKey, envSettings } from "../agent/config.ts";
-import { SettingKeySchema, type SettingKey, type Settings, SettingsUpdateSchema } from "../api/schema.ts";
+import { DEFAULT_MODEL, type EffectiveSettings, type EnvSettings, type ModelKey, envSettings } from "../agent/config.ts";
+import { SettingKeySchema, type SettingKey, SettingsUpdateSchema } from "../api/schema.ts";
 import { type EventLog, sharedEventLog } from "../events.ts";
 import { describeError, log } from "../log.ts";
 import { WORKBENCH_STATE_DIR } from "../runs.ts";
@@ -54,7 +54,7 @@ export interface SettingsStoreOptions {
 }
 
 /** Told after a change has been saved and logged: the settings now, and the settings before. */
-export type ChangeListener = (settings: Settings, previous: Settings) => void;
+export type ChangeListener = (settings: EffectiveSettings, previous: EffectiveSettings) => void;
 
 const isStoredKey = (key: string): key is StoredKey => (STORED_KEYS as readonly string[]).includes(key);
 
@@ -95,7 +95,7 @@ export class SettingsStore {
   private model: () => ModelKey;
   private overrides: Overrides;
   /** The settings as last written to the mirror (and, but for the startup one, announced). */
-  private announced: Settings;
+  private announced: EffectiveSettings;
   private readonly listeners = new Set<ChangeListener>();
 
   constructor({ file = SETTINGS_FILE, mirror = SETTINGS_MIRROR_FILE, events = sharedEventLog(), env = envSettings, model = () => DEFAULT_MODEL }: SettingsStoreOptions = {}) {
@@ -110,7 +110,7 @@ export class SettingsStore {
   }
 
   /** The effective settings now: the owner's overrides over the environment over the built-in defaults, the model from its source. */
-  get(): Settings {
+  get(): EffectiveSettings {
     return this.compute(this.overrides);
   }
 
@@ -143,7 +143,7 @@ export class SettingsStore {
    * log and the listeners hear of it. Returns the settings now. Throws InvalidSettings for a value outside the write
    * ranges, and the error of a save that fails, leaving everything as it was.
    */
-  update(changes: SettingsChanges): Settings {
+  update(changes: SettingsChanges): EffectiveSettings {
     checkChanges(changes);
     const next: Record<string, unknown> = { ...this.overrides };
     for (const key of changes.reset ?? []) delete next[key];
@@ -168,13 +168,13 @@ export class SettingsStore {
    * Announces the settings if an effective value differs from the last announced one. The agent handler calls it after
    * any change of the model; the comparison makes a call that changed nothing harmless.
    */
-  refresh(): Settings {
+  refresh(): EffectiveSettings {
     const settings = this.get();
     if (!isDeepStrictEqual(settings, this.announced)) this.announce(settings);
     return settings;
   }
 
-  private compute(overrides: Overrides): Settings {
+  private compute(overrides: Overrides): EffectiveSettings {
     const model = this.model();
     const values: EnvSettings = { ...this.env, ...overrides };
     const overridden = KEYS.filter((key) =>
@@ -184,7 +184,7 @@ export class SettingsStore {
   }
 
   /** Rewrites the mirror, appends the event and tells the listeners. */
-  private announce(settings: Settings): void {
+  private announce(settings: EffectiveSettings): void {
     const previous = this.announced;
     this.announced = settings;
     this.writeMirror(settings);
@@ -199,7 +199,7 @@ export class SettingsStore {
   }
 
   /** The workbench would show the old values; that is logged, not a reason to refuse the owner's change or to stop startup. */
-  private writeMirror(settings: Settings): void {
+  private writeMirror(settings: EffectiveSettings): void {
     try {
       writeJson(this.mirror, settings);
     } catch (err) {

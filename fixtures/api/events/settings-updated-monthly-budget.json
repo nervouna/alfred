@@ -1,0 +1,21 @@
+{
+  "id": 35,
+  "at": "2026-11-27T01:20:00.000Z",
+  "type": "settings.updated",
+  "data": {
+    "model": "opus",
+    "dailyBudgetUsd": 30,
+    "monthlyBudgetUsd": 300,
+    "runBudgetUsd": 10,
+    "sessionIdleHours": 4,
+    "compactTokens": 100000,
+    "memoryScanMinutes": 60,
+    "memoryScanBudgetUsd": 0.1,
+    "ideasAt": "08:00",
+    "overridden": [
+      "model",
+      "dailyBudgetUsd",
+      "monthlyBudgetUsd"
+    ]
+  }
+}

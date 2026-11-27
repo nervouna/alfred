@@ -40,7 +40,7 @@ public enum Command: Hashable, Sendable, Codable {
         case title, brief, schedule, model, budgetUsd, taskId, status
         case documentId, version, annotations
         case ideaId, reason, note
-        case dailyBudgetUsd, runBudgetUsd, sessionIdleHours, compactTokens, memoryScanMinutes, memoryScanBudgetUsd
+        case dailyBudgetUsd, monthlyBudgetUsd, runBudgetUsd, sessionIdleHours, compactTokens, memoryScanMinutes, memoryScanBudgetUsd
         case ideasAt, reset
         case file, name, kind, body
         case memoryDescription = "description"
@@ -117,6 +117,7 @@ public enum Command: Hashable, Sendable, Codable {
             self = .settingsUpdate(SettingsChanges(
                 model: try container.decodeIfPresent(TaskModel.self, forKey: .model),
                 dailyBudgetUsd: try container.decodeIfPresent(Double.self, forKey: .dailyBudgetUsd),
+                monthlyBudgetUsd: try container.decodeIfPresent(Double.self, forKey: .monthlyBudgetUsd),
                 runBudgetUsd: try container.decodeIfPresent(Double.self, forKey: .runBudgetUsd),
                 sessionIdleHours: try container.decodeIfPresent(Double.self, forKey: .sessionIdleHours),
                 compactTokens: try container.decodeIfPresent(Int.self, forKey: .compactTokens),
@@ -224,6 +225,7 @@ public enum Command: Hashable, Sendable, Codable {
             try container.encode("settings.update", forKey: .type)
             try container.encodeIfPresent(changes.model, forKey: .model)
             try container.encodeIfPresent(changes.dailyBudgetUsd, forKey: .dailyBudgetUsd)
+            try container.encodeIfPresent(changes.monthlyBudgetUsd, forKey: .monthlyBudgetUsd)
             try container.encodeIfPresent(changes.runBudgetUsd, forKey: .runBudgetUsd)
             try container.encodeIfPresent(changes.sessionIdleHours, forKey: .sessionIdleHours)
             try container.encodeIfPresent(changes.compactTokens, forKey: .compactTokens)

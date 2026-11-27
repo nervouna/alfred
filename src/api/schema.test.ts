@@ -856,10 +856,13 @@ test("the settings range constants are the ranges of the settings table", () => 
   assert.equal(MAX_MEMORY_SCAN_BUDGET_USD, 1);
 });
 
-test("the setting keys are the table's eight, and a Settings object has each of them and overridden", () => {
-  const keys = ["model", "dailyBudgetUsd", "runBudgetUsd", "sessionIdleHours", "compactTokens", "memoryScanMinutes", "memoryScanBudgetUsd", "ideasAt"];
+test("the setting keys are the table's nine, and a Settings object has each of them and overridden", () => {
+  const keys = ["model", "dailyBudgetUsd", "monthlyBudgetUsd", "runBudgetUsd", "sessionIdleHours", "compactTokens", "memoryScanMinutes", "memoryScanBudgetUsd", "ideasAt"];
   assert.deepEqual(SettingKeySchema.options, keys);
-  assert.deepEqual(Object.keys(settingsResult().settings as object).filter((key) => key !== "overridden").sort(), [...keys].sort());
+  const withMonthly = JSON.parse(readFixture("responses", "settings-result-monthly-budget.json")).settings;
+  assert.deepEqual(Object.keys(withMonthly).filter((key) => key !== "overridden").sort(), [...keys].sort());
+  const withoutMonthly = Object.keys(settingsResult().settings as object).filter((key) => key !== "overridden");
+  assert.deepEqual(withoutMonthly.sort(), keys.filter((key) => key !== "monthlyBudgetUsd").sort(), "an old response lacks the monthly budget only");
 });
 
 test("settings.update sets each setting within its range, bounds included, and refuses a value beyond it", () => {
@@ -868,6 +871,12 @@ test("settings.update sets each setting within its range, bounds included, and r
   assert.equal(ok({ dailyBudgetUsd: 100 }), true, "the daily budget's upper bound");
   assert.equal(ok({ dailyBudgetUsd: 0.99 }), false, "below 1");
   assert.equal(ok({ dailyBudgetUsd: 101 }), false, "above 100");
+  assert.equal(ok({ monthlyBudgetUsd: 1 }), true, "the monthly budget's lower bound");
+  assert.equal(ok({ monthlyBudgetUsd: 1000 }), true, "the monthly budget's upper bound");
+  assert.equal(ok({ monthlyBudgetUsd: 0.99 }), false, "monthly below 1");
+  assert.equal(ok({ monthlyBudgetUsd: 1001 }), false, "monthly above 1000");
+  assert.equal(ok({ monthlyBudgetUsd: 0 }), false, "monthly zero");
+  assert.equal(settingsUpdate({ reset: ["monthlyBudgetUsd"] }).ok, true, "the monthly budget can be reset");
   assert.equal(ok({ runBudgetUsd: 1 }), true);
   assert.equal(ok({ runBudgetUsd: 20 }), true);
   assert.equal(ok({ runBudgetUsd: 20.5 }), false);
@@ -919,13 +928,13 @@ test("a settings.update changes at least one setting or resets one, and resets e
 
 test("every invalid settings.update command is rejected", () => {
   const invalid = fixtureNames("invalid-commands").filter((name) => name.startsWith("settings-"));
-  assert.equal(invalid.length, 17, "one file per rule of the settings command");
+  assert.equal(invalid.length, 18, "one file per rule of the settings command");
   for (const name of invalid) {
     assert.equal(parseCommand(JSON.parse(readFixture("invalid-commands", name))).ok, false, name);
   }
 });
 
-test("a settings response has all eight keys and overridden, which names each override once, in the table's order", () => {
+test("a settings response has all nine keys and overridden, which names each override once, in the table's order", () => {
   const result = settingsResult();
   const withOverridden = (overridden: unknown) => SettingsResultSchema.safeParse({ settings: { ...(result.settings as object), overridden } }).success;
   assert.equal(withOverridden(["model", "dailyBudgetUsd", "ideasAt"]), true);
@@ -955,10 +964,36 @@ test("the settings detail's spend today is 0 or more", () => {
   assert.equal(SettingsDetailSchema.safeParse({ ...detail, spentTodayUsd: -0.01 }).success, false);
 });
 
+test("the settings detail's spend this month is optional, and 0 or more when present", () => {
+  const detail = JSON.parse(readFixture("responses", "settings-detail.json"));
+  assert.equal(SettingsDetailSchema.safeParse(detail).success, true, "an old response without it");
+  assert.equal(SettingsDetailSchema.safeParse({ ...detail, spentMonthUsd: 0 }).success, true, "zero");
+  assert.equal(SettingsDetailSchema.safeParse({ ...detail, spentMonthUsd: 61.37 }).success, true);
+  assert.equal(SettingsDetailSchema.safeParse({ ...detail, spentMonthUsd: -0.01 }).success, false);
+});
+
 test("the settings.updated event carries the whole settings", () => {
   const event = JSON.parse(readFixture("events", "settings-updated.json"));
   const parsed = EventSchema.safeParse(event);
   assert.equal(parsed.success, true);
   assert.deepEqual(eventData("settings-updated.json").overridden, ["model", "dailyBudgetUsd"]);
   assert.equal(EventSchema.safeParse({ ...event, data: { ...event.data, ideasAt: undefined } }).success, false, "every key is there");
+});
+
+test("a settings.updated event from before the monthly budget, which lacks the key, still parses; one with it does too", () => {
+  const old = JSON.parse(readFixture("events", "settings-updated.json"));
+  assert.equal(EventSchema.safeParse(old).success, true);
+  assert.equal("monthlyBudgetUsd" in old.data, false, "the old-log case has no monthly budget");
+  const monthly = JSON.parse(readFixture("events", "settings-updated-monthly-budget.json"));
+  assert.equal(EventSchema.safeParse(monthly).success, true);
+  assert.equal(eventData("settings-updated-monthly-budget.json").monthlyBudgetUsd, 300);
+  assert.equal(EventSchema.safeParse({ ...monthly, data: { ...monthly.data, monthlyBudgetUsd: 0 } }).success, true, "a response or event may carry a value beyond the command's range");
+});
+
+test("a settings response from before the monthly budget, which lacks the key, still parses", () => {
+  const old = JSON.parse(readFixture("responses", "settings-result.json"));
+  assert.equal(SettingsResultSchema.safeParse(old).success, true);
+  assert.equal("monthlyBudgetUsd" in old.settings, false);
+  const monthly = JSON.parse(readFixture("responses", "settings-result-monthly-budget.json"));
+  assert.equal(SettingsResultSchema.parse(monthly).settings.monthlyBudgetUsd, 300);
 });
