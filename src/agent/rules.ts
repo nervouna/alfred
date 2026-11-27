@@ -194,6 +194,9 @@ export function touchedPaths(toolName: string, input: Record<string, unknown>, r
     case "mcp__alfred__generate_image":
       paths = [str(input.output) ?? "images"];
       break;
+    case "mcp__alfred__save_media":
+      paths = [str(input.output) ?? "images"];
+      break;
     default:
       paths = [];
   }

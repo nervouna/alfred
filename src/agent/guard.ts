@@ -62,6 +62,7 @@ const WRITE_PATHS: Record<string, string[]> = {
   mcp__alfred__move_file: ["from", "to"],
   mcp__alfred__render_pdf: ["output"],
   mcp__alfred__generate_image: ["output"],
+  mcp__alfred__save_media: ["output"],
 };
 
 /** Input fields that name a path a tool call reads without writing it, beyond PATH_TOOLS. */

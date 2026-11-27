@@ -4,12 +4,15 @@
 // nothing the agent can write reaches it. It maps a server name to its entry:
 //   { "name": { "type": "http", "url": "https://…", "headers": { "Authorization": "env:SOME_VARIABLE" },
 //               "tools": [...], "unattended": [...], "subagents": [...], "timeoutMs": 30000,
-//               "spend": { "tool": { "priceUsd": 0.04, "maxPerRun": 5 } } } }
+//               "spend": { "tool": { "priceUsd": 0.04, "maxPerRun": 5 } }, "mediaOrigins": ["https://…/media/"] } }
 // A header value names an environment variable, so no secret is in the file. `tools` is what chat offers, `unattended`
 // what task and revision runs also get, `subagents` what subagents may call; the last two default to none and may only
 // name tools of `tools`. A subagent of an unattended run needs a name in both. Policy lives in `externalToolGuard`.
 // `spend` is about a tool that costs money outside Anthropic: `priceUsd` is the owner's estimate per call, recorded in the
 // external spend log (src/spend.ts) for each call that succeeds, and `maxPerRun` caps its calls in one run.
+// `mediaOrigins` marks a server whose tools return files as URLs: the URL prefixes whose files save_media may download
+// (src/agent/media.ts). A tool offered from such a server is a media tool; save_media is offered to a run or a subagent exactly
+// when it has one, and only for the prefixes of the servers that offer it something.
 
 import path from "node:path";
 
@@ -40,6 +43,8 @@ export interface ExternalServer {
   subagents: readonly string[];
   /** By tool name; only tools of `tools`. */
   spend: Readonly<Record<string, ToolSpend>>;
+  /** URL prefixes (https, ending in "/") whose files save_media may save; empty for a server that returns no files. */
+  mediaOrigins: readonly string[];
   timeoutMs?: number;
 }
 
@@ -51,7 +56,7 @@ type Env = Record<string, string | undefined>;
 const NAME = /^[A-Za-z0-9_-]+$/;
 const ENV_REF = /^env:([A-Za-z_][A-Za-z0-9_]*)$/;
 const HEADER_NAME = /^[A-Za-z0-9-]+$/;
-const KNOWN = ["type", "url", "headers", "tools", "unattended", "subagents", "spend", "timeoutMs"];
+const KNOWN = ["type", "url", "headers", "tools", "unattended", "subagents", "spend", "mediaOrigins", "timeoutMs"];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -87,6 +92,40 @@ function spendMap(name: string, value: unknown, tools: readonly string[]): Recor
     spend[tool] = { ...(priceUsd === undefined ? {} : { priceUsd }), ...(maxPerRun === undefined ? {} : { maxPerRun }) };
   }
   return spend;
+}
+
+/**
+ * The `mediaOrigins` entry of a server: a list of https URL prefixes. Each is kept as a directory prefix (its path ends in "/"), so
+ * a path matches at a segment boundary only, and holds no credentials, query or fragment.
+ */
+function mediaOriginList(name: string, value: unknown): string[] {
+  const bad = (why: string) => new InvalidExternalServers(`${EXTERNAL_SERVERS_FILE}: "${name}": mediaOrigins ${why}`);
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || !value.length) throw bad("must be a list of URLs");
+  const origins = new Set<string>();
+  for (const item of value) {
+    let url: URL | undefined;
+    try {
+      url = typeof item === "string" ? new URL(item) : undefined;
+    } catch {
+      // Reported below.
+    }
+    if (!url) throw bad("must be a list of URLs");
+    if (url.protocol !== "https:") throw bad(`entry ${item} must be https`);
+    if (url.username || url.password) throw bad(`entry ${item} must not hold credentials`);
+    if (url.search || url.hash) throw bad(`entry ${item} must not hold a query or fragment`);
+    origins.add(url.origin + (url.pathname.endsWith("/") ? url.pathname : `${url.pathname}/`));
+  }
+  return [...origins];
+}
+
+/** Whether `url` is under one of `prefixes` (as mediaOriginList keeps them): same scheme, host and port, no credentials, and a path inside the prefix's directory. */
+export function underMediaOrigin(url: URL, prefixes: readonly string[]): boolean {
+  if (url.username || url.password) return false;
+  return prefixes.some((prefix) => {
+    const base = new URL(prefix);
+    return url.protocol === base.protocol && url.host === base.host && url.pathname.startsWith(base.pathname);
+  });
 }
 
 /** Checks the parsed file and reads each header from `env`. Throws InvalidExternalServers naming the entry. */
@@ -127,11 +166,12 @@ export function parseExternalServers(raw: unknown, env: Env = process.env): Exte
       if (extra) throw bad(name, `${key} names ${extra}, which tools does not offer`);
     }
     const spend = spendMap(name, entry.spend, tools);
+    const mediaOrigins = mediaOriginList(name, entry.mediaOrigins);
     const { timeoutMs } = entry;
     if (timeoutMs !== undefined && (typeof timeoutMs !== "number" || !Number.isInteger(timeoutMs) || timeoutMs < 1000)) {
       throw bad(name, "timeoutMs must be a whole number of at least 1000");
     }
-    servers.push({ name, url: url.href, headers, tools, unattended, subagents, spend, ...(timeoutMs === undefined ? {} : { timeoutMs }) });
+    servers.push({ name, url: url.href, headers, tools, unattended, subagents, spend, mediaOrigins, ...(timeoutMs === undefined ? {} : { timeoutMs }) });
   }
   return servers;
 }
@@ -189,8 +229,43 @@ export function externalOffer(servers: readonly ExternalServer[], unattended: bo
   return { mcpServers, allowedTools };
 }
 
+const IMAGE_TOOL = "generate_image";
+const SAVE_MEDIA_TOOL = "mcp__alfred__save_media";
+
+/** What a run gets of the media tools, decided in one place from what the file offers each thread. */
+export interface MediaOffer {
+  /** The main thread is offered a media tool, so it gets save_media. */
+  main: boolean;
+  /** The URL prefixes save_media accepts in this run: those of the servers that offer the main thread a tool. */
+  origins: string[];
+  /** Subagents are offered a media tool, so they may call save_media. */
+  subagents: boolean;
+  /** A configured server offers the main thread generate_image, so Alfred's own image tool (mmx) is left out of the run. */
+  externalImage: boolean;
+}
+
+export function mediaOffer(servers: readonly ExternalServer[], unattended: boolean): MediaOffer {
+  const offering = servers.filter((s) => s.mediaOrigins.length && mainTools(s, unattended).length);
+  return {
+    main: offering.length > 0,
+    origins: [...new Set(offering.flatMap((s) => s.mediaOrigins))],
+    subagents: servers.some((s) => s.mediaOrigins.length && subagentTools(s, unattended).length),
+    externalImage: servers.some((s) => mainTools(s, unattended).includes(IMAGE_TOOL)),
+  };
+}
+
+/** The tools a subagent's definition lists beyond its role's own: what the file names for subagents, and save_media when one of them is a media tool. */
+export function subagentExternalTools(servers: readonly ExternalServer[], unattended: boolean): string[] {
+  const names = servers.flatMap((s) => subagentTools(s, unattended).map((t) => `mcp__${s.name}__${t}`));
+  return mediaOffer(servers, unattended).subagents ? [...names, SAVE_MEDIA_TOOL] : names;
+}
+
 /** A denial reason when `toolName` is an MCP tool that is not Alfred's own and this run or thread is not offered, else undefined. */
 export function checkExternalTool(servers: readonly ExternalServer[], toolName: string, inSubagent: boolean, unattended: boolean): string | undefined {
+  // save_media is Alfred's own, but a subagent has it only when the file offers it a media tool.
+  if (toolName === SAVE_MEDIA_TOOL && inSubagent && !mediaOffer(servers, unattended).subagents) {
+    return `${toolName} is not offered to subagents: the owner's configuration names no media tool for that.`;
+  }
   if (!toolName.startsWith("mcp__") || toolName.startsWith(`mcp__${OWN_SERVER}__`)) return undefined;
   const [, serverName, ...rest] = toolName.split("__");
   const tool = rest.join("__");

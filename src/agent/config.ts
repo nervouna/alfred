@@ -308,14 +308,16 @@ export const SUBAGENT_RULES = `You are a subagent of Alfred, a personal research
 - Name every file you wrote by its workspace path, and cite every source you rely on as a link.`;
 
 /** Subagent definitions for the SDK's `agents` option, one per role; the shared rules come from the SubagentStart hook. */
-export function subagentDefinitions(): Record<SubagentRoleName, AgentDefinition> {
+export function subagentDefinitions(options: { external?: readonly string[]; generateImage?: boolean } = {}): Record<SubagentRoleName, AgentDefinition> {
+  const { external = [], generateImage = true } = options;
   const entries = Object.entries(SUBAGENT_ROLES).map(([name, role]): [string, AgentDefinition] => [
     name,
     {
       description: role.description,
       prompt: role.focus,
       model: MODELS[role.model],
-      tools: [...role.tools],
+      // An external tool is listed only when the owner's file names it for subagents; Alfred's own image tool is left out when a configured server offers one.
+      tools: [...role.tools.filter((t) => generateImage || t !== "mcp__alfred__generate_image"), ...external],
       disallowedTools: SUBAGENT_DISALLOWED_TOOLS,
       maxTurns: role.maxTurns,
       ...("skills" in role ? { skills: [...role.skills] } : {}),
@@ -477,6 +479,8 @@ export interface PromptContext {
   subagents?: boolean;
   /** Whether AskUserQuestion is offered, so the prompt says when to use it; default false. */
   questions?: boolean;
+  /** Whether a media tool is offered (an external server with mediaOrigins), so the prompt says how its results are saved; default false. */
+  media?: boolean;
   /** Whether the task tools are offered, so the prompt says how to use them; default false. */
   tasks?: boolean;
   /** Whether the workbench section is included; default WORKBENCH_ON. */
@@ -495,6 +499,12 @@ task_list, task_create and task_update manage the owner's scheduled tasks.
 - Prefer haiku or sonnet unless the owner asks otherwise, and give a realistic per-run cap.
 - Pause or end a task on request without asking.`;
 }
+
+/** The media tools' rules, for the runs that are offered a media tool (see media.ts). */
+const MEDIA_SECTION = `# Media
+- A media tool returns its images, video and speech as URLs, not files. Save a result with save_media before you read or deliver it, then deliver the saved file.
+- A video call that returned a task id is still running: fetch it with get_video, and never start the video again.
+- Every media call is billed, even when it fails, so never retry a failed call on your own.`;
 
 /** When to use the AskUserQuestion tool, as the last bullet of the reply rules. */
 const ASK_LINE =
@@ -539,6 +549,7 @@ Your working directory is the workspace, and nothing outside it is accessible. F
   if (context.workbench ?? WORKBENCH_ON) sections.push(workbenchSection(context.workbenchUrl ?? WORKBENCH_URL));
   if (context.subagents !== false) sections.push(delegationSection());
   if (context.tasks) sections.push(tasksSection(tz));
+  if (context.media) sections.push(MEDIA_SECTION);
   sections.push(rulesPromptSection(context.rootRules), memorySection(context.memory ?? { lines: [], total: 0 }));
   return sections.join("\n\n");
 }
