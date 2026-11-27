@@ -20,11 +20,41 @@ const {
   newRunId,
   pruneRunFiles,
   readRunFile,
+  RunMemorySampler,
   readRunLog,
   runIdCandidates,
   startHeartbeat,
   stepDetail,
 } = await import("./runs.ts");
+
+const MB = 1024 * 1024;
+
+/** A memory reader the test sets, and a clock that keeps its timers in a map the test ticks by hand. */
+function memoryHarness(initial: { rssBytes: number; cgroupBytes?: number }) {
+  const state = { current: initial, reads: 0 };
+  const timers = new Map<number, () => void>();
+  let nextId = 1;
+  const lines: string[] = [];
+  const sampler = new RunMemorySampler({
+    read: () => {
+      state.reads++;
+      return state.current;
+    },
+    clock: {
+      setInterval: (fn: () => void) => {
+        const id = nextId++;
+        timers.set(id, fn);
+        return id;
+      },
+      clearInterval: (id: unknown) => {
+        timers.delete(id as number);
+      },
+    },
+    info: (msg: string) => lines.push(msg),
+  });
+  const tick = () => [...timers.values()].forEach((fn) => fn());
+  return { state, timers, lines, sampler, tick };
+}
 
 /** The run.updated events in a log, oldest first, as run id and status. */
 function runUpdates(log: InstanceType<typeof EventLog>): { id: string; status: string }[] {
@@ -294,4 +324,78 @@ test("the heartbeat is written at once and again on a clean stop, which marks Al
   const stopped = JSON.parse(fs.readFileSync(STATUS_FILE, "utf8")) as Record<string, unknown>;
   assert.ok(typeof stopped.stoppedAt === "string");
   assert.equal(stopped.startedAt, beat.startedAt);
+});
+
+test("a single run logs its memory at start, its peak while live, and live=1", () => {
+  const h = memoryHarness({ rssBytes: 300 * MB, cgroupBytes: 100 * MB });
+  const events = new EventLog(path.join(tmp, "memory-single.jsonl"));
+  const run = new RunRecorder({ kind: "task", title: "内存", events, memory: h.sampler });
+  h.state.current = { rssBytes: 300 * MB, cgroupBytes: 150 * MB };
+  h.tick();
+  h.state.current = { rssBytes: 300 * MB, cgroupBytes: 120 * MB };
+  h.tick();
+  h.state.current = { rssBytes: 300 * MB, cgroupBytes: 90 * MB };
+  run.finish("done");
+
+  assert.deepEqual(h.lines, [`run memory run=${run.id} kind=task start=100 peak=150 live=1`]);
+});
+
+test("two overlapping runs each log live=2 and the peak seen while each was live", () => {
+  const h = memoryHarness({ rssBytes: 0, cgroupBytes: 100 * MB });
+  const events = new EventLog(path.join(tmp, "memory-overlap.jsonl"));
+  const a = new RunRecorder({ kind: "task", title: "甲", events, memory: h.sampler });
+  h.state.current = { rssBytes: 0, cgroupBytes: 150 * MB };
+  h.tick();
+  h.state.current = { rssBytes: 0, cgroupBytes: 200 * MB };
+  const b = new RunRecorder({ kind: "subagent", title: "乙", events, memory: h.sampler });
+  h.state.current = { rssBytes: 0, cgroupBytes: 120 * MB };
+  a.finish("done");
+  h.state.current = { rssBytes: 0, cgroupBytes: 400 * MB };
+  b.finish("done");
+
+  assert.deepEqual(h.lines, [
+    `run memory run=${a.id} kind=task start=100 peak=150 live=2`,
+    `run memory run=${b.id} kind=subagent start=200 peak=400 live=2`,
+  ]);
+});
+
+test("a queued run is not sampled until start()", () => {
+  const h = memoryHarness({ rssBytes: 0, cgroupBytes: 50 * MB });
+  const events = new EventLog(path.join(tmp, "memory-queued.jsonl"));
+  const run = new RunRecorder({ kind: "subagent", title: "排队", queued: true, events, memory: h.sampler });
+  assert.equal(h.state.reads, 0, "no read while queued");
+  assert.equal(h.timers.size, 0, "no timer while queued");
+
+  h.state.current = { rssBytes: 0, cgroupBytes: 70 * MB };
+  run.start();
+  assert.equal(h.state.reads, 1, "one read when the run starts running");
+  assert.equal(h.timers.size, 1);
+  run.finish("done");
+  assert.deepEqual(h.lines, [`run memory run=${run.id} kind=subagent start=70 peak=70 live=1`]);
+});
+
+test("the sampler's timer is gone after the last live run finishes", () => {
+  const h = memoryHarness({ rssBytes: 0, cgroupBytes: 10 * MB });
+  const events = new EventLog(path.join(tmp, "memory-timer.jsonl"));
+  const a = new RunRecorder({ kind: "task", title: "甲", events, memory: h.sampler });
+  const b = new RunRecorder({ kind: "task", title: "乙", events, memory: h.sampler });
+  assert.equal(h.timers.size, 1, "one timer for all live runs");
+  a.finish("done");
+  assert.equal(h.timers.size, 1, "still running while b is live");
+  b.finish("failed", "boom");
+  assert.equal(h.timers.size, 0, "stopped with the last live run");
+  const readsAfter = h.state.reads;
+  h.tick();
+  assert.equal(h.state.reads, readsAfter, "no sample after the timer is gone");
+});
+
+test("without cgroup v2 the log uses rssBytes and says source=rss", () => {
+  const h = memoryHarness({ rssBytes: 80 * MB });
+  const events = new EventLog(path.join(tmp, "memory-rss.jsonl"));
+  const run = new RunRecorder({ kind: "task", title: "无 cgroup", events, memory: h.sampler });
+  h.state.current = { rssBytes: 90 * MB };
+  h.tick();
+  run.finish("done");
+
+  assert.deepEqual(h.lines, [`run memory run=${run.id} kind=task start=80 peak=90 live=1 source=rss`]);
 });
