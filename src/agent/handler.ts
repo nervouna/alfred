@@ -110,7 +110,7 @@ import type { ModelKey } from "./config.ts";
 import { BackgroundRuns } from "./background.ts";
 import type { QueuedBrief } from "./background.ts";
 import { ResponseLedger, subagentTranscript, unitPrices } from "./cost.ts";
-import { externalOffer, externalServersForRun, externalSpendHooks, externalToolGuard } from "./external.ts";
+import { externalOffer, externalServersForRun, externalSpendHooks, externalToolGuard, mediaOffer, subagentExternalTools } from "./external.ts";
 import { resolveInside, workspaceGuard } from "./guard.ts";
 import { TaskInput, answeredBy } from "./input.ts";
 import { EXTRACT_MODEL, MEMORY_LOCK_FILE, MemoryScanScheduler, SCAN_TIMEOUT_MS, failedScanCost, scanTranscripts, transcriptDirs } from "./memory-scan.ts";
@@ -129,7 +129,7 @@ import type { AgentUserState, RevisionDelivery, RunRef, TaskDelivery } from "./s
 import { PROTECTED_PATHS, SubagentTracker, agentFailureHook, subagentGuard, subagentRulesHook, unattendedAdmission } from "./subagents.ts";
 import type { AgentAdmission, LiveSubagent } from "./subagents.ts";
 import { TASK_TOOL_NAMES, taskToolDefinitions } from "./task-tools.ts";
-import { ALFRED_TOOL_NAMES, REVISION_TOOL_NAMES, SPEND_TOOL_NAMES, createAlfredTools } from "./tools.ts";
+import { ALFRED_TOOL_NAMES, MEDIA_TOOL_NAMES, REVISION_TOOL_NAMES, SPEND_TOOL_NAMES, createAlfredTools } from "./tools.ts";
 
 const PRUNE_INTERVAL_MS = 24 * 3_600_000;
 /** On shutdown, how long running tasks get to stop and write their records. */
@@ -627,6 +627,9 @@ export function agentOptions(params: {
   // The owner's external MCP servers, read now: an edit of the file applies to the next run.
   const external = externalServersForRun();
   const offer = externalOffer(external, Boolean(unattended));
+  // Media: save_media only for a run that is offered a media tool, and Alfred's own image tool only when no configured server offers one.
+  const media = mediaOffer(external, Boolean(unattended));
+  const alfredTools = ALFRED_TOOL_NAMES.filter((name) => !media.externalImage || name !== "mcp__alfred__generate_image");
   // Calls of priced external tools count in the run they belong to; a run with no record of its own (a bare query) gets a fresh id.
   const runId = params.run?.id ?? crypto.randomUUID();
   const spend = externalSpendHooks(external, runId);
@@ -640,18 +643,18 @@ export function agentOptions(params: {
     env: agentEnv(),
     settingSources: [],
     settings: AGENT_SETTINGS,
-    systemPrompt: systemPrompt(new Date(), { rootRules: rules.loadRoot(), memory, subagents, questions: Boolean(params.ask), tasks: Boolean(taskTools) }),
+    systemPrompt: systemPrompt(new Date(), { rootRules: rules.loadRoot(), memory, subagents, questions: Boolean(params.ask), tasks: Boolean(taskTools), media: media.main }),
     tools,
-    allowedTools: [...builtin, ...ALFRED_TOOL_NAMES, ...(replying ? REVISION_TOOL_NAMES : []), ...(taskTools ? TASK_TOOL_NAMES : []), ...(spendQuery ? SPEND_TOOL_NAMES : []), ...offer.allowedTools],
+    allowedTools: [...builtin, ...alfredTools, ...(media.main ? MEDIA_TOOL_NAMES : []), ...(replying ? REVISION_TOOL_NAMES : []), ...(taskTools ? TASK_TOOL_NAMES : []), ...(spendQuery ? SPEND_TOOL_NAMES : []), ...offer.allowedTools],
     plugins: skillPlugins(),
     skills: "all",
-    agents: subagents ? subagentDefinitions() : undefined,
+    agents: subagents ? subagentDefinitions({ external: subagentExternalTools(external, Boolean(unattended)), generateImage: !media.externalImage }) : undefined,
     permissionMode: "dontAsk",
     // Second line behind CLAUDE_CODE_FORK_SUBAGENT=0 in agentEnv: the fork type is denied even if the switch is ignored.
     disallowedTools: ["Agent(fork)"],
     // Not a way to grant anything: the CLI enables AskUserQuestion only when a canUseTool is set (see questions.ts).
     canUseTool: params.ask ? denyPermissionPrompts : undefined,
-    mcpServers: { alfred: createAlfredTools(params.out, params.abortController?.signal, params.run, taskTools, params.documents, replying, spendQuery), ...offer.mcpServers },
+    mcpServers: { alfred: createAlfredTools(params.out, params.abortController?.signal, params.run, taskTools, params.documents, replying, spendQuery, { mediaOrigins: media.main ? media.origins : [], generateImage: !media.externalImage }), ...offer.mcpServers },
     // A server's headers travel in the initialize request, never on the command line.
     mcpServersDelivery: "initialize",
     hooks: {

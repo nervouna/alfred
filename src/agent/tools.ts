@@ -19,9 +19,12 @@ import { SPEND_GROUPS, formatSpendReport, querySpend, readExternalSpend, spendPe
 import { WORKSPACE_DIR } from "../store.ts";
 import { resolveInside } from "./guard.ts";
 import { ASPECT_RATIOS, MAX_IMAGES_PER_CALL, MAX_IMAGES_PER_TASK, createImageGenerator } from "./image.ts";
+import { saveMedia } from "./media.ts";
 import { QUESTION_HOOK_TIMEOUT_SECONDS } from "./questions.ts";
 
 export const ALFRED_TOOL_NAMES = ["mcp__alfred__deliver", "mcp__alfred__move_file", "mcp__alfred__render_pdf", "mcp__alfred__generate_image"];
+/** The tool a run has only when the owner's configuration offers it a media tool (external.ts: mediaOffer). */
+export const MEDIA_TOOL_NAMES = ["mcp__alfred__save_media"];
 /** The tool only a chat run has: read-only, and denied to subagents (subagents.ts). */
 export const SPEND_TOOL_NAMES = ["mcp__alfred__spend_query"];
 /** The tools only a revision run has, beside ALFRED_TOOL_NAMES. */
@@ -55,6 +58,13 @@ export function anySignal(run: AbortSignal | undefined, call: AbortSignal | unde
   return call ? AbortSignal.any([run, call]) : run;
 }
 
+/** How a run's media tools differ from the default: the URL prefixes save_media accepts (without them there is no save_media), whether Alfred's own mmx image tool is there, and the size limit. */
+export interface MediaToolOptions {
+  mediaOrigins?: readonly string[];
+  generateImage?: boolean;
+  mediaMaxBytes?: number;
+}
+
 /**
  * Alfred's tools, bound to the channel a run delivers on, for the duration of the run. Each one stops when
  * `signal` aborts (the run is stopped) or when its own call's signal does (the turn is interrupted). `run`
@@ -62,7 +72,15 @@ export function anySignal(run: AbortSignal | undefined, call: AbortSignal | unde
  * the document store: with it, a file delivered becomes a document, and a file moved takes its document along.
  * `revision` is set for a revision run, whose `run` is its record: it also gets reply_annotation.
  */
-export function alfredToolDefinitions(out: Outbound, signal?: AbortSignal, run?: RunRecorder, documents?: Documents, revision = false, chat = false) {
+export function alfredToolDefinitions(
+  out: Outbound,
+  signal?: AbortSignal,
+  run?: RunRecorder,
+  documents?: Documents,
+  revision = false,
+  chat = false,
+  media: MediaToolOptions = {},
+) {
   const deliver = tool(
     "deliver",
     "Deliver a file from the workspace to the owner in the app. A delivered file becomes a document the owner can annotate in the app. Revise a delivered document in place, under the same path, since every version is kept: change the file and deliver it again, and do not write a copy under a new name. The app opens Markdown, PDF, images, video, text files and HTML reports; an HTML report opens in a sandbox where inline scripts and SVG charts work, with no network access.",
@@ -199,7 +217,28 @@ export function alfredToolDefinitions(out: Outbound, signal?: AbortSignal, run?:
     },
   );
 
-  const tools: SdkMcpToolDefinition<any>[] = [deliver, moveFile, renderPdfTool, generateImage];
+  const saveMediaTool = tool(
+    "save_media",
+    "Save a file that a media tool (image, video or speech generation) returned as a URL into the workspace, so it can be read and delivered. Only URLs under the media origins the owner configured are accepted, redirects included; up to 100 MB; only images, video and audio. Without output the file goes to images/<date>/, video/<date>/ or audio/<date>/ by its type. An existing file is never overwritten. Deliver the saved file with deliver; the URL itself cannot be sent.",
+    {
+      url: z.string().min(1).describe("The URL a media tool returned"),
+      output: z.string().optional().describe("Workspace path to save to; default images/<date>/, video/<date>/ or audio/<date>/ by content type"),
+    },
+    async ({ url, output }, extra) => {
+      try {
+        const saved = await saveMedia(url, output, { root: WORKSPACE_DIR, origins: media.mediaOrigins ?? [], signal: anySignal(signal, callSignal(extra)), maxBytes: media.mediaMaxBytes });
+        run?.wrote(saved.file, "save_media");
+        log.info(`agent saved ${saved.file} (${saved.bytes} bytes, ${saved.contentType})`);
+        return ok(`Saved ${saved.file} (${humanSize(saved.bytes)}, ${saved.contentType}). Read it to check it, and deliver it with deliver if the owner should have it.`);
+      } catch (err) {
+        return fail(describeError(err));
+      }
+    },
+  );
+
+  const tools: SdkMcpToolDefinition<any>[] = [deliver, moveFile, renderPdfTool];
+  if (media.generateImage !== false) tools.push(generateImage);
+  if (media.mediaOrigins?.length) tools.push(saveMediaTool);
   if (revision && documents && run) tools.push(replyAnnotationTool(documents, run, signal));
   if (chat) tools.push(spendQueryTool());
   return tools;
@@ -273,11 +312,12 @@ export function createAlfredTools(
   documents?: Documents,
   revision = false,
   chat = false,
+  media: MediaToolOptions = {},
 ) {
   return createSdkMcpServer({
     name: "alfred",
     version: "0.1.0",
-    tools: [...alfredToolDefinitions(out, signal, run, documents, revision, chat), ...asking],
+    tools: [...alfredToolDefinitions(out, signal, run, documents, revision, chat, media), ...asking],
     alwaysLoad: true,
     ...(asking.length ? { timeout: QUESTION_HOOK_TIMEOUT_SECONDS * 1000 } : {}),
   });

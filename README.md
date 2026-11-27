@@ -173,7 +173,34 @@ The variables are defaults. The app can override `ALFRED_MAX_BUDGET_USD`, `ALFRE
 | `CF_ACCESS_SERVICE_CLIENT_ID`, `CF_ACCESS_SERVICE_CLIENT_SECRET` | none | the app's Access service token; `pair` puts both in the QR code |
 | `ALFRED_APNS_KEY_FILE`, `ALFRED_APNS_KEY_ID`, `ALFRED_APNS_TEAM_ID`, `ALFRED_APNS_TOPIC` | none | push: the `.p8` key file, its id, the Apple team id, the app's bundle id; with any one missing push is off and the log names it |
 
-## State and files
+### Images, video and speech through affogato
+
+[affogato](https://github.com/nervouna/affogato) is a remote MCP server (streamable HTTP, bearer token) that generates and edits images, generates video and speech, and answers with URLs under its own `/media/` path. To attach it, add an entry to `$STATE_DIR/mcp-servers.json` (see [docs/agent.md](docs/agent.md#agent-sandbox)); the placeholder host and every price below are examples, to be replaced with the owner's own figures:
+
+```json
+{
+  "affogato": {
+    "type": "http",
+    "url": "https://affogato.example/mcp",
+    "headers": { "Authorization": "env:AFFOGATO_AUTHORIZATION" },
+    "tools": ["generate_image", "edit_image", "generate_video", "get_video", "generate_speech", "list_voices", "server_info"],
+    "mediaOrigins": ["https://affogato.example/media/"],
+    "spend": {
+      "generate_image": { "priceUsd": 0.05, "maxPerRun": 4 },
+      "edit_image": { "priceUsd": 0.05, "maxPerRun": 4 },
+      "generate_video": { "priceUsd": 1, "maxPerRun": 1 },
+      "generate_speech": { "priceUsd": 0.02, "maxPerRun": 4 }
+    },
+    "timeoutMs": 660000
+  }
+}
+```
+
+- `AFFOGATO_AUTHORIZATION` is set in Alfred's environment to the whole header value, `Bearer <token>`. The file holds no secret.
+- `tools` is what chat is offered. `unattended` and `subagents` default to none; name a tool there only when scheduled runs or subagents should generate media, since every call costs money. `get_video` has no `spend` entry on purpose: it only collects a video that `generate_video` already started (and billed).
+- `priceUsd` is the owner's estimate per call, recorded in `external-spend.jsonl`; affogato publishes no prices. `generate_video` is limited to one call per run, so a retry cannot start a second video.
+- `timeoutMs` must be above affogato's longest wait: `generate_video` and `get_video` wait up to 600 seconds, and a video not ready by then comes back as a task id for `get_video`.
+- `mediaOrigins` lists the URL prefixes (https, a directory path) whose files `save_media` may download; an entry needs it for the generated files to reach the workspace. A run that is offered one of the server's tools gets `save_media`, for those prefixes only. When the server offers `generate_image`, Alfred's own `mmx` image tool is left out of that run.
 
 | Path | Content |
 | --- | --- |
