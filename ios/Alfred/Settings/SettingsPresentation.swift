@@ -18,12 +18,13 @@ struct SettingsRange: Hashable {
 enum SettingsPresentation {
     /// Every setting, in the contract's order: 全部恢复默认 resets these.
     static let keys: [SettingKey] = [
-        .model, .dailyBudgetUsd, .runBudgetUsd, .sessionIdleHours, .compactTokens, .memoryScanMinutes, .memoryScanBudgetUsd, .ideasAt,
+        .model, .dailyBudgetUsd, .monthlyBudgetUsd, .runBudgetUsd, .sessionIdleHours, .compactTokens, .memoryScanMinutes, .memoryScanBudgetUsd, .ideasAt,
     ]
 
     // The write ranges of the contract's table. A deployment may run outside them, and a stepper brings such a value in on
     // its first tap.
     static let dailyBudget = SettingsRange(bounds: 1...100, step: 5)
+    static let monthlyBudget = SettingsRange(bounds: 1...1000, step: 50)
     static let runBudget = SettingsRange(bounds: 1...20, step: 1)
     static let sessionIdleHours = SettingsRange(bounds: 0...168, step: 1)
     static let memoryScanMinutes = SettingsRange(bounds: 0...1440, step: 15)

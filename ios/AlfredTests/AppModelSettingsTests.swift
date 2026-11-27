@@ -286,7 +286,7 @@ final class AppModelSettingsTests: XCTestCase {
         XCTAssertNil(model.settingsCatalog.ideasAt)
     }
 
-    func testResettingAllSendsTheEightKeysAndNothingElse() async throws {
+    func testResettingAllSendsTheNineKeysAndNothingElse() async throws {
         let (model, server) = try makeModel(
             detail: [StubReply(chunks: [try TestData.settingsDetailData(TestData.settingsObject(model: "haiku", dailyBudgetUsd: 30, overridden: ["model", "dailyBudgetUsd"]))])],
             commands: [try result(TestData.settingsObject())]
@@ -298,7 +298,7 @@ final class AppModelSettingsTests: XCTestCase {
 
         let sent = try XCTUnwrap(commands(server).first)
         XCTAssertEqual(Set(sent.keys), ["type", "reset"])
-        XCTAssertEqual(sent["reset"] as? [String], ["model", "dailyBudgetUsd", "runBudgetUsd", "sessionIdleHours", "compactTokens", "memoryScanMinutes", "memoryScanBudgetUsd", "ideasAt"])
+        XCTAssertEqual(sent["reset"] as? [String], ["model", "dailyBudgetUsd", "monthlyBudgetUsd", "runBudgetUsd", "sessionIdleHours", "compactTokens", "memoryScanMinutes", "memoryScanBudgetUsd", "ideasAt"])
         XCTAssertEqual(model.settingsCatalog.model, .sonnet)
         XCTAssertEqual(model.settingsCatalog.dailyBudgetUsd, 20)
         XCTAssertFalse(model.settingsCatalog.canResetAll)

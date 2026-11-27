@@ -65,7 +65,7 @@ final class SettingsPresentationTests: XCTestCase {
     func testEverySettingIsAKeyOnceInTheContractsOrder() {
         XCTAssertEqual(
             SettingsPresentation.keys.map(\.rawValue),
-            ["model", "dailyBudgetUsd", "runBudgetUsd", "sessionIdleHours", "compactTokens", "memoryScanMinutes", "memoryScanBudgetUsd", "ideasAt"]
+            ["model", "dailyBudgetUsd", "monthlyBudgetUsd", "runBudgetUsd", "sessionIdleHours", "compactTokens", "memoryScanMinutes", "memoryScanBudgetUsd", "ideasAt"]
         )
     }
 
@@ -73,6 +73,7 @@ final class SettingsPresentationTests: XCTestCase {
 
     func testTheStepperRangesAreTheContractsWriteRanges() {
         XCTAssertEqual(SettingsPresentation.dailyBudget.bounds, 1...100)
+        XCTAssertEqual(SettingsPresentation.monthlyBudget.bounds, 1...1000, "MAX_MONTHLY_BUDGET_USD in src/api/schema.ts")
         XCTAssertEqual(SettingsPresentation.runBudget.bounds, 1...20)
         XCTAssertEqual(SettingsPresentation.sessionIdleHours.bounds, 0...168)
         XCTAssertEqual(SettingsPresentation.memoryScanMinutes.bounds, 0...1440)
@@ -83,6 +84,9 @@ final class SettingsPresentationTests: XCTestCase {
     func testAValueIsBroughtIntoItsRange() {
         XCTAssertEqual(SettingsPresentation.dailyBudget.normalized(150), 100, "a deployment may set more than the app writes")
         XCTAssertEqual(SettingsPresentation.dailyBudget.normalized(-5), 1)
+        XCTAssertEqual(SettingsPresentation.monthlyBudget.normalized(1500), 1000)
+        XCTAssertEqual(SettingsPresentation.monthlyBudget.normalized(0), 1)
+        XCTAssertEqual(SettingsPresentation.monthlyBudget.normalized(200 + SettingsPresentation.monthlyBudget.step), 250)
         XCTAssertEqual(SettingsPresentation.sessionIdleHours.normalized(-1), 0)
         XCTAssertEqual(SettingsPresentation.memoryScanBudget.normalized(0), 0.05)
         XCTAssertEqual(SettingsPresentation.memoryScanBudget.normalized(1.2), 1)
@@ -97,7 +101,7 @@ final class SettingsPresentationTests: XCTestCase {
 
     func testEveryStepStaysInsideItsRange() {
         for range in [
-            SettingsPresentation.dailyBudget, SettingsPresentation.runBudget, SettingsPresentation.sessionIdleHours,
+            SettingsPresentation.dailyBudget, SettingsPresentation.monthlyBudget, SettingsPresentation.runBudget, SettingsPresentation.sessionIdleHours,
             SettingsPresentation.memoryScanMinutes, SettingsPresentation.memoryScanBudget,
         ] {
             XCTAssertGreaterThan(range.step, 0)

@@ -40,6 +40,54 @@ final class SettingsCatalogTests: XCTestCase {
         XCTAssertEqual(catalog.spentTodayUsd, 1.5)
     }
 
+    func testAReadHoldsTheMonthlyBudgetAndTheMonthsSpend() throws {
+        var catalog = SettingsCatalog()
+        catalog.load(try TestData.settingsDetail(TestData.settingsObject(monthlyBudgetUsd: 350), spentTodayUsd: 1, spentMonthUsd: 42.5))
+        XCTAssertEqual(catalog.monthlyBudgetUsd, 350)
+        XCTAssertEqual(catalog.spentMonthUsd, 42.5)
+    }
+
+    func testAServerThatSendsNoMonthShowsNone() throws {
+        let catalog = try loaded(TestData.settingsObject(monthlyBudgetUsd: nil))
+        XCTAssertNil(catalog.monthlyBudgetUsd)
+        XCTAssertNil(catalog.spentMonthUsd)
+        XCTAssertNil(SettingsCatalog().spentMonthUsd)
+    }
+
+    func testTheMonthsSpendComesFromReadsAndEventsLeaveItAlone() throws {
+        var catalog = SettingsCatalog()
+        catalog.load(try TestData.settingsDetail(spentMonthUsd: 10))
+        catalog.apply(try event(5, TestData.settingsObject(monthlyBudgetUsd: 300)))
+        XCTAssertEqual(catalog.monthlyBudgetUsd, 300)
+        XCTAssertEqual(catalog.spentMonthUsd, 10)
+        catalog.load(try TestData.settingsDetail(spentMonthUsd: 12))
+        XCTAssertEqual(catalog.spentMonthUsd, 12)
+        catalog.load(try TestData.settingsDetail())
+        XCTAssertNil(catalog.spentMonthUsd, "a read without it replaces the old figure")
+    }
+
+    func testAStagedMonthlyBudgetIsShownAndSentThenReset() throws {
+        var catalog = try loaded(TestData.settingsObject(monthlyBudgetUsd: 200))
+        catalog.stage(SettingsChanges(monthlyBudgetUsd: 250))
+        XCTAssertEqual(catalog.monthlyBudgetUsd, 250)
+        XCTAssertEqual(catalog.beginSending(), SettingsChanges(monthlyBudgetUsd: 250))
+        XCTAssertEqual(catalog.monthlyBudgetUsd, 250, "in flight, it stays shown")
+        catalog.finishSending()
+        XCTAssertEqual(catalog.monthlyBudgetUsd, 200)
+        catalog.stage(SettingsChanges(monthlyBudgetUsd: 300))
+        catalog.stage(SettingsChanges(reset: [.monthlyBudgetUsd]))
+        XCTAssertEqual(catalog.beginSending(), SettingsChanges(reset: [.monthlyBudgetUsd]))
+    }
+
+    func testTheMonthlyBudgetMergesLikeAnyOtherSetting() {
+        XCTAssertEqual(
+            SettingsChanges(monthlyBudgetUsd: 250).merged(with: SettingsChanges(monthlyBudgetUsd: 300)),
+            SettingsChanges(monthlyBudgetUsd: 300)
+        )
+        XCTAssertEqual(SettingsChanges(monthlyBudgetUsd: 250).merged(with: SettingsChanges(reset: [.monthlyBudgetUsd])), SettingsChanges(reset: [.monthlyBudgetUsd]))
+        XCTAssertEqual(SettingsChanges(reset: [.monthlyBudgetUsd]).merged(with: SettingsChanges(monthlyBudgetUsd: 250)), SettingsChanges(monthlyBudgetUsd: 250))
+    }
+
     func testAnIdeaTimeThatIsNullIsOff() throws {
         XCTAssertNil(try loaded(TestData.settingsObject(ideasAt: nil)).ideasAt)
     }

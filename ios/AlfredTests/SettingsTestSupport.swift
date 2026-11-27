@@ -8,6 +8,7 @@ extension TestData {
     static func settingsObject(
         model: String = "sonnet",
         dailyBudgetUsd: Double = 20,
+        monthlyBudgetUsd: Double? = 200,
         runBudgetUsd: Double = 10,
         sessionIdleHours: Double = 4,
         compactTokens: Int = 100_000,
@@ -21,6 +22,9 @@ extension TestData {
             "sessionIdleHours": sessionIdleHours, "compactTokens": compactTokens, "memoryScanMinutes": memoryScanMinutes,
             "memoryScanBudgetUsd": memoryScanBudgetUsd, "overridden": overridden,
         ]
+        if let monthlyBudgetUsd {
+            object["monthlyBudgetUsd"] = monthlyBudgetUsd
+        }
         if let ideasAt {
             object["ideasAt"] = ideasAt
         } else {
@@ -34,12 +38,14 @@ extension TestData {
     }
 
     /// The body of `GET /api/settings`.
-    static func settingsDetail(_ settings: [String: Any] = settingsObject(), spentTodayUsd: Double = 0) throws -> SettingsDetail {
-        try JSONDecoder().decode(SettingsDetail.self, from: settingsDetailData(settings, spentTodayUsd: spentTodayUsd))
+    static func settingsDetail(_ settings: [String: Any] = settingsObject(), spentTodayUsd: Double = 0, spentMonthUsd: Double? = nil) throws -> SettingsDetail {
+        try JSONDecoder().decode(SettingsDetail.self, from: settingsDetailData(settings, spentTodayUsd: spentTodayUsd, spentMonthUsd: spentMonthUsd))
     }
 
-    static func settingsDetailData(_ settings: [String: Any] = settingsObject(), spentTodayUsd: Double = 0) throws -> Data {
-        try JSONSerialization.data(withJSONObject: ["settings": settings, "spentTodayUsd": spentTodayUsd])
+    static func settingsDetailData(_ settings: [String: Any] = settingsObject(), spentTodayUsd: Double = 0, spentMonthUsd: Double? = nil) throws -> Data {
+        var body: [String: Any] = ["settings": settings, "spentTodayUsd": spentTodayUsd]
+        if let spentMonthUsd { body["spentMonthUsd"] = spentMonthUsd }
+        return try JSONSerialization.data(withJSONObject: body)
     }
 
     /// The 200 body of `settings.update`.

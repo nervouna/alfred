@@ -33,7 +33,7 @@ final class SettingsUITests: XCTestCase {
 
         // Every row, found by scrolling: the list builds a row only once it is scrolled to.
         for id in [
-            "settings.model", "settings.dailyBudget", "settings.runBudget", "settings.spentToday", "settings.sessionIdleHours",
+            "settings.model", "settings.dailyBudget", "settings.monthlyBudget", "settings.runBudget", "settings.spentToday", "settings.spentMonth", "settings.sessionIdleHours",
             "settings.compactTokens", "settings.memoryScanMinutes", "settings.memoryScanBudget", "settings.ideasEnabled",
             "settings.notifications", "settings.notifications.open", "settings.server", "settings.device", "settings.unpair",
             "settings.version",
@@ -47,12 +47,17 @@ final class SettingsUITests: XCTestCase {
         XCTAssertEqual(try reading("settings.ideasEnabled", in: app).value, "0", "the daily generation should be off on this stack")
         XCTAssertFalse(element("settings.ideasAt", in: app).exists, "a time row shows while the generation is off")
         let expected = [
-            ("settings.runBudget", "$10.00"), ("settings.compactTokens", "100k"), ("settings.sessionIdleHours", "4 小时"),
+            ("settings.monthlyBudget", "$200.00"), ("settings.runBudget", "$10.00"), ("settings.compactTokens", "100k"), ("settings.sessionIdleHours", "4 小时"),
             ("settings.memoryScanMinutes", "1 小时"), ("settings.memoryScanBudget", "$0.10"),
         ]
         for (id, shown) in expected {
             let row = try reading(id, in: app).text
             XCTAssertTrue(row.contains(shown), "\(id) does not show \(shown): \(row)")
+        }
+        // The spend rows show a dollar amount, or — when the server sends none.
+        for id in ["settings.spentToday", "settings.spentMonth"] {
+            let row = try reading(id, in: app).text
+            XCTAssertTrue(row.contains("$") || row.contains("—"), "\(id) shows no amount: \(row)")
         }
 
         // The notification state, the pairing, the version.
@@ -89,12 +94,19 @@ final class SettingsUITests: XCTestCase {
         XCTAssertTrue(wait(timeout: patience) { text(of: element("settings.model", in: app)).contains("Sonnet") }, "the model did not return to Sonnet")
         let before = try XCTUnwrap(dollars(daily), "the daily cap shows no amount: \(text(of: daily))")
         XCTAssertLessThanOrEqual(before, 90, "this test raises the cap by $10, and the contract stops at $100")
+        let monthly = element("settings.monthlyBudget", in: app)
+        XCTAssertTrue(find(monthly, in: app, timeout: patience), "no monthly cap row\n\(app.debugDescription)")
+        let monthlyBefore = try XCTUnwrap(dollars(monthly), "the monthly cap shows no amount: \(text(of: monthly))")
+        XCTAssertLessThanOrEqual(monthlyBefore, 900, "this test raises the cap by $100, and the contract stops at $1000")
 
         // The model and the daily cap change. The cap takes two taps, which are one save.
         choose("Opus", from: "settings.model", in: app)
         step("settings.dailyBudget", up: true, in: app)
         step("settings.dailyBudget", up: true, in: app)
         XCTAssertTrue(wait(timeout: patience) { dollars(daily) == before + 10 }, "the cap does not show \(before + 10): \(text(of: daily))\n\(app.debugDescription)")
+        step("settings.monthlyBudget", up: true, in: app)
+        step("settings.monthlyBudget", up: true, in: app)
+        XCTAssertTrue(wait(timeout: patience) { dollars(monthly) == monthlyBefore + 100 }, "the monthly cap does not show \(monthlyBefore + 100): \(text(of: monthly))\n\(app.debugDescription)")
         XCTAssertTrue(wait(timeout: patience) { text(of: element("settings.model", in: app)).contains("Opus") }, "the model does not show Opus")
         snapshot("2a-changed")
 
@@ -109,6 +121,7 @@ final class SettingsUITests: XCTestCase {
         settle(seconds: 3)
         pullToRefresh(in: app)
         XCTAssertEqual(dollars(element("settings.dailyBudget", in: app)), before + 10, "the cap is gone after refreshing")
+        XCTAssertTrue(wait(timeout: patience) { dollars(element("settings.monthlyBudget", in: app)) == monthlyBefore + 100 }, "the monthly cap is gone after refreshing: \(text(of: element("settings.monthlyBudget", in: app)))")
         XCTAssertTrue(text(of: element("settings.model", in: app)).contains("Opus"), "the model is gone after refreshing")
 
         // And the app started again reads them from Alfred, which kept them.
@@ -135,6 +148,7 @@ final class SettingsUITests: XCTestCase {
         tapWhenSettled(confirm, in: app)
         XCTAssertTrue(wait(timeout: patience) { dollars(element("settings.dailyBudget", in: app)) == before }, "the cap did not return to $\(before): \(text(of: element("settings.dailyBudget", in: app)))\n\(app.debugDescription)")
         XCTAssertTrue(wait(timeout: patience) { text(of: element("settings.model", in: app)).contains("Sonnet") }, "the model did not return to Sonnet")
+        XCTAssertTrue(wait(timeout: patience) { dollars(element("settings.monthlyBudget", in: app)) == monthlyBefore }, "the monthly cap did not return to $\(monthlyBefore): \(text(of: element("settings.monthlyBudget", in: app)))")
         let disabled = menuItem("全部恢复默认", id: "settings.resetAll", in: app)
         XCTAssertTrue(wait(timeout: patience) { !disabled.isEnabled }, "全部恢复默认 stays on with every setting at its default")
         dismissMenu(in: app)
@@ -358,16 +372,27 @@ final class SettingsUITests: XCTestCase {
         XCTAssertTrue(wait(timeout: patience) {
             let frame = target.frame
             defer { previous = frame }
-            if frame.minY < top {
-                app.swipeDown()
-                return false
-            }
-            if frame.maxY > bottom {
-                app.swipeUp()
+            if frame.minY < top || frame.maxY > bottom {
+                // A swipe carries a row the whole way across the gap between the bars and back, so the loop would
+                // swing for ever: drag by the distance to the middle of the gap instead.
+                drag(by: (top + bottom - frame.height) / 2 - frame.minY, between: top, and: bottom, in: app)
                 return false
             }
             return frame == previous
         }, "the element did not come to rest between the bars\n\(app.debugDescription)")
+    }
+
+    /// Drags the list down by `points` (up when negative) along a line between the bars and holds it there, so that it
+    /// stops where the finger does. The drag loses its first points to the touch slop: the caller looks again.
+    @MainActor
+    private func drag(by points: CGFloat, between top: CGFloat, and bottom: CGFloat, in app: XCUIApplication) {
+        let window = app.windows.firstMatch.frame
+        let reach = min(abs(points), (bottom - top) * 0.8)
+        let middle = (top + bottom) / 2
+        let direction: CGFloat = points < 0 ? -1 : 1
+        let from = CGVector(dx: 0.05, dy: (middle - direction * reach / 2) / window.height)
+        let start = app.windows.firstMatch.coordinate(withNormalizedOffset: from)
+        start.press(forDuration: 0.1, thenDragTo: start.withOffset(CGVector(dx: 0, dy: direction * reach)), withVelocity: .slow, thenHoldForDuration: 0.5)
     }
 
     /// Taps `target` once it is hittable and has kept the same frame over three looks in a row: a menu or a dialog that
