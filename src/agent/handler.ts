@@ -113,7 +113,7 @@ import { ResponseLedger, subagentTranscript, unitPrices } from "./cost.ts";
 import { externalOffer, externalServersForRun, externalToolGuard } from "./external.ts";
 import { resolveInside, workspaceGuard } from "./guard.ts";
 import { TaskInput, answeredBy } from "./input.ts";
-import { EXTRACT_MODEL, MEMORY_LOCK_FILE, MemoryScanScheduler, SCAN_TIMEOUT_MS, scanTranscripts, transcriptDirs } from "./memory-scan.ts";
+import { EXTRACT_MODEL, MEMORY_LOCK_FILE, MemoryScanScheduler, SCAN_TIMEOUT_MS, failedScanCost, scanTranscripts, transcriptDirs } from "./memory-scan.ts";
 import type { ScanReport } from "./memory-scan.ts";
 import { type Locked, MemoryLock, capIndex, loadMemories, syncMemoryIndex } from "./memory.ts";
 import { QUESTION_TOOL, answersFromReply, denyPermissionPrompts, questionHook } from "./questions.ts";
@@ -668,12 +668,10 @@ type Cap = "day" | "month";
 /** Runs a memory scan and records it as a run when it called the model or failed; idle scans leave no record. */
 async function recordScan(scan: () => Promise<ScanReport>): Promise<ScanReport> {
   const startedAt = new Date().toISOString();
-  const record = (status: "done" | "failed", report?: ScanReport, error?: string) => {
+  const record = (status: "done" | "failed", report: Pick<ScanReport, "costUsd" | "applied">, error?: string) => {
     const run = new RunRecorder({ kind: "scan", title: "记忆扫描", model: EXTRACT_MODEL, startedAt });
-    if (report) {
-      run.update({ costUsd: report.costUsd });
-      for (const a of report.applied) run.wrote(`memory/${a.file}`, a.action === "create" ? "Write" : "Edit");
-    }
+    run.update({ costUsd: report.costUsd });
+    for (const a of report.applied) run.wrote(`memory/${a.file}`, a.action === "create" ? "Write" : "Edit");
     run.finish(status, error);
   };
   try {
@@ -681,7 +679,7 @@ async function recordScan(scan: () => Promise<ScanReport>): Promise<ScanReport> 
     if (!report.skipped) record("done", report);
     return report;
   } catch (err) {
-    record("failed", undefined, describeError(err));
+    record("failed", { costUsd: failedScanCost(err), applied: [] }, describeError(err));
     throw err;
   }
 }
@@ -901,12 +899,22 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
     scan: async () => {
       // A scan was never held back by the daily cap, so only the month's stops it; what it cost counts toward both.
       if (capReached(owner, true)) return { files: 0, messages: 0, applied: [], costUsd: 0, skipped: "the monthly spend cap is reached" };
-      const report = await recordScan(() => (opts.scanTranscripts ?? scanTranscripts)({ workspace: WORKSPACE_DIR }));
+      const charge = (costUsd: number) => {
+        try {
+          chargeSpend(owner, costUsd);
+        } catch (err) {
+          log.error(`saving the cost of a memory scan failed: ${describeError(err)}`);
+        }
+      };
+      let report: ScanReport;
       try {
-        chargeSpend(owner, report.costUsd);
+        report = await recordScan(() => (opts.scanTranscripts ?? scanTranscripts)({ workspace: WORKSPACE_DIR }));
       } catch (err) {
-        log.error(`saving the cost of a memory scan failed: ${describeError(err)}`);
+        // A scan that failed after calling the model spent money all the same.
+        charge(failedScanCost(err));
+        throw err;
       }
+      charge(report.costUsd);
       return report;
     },
   });

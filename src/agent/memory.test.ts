@@ -7,6 +7,7 @@ import { after, test } from "node:test";
 import { envSettings, installSettings, systemPrompt } from "./config.ts";
 import {
   MemoryScanScheduler,
+  ScanFailure,
   applyCandidates,
   extractionPrompt,
   parseTranscript,
@@ -249,6 +250,14 @@ test("scan extracts once per new entry, merges into memory and skips when nothin
   // The third failure of the same batch skips it.
   await assert.rejects(scanTranscripts(failing), /failed 3 times in a row/);
   assert.equal(offset(), fs.statSync(transcript).size);
+
+  // An extraction that failed after calling the model keeps what it spent, in the scan's state and on the error.
+  fs.appendFileSync(transcript, `${taskLines("第五个", "好。", "m5").join("\n")}\n`);
+  const total = () => JSON.parse(fs.readFileSync(stateFile, "utf-8")).totalCostUsd as number;
+  const spentBefore = total();
+  const paid = { workspace: ws, configDir, stateFile, extractFn: async () => Promise.reject(new ScanFailure("malformed", 0.02)) };
+  await assert.rejects(scanTranscripts(paid), (err: unknown) => err instanceof ScanFailure && err.costUsd === 0.02);
+  assert.equal(total(), spentBefore + 0.02);
 });
 
 test("a scan's spend cap is read when the scan starts: the environment's, the owner's override once there is one, and a scan's own", async () => {

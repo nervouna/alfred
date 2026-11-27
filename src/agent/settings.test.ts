@@ -39,6 +39,8 @@ const { parseCommand } = await import("../api/schema.ts");
 const { RunRecorder } = await import("../runs.ts");
 const { localDate, localMonth } = await import("../files.ts");
 const { SPEND_MIRROR_FILE, readSpend } = await import("../spend.ts");
+const { ScanFailure } = await import("./memory-scan.ts");
+const { listRunFiles } = await import("../runs.ts");
 
 const cleanups: (() => Promise<void>)[] = [];
 after(async () => {
@@ -561,6 +563,24 @@ test("a run's cost, a scan's cost and /status count the same: the state file, th
   assert.deepEqual(readSpend(localDate()), { spentTodayUsd: 3.25, spentMonthUsd: 3.25 });
   await s.send("/status");
   assert.match(s.app.texts.at(-1) ?? "", /今天 \$3\.25 \/ 上限 \$10\.00，本月 \$3\.25 \/ 上限 \$40\.00/);
+});
+
+test("a scan that fails after calling the model counts what it spent: day, month, the mirror and its run record", async () => {
+  let scans = 0;
+  const s = setup({
+    env: { ALFRED_MONTHLY_BUDGET_USD: "40" },
+    // The handler asks for a scan as it starts.
+    scan: async () => {
+      scans++;
+      throw new ScanFailure("extraction returned malformed output", 0.4);
+    },
+  });
+  await until("the failed scan's cost to be booked", () => fs.existsSync(s.stateFile) && ownerState(s.stateFile).spendMonthUsd === 0.4);
+  assert.equal(scans, 1);
+  assert.equal(ownerState(s.stateFile).spendDayUsd, 0.4);
+  assert.deepEqual(readSpend(localDate()), { spentTodayUsd: 0.4, spentMonthUsd: 0.4 });
+  const run = listRunFiles().find((r) => r.kind === "scan" && r.status === "failed" && r.costUsd === 0.4);
+  assert.ok(run, "a failed scan run with its cost");
 });
 
 test("a memory scan is held back by the monthly cap, and not by the daily one", async () => {
