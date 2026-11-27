@@ -214,6 +214,98 @@ export function toolName(tool: string): string {
   return tool.replace(/^mcp__alfred__/, "");
 }
 
+/** How often the sampler reads memory while a run is live. */
+export const MEMORY_SAMPLE_MS = 5_000;
+const MIB = 1024 * 1024;
+
+export interface MemoryClock {
+  setInterval(fn: () => void, ms: number): unknown;
+  clearInterval(timer: unknown): void;
+}
+
+export interface RunMemorySamplerOptions {
+  read?: () => Heartbeat["memory"];
+  /** The default clock's timer is unref'd, so an idle sampler never keeps Alfred alive. */
+  clock?: MemoryClock;
+  info?: (msg: string) => void;
+}
+
+interface LiveMemory {
+  kind: RunKind;
+  /** `cgroup` when the container's memory is readable at start, otherwise `rss`; fixed for the whole run. */
+  source: "cgroup" | "rss";
+  start: number;
+  peak: number;
+  /** The most runs live at once while this one was live, itself included. */
+  maxLive: number;
+}
+
+/**
+ * Samples memory while at least one run is running (queued runs are not sampled). A run's peak is the highest of
+ * its start, the 5 s samples and its end; when it finishes it logs one line and the timer stops with the last run.
+ */
+export class RunMemorySampler {
+  private readonly live = new Map<string, LiveMemory>();
+  private timer: unknown;
+  private readonly read: () => Heartbeat["memory"];
+  private readonly clock: MemoryClock;
+  private readonly info: (msg: string) => void;
+
+  constructor(options: RunMemorySamplerOptions = {}) {
+    this.read = options.read ?? memoryUsage;
+    this.clock = options.clock ?? {
+      setInterval: (fn, ms) => {
+        const timer = setInterval(fn, ms);
+        timer.unref();
+        return timer;
+      },
+      clearInterval: (timer) => clearInterval(timer as NodeJS.Timeout),
+    };
+    this.info = options.info ?? ((msg) => log.info(msg));
+  }
+
+  /** A run starts running: its memory now is the start, and sampling runs from here. */
+  began(id: string, kind: RunKind): void {
+    const reading = this.read();
+    const source = reading.cgroupBytes === undefined ? "rss" : "cgroup";
+    const bytes = bytesOf(reading, source);
+    this.live.set(id, { kind, source, start: bytes, peak: bytes, maxLive: 0 });
+    const count = this.live.size;
+    for (const entry of this.live.values()) entry.maxLive = Math.max(entry.maxLive, count);
+    if (this.timer === undefined) this.timer = this.clock.setInterval(() => this.sample(), MEMORY_SAMPLE_MS);
+  }
+
+  /** A run finishes: one last sample, its log line, and the timer stops when no run is live. */
+  ended(id: string): void {
+    if (!this.live.has(id)) return;
+    this.sample();
+    const entry = this.live.get(id);
+    this.live.delete(id);
+    if (entry) {
+      const mib = (bytes: number) => Math.round(bytes / MIB);
+      const source = entry.source === "rss" ? " source=rss" : "";
+      this.info(`run memory run=${id} kind=${entry.kind} start=${mib(entry.start)} peak=${mib(entry.peak)} live=${entry.maxLive}${source}`);
+    }
+    if (this.live.size === 0 && this.timer !== undefined) {
+      this.clock.clearInterval(this.timer);
+      this.timer = undefined;
+    }
+  }
+
+  private sample(): void {
+    if (this.live.size === 0) return;
+    const reading = this.read();
+    for (const entry of this.live.values()) entry.peak = Math.max(entry.peak, bytesOf(reading, entry.source));
+  }
+}
+
+function bytesOf(reading: Heartbeat["memory"], source: "cgroup" | "rss"): number {
+  return source === "cgroup" ? (reading.cgroupBytes ?? reading.rssBytes) : reading.rssBytes;
+}
+
+/** The sampler every run uses unless a test passes its own. */
+const sharedMemory = new RunMemorySampler();
+
 /**
  * Records one run: its run file while it is live, then its line in runs.jsonl.
  * Writes are throttled and never throw, so a full disk cannot break a task.
@@ -222,6 +314,7 @@ export class RunRecorder {
   readonly id: string;
   private readonly file: RunFile;
   private readonly events: EventLog;
+  private readonly memory: RunMemorySampler;
   private timer?: NodeJS.Timeout;
   private lastWrite = 0;
   private finished = false;
@@ -243,9 +336,12 @@ export class RunRecorder {
     role?: string;
     /** Where the run.updated events go; the shared event log by default. */
     events?: EventLog;
+    /** Where the memory samples go; the shared sampler by default. */
+    memory?: RunMemorySampler;
   }) {
     this.id = init.id ?? newRunId();
     this.events = init.events ?? sharedEventLog();
+    this.memory = init.memory ?? sharedMemory;
     const now = new Date().toISOString();
     this.file = {
       id: this.id,
@@ -266,6 +362,7 @@ export class RunRecorder {
     };
     this.write();
     this.publish();
+    if (!init.queued) this.memory.began(this.id, init.kind);
   }
 
   get record(): Readonly<RunFile> {
@@ -323,6 +420,7 @@ export class RunRecorder {
     this.file.startedAt = new Date().toISOString();
     this.write();
     this.publish();
+    this.memory.began(this.id, this.file.kind);
   }
 
   /** Final state: the run file is written at once and the record appended to runs.jsonl. */
@@ -333,6 +431,7 @@ export class RunRecorder {
     this.file.status = status;
     this.file.endedAt = new Date().toISOString();
     if (error) this.file.error = error;
+    this.memory.ended(this.id);
     this.write();
     appendRunLog(toRecord(this.file));
     this.publish();
