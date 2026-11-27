@@ -207,7 +207,7 @@ test("the task tools are offered to a run that can ask and has a task store, and
   const base = ["deliver", "move_file", "render_pdf", "generate_image"];
 
   const chat = agentOptions({ out: appOutbound(), model: "sonnet", ask, tasks });
-  assert.deepEqual(alfredTools(chat), [...base, ...names]);
+  assert.deepEqual(alfredTools(chat), [...base, "spend_query", ...names]);
   for (const name of TASK_TOOL_NAMES) assert.ok(chat.allowedTools?.includes(name), name);
   assert.match(String(chat.systemPrompt), /^# Tasks$/m);
 
@@ -217,9 +217,28 @@ test("the task tools are offered to a run that can ask and has a task store, and
     "a run that cannot ask, so could not confirm": agentOptions({ out: appOutbound(), model: "sonnet", tasks }),
   };
   for (const [what, options] of Object.entries(others)) {
-    assert.deepEqual(alfredTools(options), base, what);
+    // A chat run that can ask has spend_query whether or not it has a task store.
+    assert.deepEqual(alfredTools(options), what === "a run without a task store" ? [...base, "spend_query"] : base, what);
     assert.ok(!options.allowedTools?.some((name) => name.includes("task_")), what);
     assert.doesNotMatch(String(options.systemPrompt), /^# Tasks$/m, what);
+  }
+});
+
+test("spend_query is offered to a chat run, and to no unattended run, no revision run and no run that cannot ask", () => {
+  prepareWorkspace();
+  const ask = async () => ({ cancelled: true as const });
+  const chat = agentOptions({ out: appOutbound(), model: "sonnet", ask });
+  assert.ok(alfredTools(chat).includes("spend_query"));
+  assert.ok(chat.allowedTools?.includes("mcp__alfred__spend_query"));
+
+  const others = {
+    "a scheduled task's run": agentOptions({ out: appOutbound(), model: "sonnet", ask, task: { budgetUsd: 1 } }),
+    "a revision run": agentOptions({ out: appOutbound(), model: "sonnet", ask, revision: { budgetUsd: 1 } }),
+    "a run that cannot ask": agentOptions({ out: appOutbound(), model: "sonnet" }),
+  };
+  for (const [what, options] of Object.entries(others)) {
+    assert.ok(!alfredTools(options).includes("spend_query"), what);
+    assert.ok(!options.allowedTools?.includes("mcp__alfred__spend_query"), what);
   }
 });
 

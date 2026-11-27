@@ -14,6 +14,7 @@ import type { ReadOnlyPaths } from "./guard.ts";
 import { RULES_FILE } from "./rules.ts";
 import { SKILLS_DIR } from "./skills.ts";
 import { TASK_TOOL_NAMES } from "./task-tools.ts";
+import { SPEND_TOOL_NAMES } from "./tools.ts";
 
 const AGENT_TOOL = "Agent";
 const DELIVER_TOOL = "mcp__alfred__deliver";
@@ -75,8 +76,8 @@ function deny(reason: string) {
 }
 
 /**
- * Returns a denial reason when a subagent calls deliver, reply_annotation or a task tool: only Alfred talks to the user,
- * only Alfred answers the owner's annotations, and only Alfred manages the owner's tasks, with the owner's tap. A role's
+ * Returns a denial reason when a subagent calls deliver, reply_annotation, spend_query or a task tool: only Alfred talks to the user,
+ * only Alfred answers the owner's annotations, only Alfred answers questions about spend, and only Alfred manages the owner's tasks, with the owner's tap. A role's
  * tool list already leaves them out, but built-in agent types and forked skills get every tool the main thread has.
  */
 export function checkSubagentTool(toolName: string): string | undefined {
@@ -85,6 +86,7 @@ export function checkSubagentTool(toolName: string): string | undefined {
   if (TASK_TOOL_NAMES.includes(toolName)) {
     return "Subagents may not manage the owner's tasks: only Alfred does, and only when the owner asks. Do not try again; leave it out of your work.";
   }
+  if (SPEND_TOOL_NAMES.includes(toolName)) return "Subagents may not query Alfred's spend: only Alfred does, in the chat. Do not try again; leave it out of your work.";
   return undefined;
 }
 

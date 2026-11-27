@@ -6,7 +6,7 @@ import { after, test } from "node:test";
 
 import type { SDKPartialAssistantMessage } from "@anthropic-ai/claude-agent-sdk";
 
-import { ResponseLedger, TranscriptUsage, subagentTranscript, unitPrices } from "./cost.ts";
+import { ResponseLedger, TranscriptUsage, cacheReadWeight, subagentTranscript, unitPrices } from "./cost.ts";
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "alfred-cost-"));
 after(() => fs.rmSync(tmp, { recursive: true, force: true }));
@@ -149,4 +149,34 @@ test("a ledger counts a cache write whose TTL the usage does not give as a 1-hou
   ledger.observe(stream({ type: "message_stop" }));
   // 300 cache writes at 2× the input price.
   assert.ok(Math.abs(ledger.estimate({ sonnet: 1 }).usd - 600) < 1e-9);
+});
+
+test("a cache read weighs 0.05× on Opus 5.5 and Sonnet 5.5, 0.1× on Haiku 5.5 and on any model not known", () => {
+  for (const model of ["claude-opus-5-5", "claude-sonnet-5-5", "claude-opus-5-5-20261001", "claude-sonnet-5-5[1m]", "anthropic.claude-opus-5-5-v1:0"]) {
+    assert.equal(cacheReadWeight(model), 0.05, model);
+  }
+  for (const model of ["claude-haiku-5-5", "claude-opus-5", "claude-opus-4-8", "claude-sonnet-5-50", "sonnet", "some-other-model"]) {
+    assert.equal(cacheReadWeight(model), 0.1, model);
+  }
+});
+
+test("unit prices and transcript pricing use each model's own cache-read weight", () => {
+  // 1000 input + 10000 cache reads at $1 per million input tokens: the reads add 0.05× or 0.1×.
+  const reads = (costUSD: number) => modelUsage(costUSD, { input: 1000, output: 0, cacheRead: 10_000, cacheWrite: 0 });
+  const prices = unitPrices({ "claude-opus-5-5": reads(0.0015), "claude-sonnet-5-5": reads(0.0015), "claude-haiku-5-5": reads(0.002), "claude-other": reads(0.002) });
+  for (const model of Object.keys(prices)) assert.ok(Math.abs((prices[model] ?? 0) - 1e-6) < 1e-12, model);
+
+  const file = path.join(tmp, "weights.jsonl");
+  const usage = { input_tokens: 1000, output_tokens: 0, cache_read_input_tokens: 10_000 };
+  fs.writeFileSync(file, [line("o", "claude-opus-5-5", usage), line("s", "claude-sonnet-5-5", usage), line("h", "claude-haiku-5-5", usage), line("u", "claude-other", usage)].join("\n") + "\n");
+  const transcript = new TranscriptUsage(file);
+  transcript.read();
+  assert.ok(Math.abs((transcript.cost(prices) ?? 0) - (0.0015 + 0.0015 + 0.002 + 0.002)) < 1e-12);
+
+  const ledger = new ResponseLedger();
+  for (const [id, model] of [["a", "claude-opus-5-5"], ["b", "claude-haiku-5-5"]] as const) {
+    ledger.observe(stream({ type: "message_start", message: { id, model, usage } }));
+    ledger.observe(stream({ type: "message_stop" }));
+  }
+  assert.ok(Math.abs(ledger.estimate(prices).usd - 0.0035) < 1e-12);
 });
