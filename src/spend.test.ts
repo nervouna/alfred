@@ -69,6 +69,23 @@ test("each grouping sums the run records, and the external spend stays a figure 
   assert.equal(Math.round(server.runRecords.totalUsd * 1e6) / 1e6, 1.7, "the run records' total does not depend on the grouping");
 });
 
+test("a priced call of a subagent is grouped under its role, and a line without a role under the main thread", () => {
+  const external = [entry("chat1", "img", "generate", 0.04, at(11, 25)), { ...entry("sub1", "img", "generate", 0.07, at(11, 25)), role: "researcher" }];
+  const byRole = spend.querySpend({ ...NOVEMBER, groupBy: "role" }, RUNS, external);
+  assert.deepEqual(rowsOf(byRole.external.rows), { "(main thread)": 0.04, researcher: 0.07 });
+  assert.equal(Math.round(byRole.external.totalUsd * 1e6) / 1e6, 0.11);
+});
+
+test("a line with a role reads back with it, and a line from before the field reads without it", () => {
+  const file = path.join(tmp, "role", "external-spend.jsonl");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const old = entry("r1", "img", "generate", 0.04, at(11, 25));
+  fs.writeFileSync(file, `${JSON.stringify(old)}\n${JSON.stringify({ ...old, role: "researcher" })}\n`);
+  const [before, after] = spend.readExternalSpend(file);
+  assert.equal(before?.role, undefined);
+  assert.equal(after?.role, "researcher");
+});
+
 test("a day is a local day, and a period with nothing in it is zero", () => {
   const one = spend.querySpend({ from: "2026-11-26", to: "2026-11-26", groupBy: "day" }, RUNS, EXTERNAL);
   assert.equal(Math.round(one.runRecords.totalUsd * 1e6) / 1e6, 0.7);
