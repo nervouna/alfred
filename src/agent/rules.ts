@@ -167,6 +167,27 @@ function grepContentDirs(response: unknown): string[] {
   return [...dirs];
 }
 
+/** The text of a tool result: a string as it is, or the text parts of an MCP result. Undefined for anything else. */
+function resultText(response: unknown): string | undefined {
+  if (typeof response === "string") return response;
+  const content = (response as { content?: unknown } | null | undefined)?.content;
+  if (!Array.isArray(content)) return undefined;
+  const texts = content.filter((part): part is { type: "text"; text: string } => part?.type === "text" && typeof part.text === "string");
+  return texts.length ? texts.map((part) => part.text).join("\n") : undefined;
+}
+
+/** The workspace path save_media reports it saved: "Saved <file> (<size>, <type>). Read it to check it ...". */
+function savedFile(response: unknown): string | undefined {
+  return resultText(response)?.match(/^Saved (.+) \([^()]*\)\. Read it to check it/)?.[1];
+}
+
+/** The paths generate_image reports it saved: "Generated <a>, <b>." with an optional " N of M images failed." at the end. */
+function generatedFiles(response: unknown): string[] {
+  const text = resultText(response)?.replace(/ \d+ of \d+ images failed\.$/, "");
+  const names = text?.match(/^Generated (.+)\.$/)?.[1];
+  return names ? names.split(", ") : [];
+}
+
 /**
  * Paths a file tool call works in. Rules along these paths are disclosed after
  * the call. `response` is the tool's result, absent when the call failed.
@@ -191,11 +212,13 @@ export function touchedPaths(toolName: string, input: Record<string, unknown>, r
     case "mcp__alfred__render_pdf":
       paths = [str(input.source), str(input.output)];
       break;
-    case "mcp__alfred__generate_image":
-      paths = [str(input.output) ?? "images"];
+    case "mcp__alfred__generate_image": {
+      const files = generatedFiles(response);
+      paths = files.length ? files : [str(input.output) ?? "images"];
       break;
+    }
     case "mcp__alfred__save_media":
-      paths = [str(input.output) ?? "images"];
+      paths = [savedFile(response) ?? str(input.output) ?? "images"];
       break;
     default:
       paths = [];
