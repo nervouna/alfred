@@ -106,6 +106,11 @@ public struct AlfredClient: Sendable {
         try await get(SettingsDetail.self, "/api/settings")
     }
 
+    /// GET /api/bots: the bots, oldest created first. Alfred is not one of them.
+    public func bots() async throws -> BotList {
+        try await get(BotList.self, "/api/bots")
+    }
+
     /// GET /api/rules: the root ALFRED.md, with the version a save names.
     public func rules() async throws -> Rules {
         try await get(Rules.self, "/api/rules")

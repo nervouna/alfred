@@ -23,6 +23,8 @@ public struct Event: Decodable, Hashable, Sendable {
         case ideaUpdated(AlfredIdea)
         /// A setting changed: the whole settings, as Alfred now holds them.
         case settingsUpdated(AlfredSettings)
+        /// A bot was created or changed: the whole bot, as Alfred now holds it. Not part of the chat.
+        case botUpdated(Bot)
         /// An event type this client does not know. Its `data` is not decoded.
         case unknown(type: String)
     }
@@ -61,6 +63,8 @@ public struct Event: Decodable, Hashable, Sendable {
             payload = .ideaUpdated(try container.decode(AlfredIdea.self, forKey: .data))
         case "settings.updated":
             payload = .settingsUpdated(try container.decode(AlfredSettings.self, forKey: .data))
+        case "bot.updated":
+            payload = .botUpdated(try container.decode(Bot.self, forKey: .data))
         default:
             payload = .unknown(type: type)
         }

@@ -1,0 +1,23 @@
+{
+  "id": 33,
+  "at": "2026-11-28T03:05:00.000Z",
+  "type": "task.updated",
+  "data": {
+    "id": "t5k9bn",
+    "botId": "x",
+    "title": "X 每日简报",
+    "brief": "读关注列表过去 24 小时的帖子，按主题归类，附上原帖链接。",
+    "origin": "manual",
+    "schedule": {
+      "kind": "daily",
+      "time": "08:00"
+    },
+    "status": "active",
+    "model": "haiku",
+    "budgetUsd": 1,
+    "createdAt": "2026-11-28T03:05:00.000Z",
+    "updatedAt": "2026-11-28T03:05:00.000Z",
+    "nextRunAt": "2026-11-29T00:00:00.000Z",
+    "skips": []
+  }
+}

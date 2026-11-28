@@ -3,6 +3,8 @@ import Foundation
 /// A file Alfred delivered, known by its workspace path. Alfred's document object, with every field the client shows.
 public struct AlfredDocument: Decodable, Identifiable, Hashable, Sendable {
     public let id: String
+    /// The bot the object belongs to. Missing means Alfred, and so does `"alfred"`: see `Bot.isAlfred`.
+    public let botId: String?
     /// Workspace-relative path.
     public let path: String
     public let title: String
@@ -15,12 +17,13 @@ public struct AlfredDocument: Decodable, Identifiable, Hashable, Sendable {
     public let updatedAt: Date
 
     private enum CodingKeys: String, CodingKey {
-        case id, path, title, kind, taskId, version, createdAt, updatedAt
+        case id, botId, path, title, kind, taskId, version, createdAt, updatedAt
     }
 
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
+        botId = try container.decodeIfPresent(String.self, forKey: .botId)
         path = try container.decode(String.self, forKey: .path)
         title = try container.decode(String.self, forKey: .title)
         kind = try container.decode(DocumentKind.self, forKey: .kind)

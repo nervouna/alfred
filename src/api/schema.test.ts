@@ -8,6 +8,10 @@ import type { ZodType } from "zod";
 import type { RunRecord } from "../runs.ts";
 import {
   AnnotationSchema,
+  BotIdSchema,
+  BotListSchema,
+  BotSchema,
+  DEFAULT_BOT_ID,
   DocumentDetailSchema,
   DocumentListSchema,
   DocumentRemovedSchema,
@@ -23,6 +27,7 @@ import {
   IdeaResultSchema,
   IdeaSchema,
   LiveEventSchema,
+  MAX_BOT_ID_CHARS,
   MAX_COMPACT_TOKENS,
   MAX_DAILY_BUDGET_USD,
   MAX_IDEA_NOTE_CHARS,
@@ -81,6 +86,7 @@ const SCHEMAS_BY_NAME: Record<string, ZodType> = {
   "document-list": DocumentListSchema,
   "document-result": DocumentResultSchema,
   "revision-accepted": RevisionAcceptedSchema,
+  "bot-list": BotListSchema,
   "memory-list": MemoryListSchema,
   "memory-result": MemoryResultSchema,
   rules: RulesSchema,
@@ -996,4 +1002,108 @@ test("a settings response from before the monthly budget, which lacks the key, s
   assert.equal("monthlyBudgetUsd" in old.settings, false);
   const monthly = JSON.parse(readFixture("responses", "settings-result-monthly-budget.json"));
   assert.equal(SettingsResultSchema.parse(monthly).settings.monthlyBudgetUsd, 300);
+});
+
+// --- Bots -------------------------------------------------------------------
+
+test("a bot id is 1 to 32 lowercase letters, digits and -, starting with a letter and not ending with -", () => {
+  for (const id of ["x", "alfred", "news-2", "a".repeat(MAX_BOT_ID_CHARS), "a-b-c"]) {
+    assert.equal(BotIdSchema.safeParse(id).success, true, id);
+  }
+  for (const id of ["", "X", "xY", "2x", "-x", "x-", "x_y", "x y", "é", "a".repeat(MAX_BOT_ID_CHARS + 1)]) {
+    assert.equal(BotIdSchema.safeParse(id).success, false, id);
+  }
+});
+
+test("alfred is a valid botId on both commands and means the same as leaving it out", () => {
+  const send = { type: "message.send", clientId: "c-1", text: "hi" };
+  const create = {
+    type: "task.create",
+    title: "t",
+    brief: "b",
+    schedule: { kind: "daily", time: "09:00" },
+  };
+  for (const command of [send, create]) {
+    assert.equal(parseCommand(command).ok, true, `${command.type} without botId`);
+    assert.equal(parseCommand({ ...command, botId: DEFAULT_BOT_ID }).ok, true, `${command.type} with alfred`);
+    assert.equal(parseCommand({ ...command, botId: "x" }).ok, true, `${command.type} with x`);
+    assert.equal(parseCommand({ ...command, botId: "X" }).ok, false, `${command.type} with X`);
+  }
+});
+
+test("no other command takes a botId", () => {
+  const others = [
+    { type: "run.stop", runId: "k7m2qa" },
+    { type: "question.answer", questionId: "q-1", answers: { a: "b" } },
+    { type: "task.run", taskId: "p3r8vx" },
+    { type: "idea.generate" },
+  ];
+  for (const command of others) {
+    assert.equal(parseCommand(command).ok, true, command.type);
+    assert.equal(parseCommand({ ...command, botId: "x" }).ok, false, `${command.type} with botId`);
+  }
+});
+
+test("every fixture that is not about a bot carries no botId, and parses to an object without one", () => {
+  const about = (name: string) => /(^|-)bot(-|\.)/.test(name);
+  let checked = 0;
+  for (const dir of ["commands", "events", "live", "responses"]) {
+    for (const name of fixtureNames(dir).filter((n) => !about(n))) {
+      const text = readFixture(dir, name);
+      assert.equal(text.includes("botId"), false, `${dir}/${name}`);
+      checked++;
+    }
+  }
+  assert.ok(checked > 50, "the existing fixtures were checked");
+  // A message, run, task, document or question parsed without botId has none: missing means Alfred.
+  for (const name of ["message-created-app-in.json", "run-updated-task.json", "task-updated-daily.json", "document-updated-delivered.json", "question-asked.json", "question-answered.json"]) {
+    const parsed = EventSchema.parse(JSON.parse(readFixture("events", name)));
+    assert.equal("botId" in (parsed.data as object), false, name);
+  }
+});
+
+test("the objects of a bot's conversation take botId, and alfred is read as the default", () => {
+  const withBot = (name: string) => EventSchema.parse(JSON.parse(readFixture("events", name)));
+  for (const name of ["message-created-bot-in.json", "run-updated-bot.json", "task-updated-bot.json", "question-asked-bot.json"]) {
+    assert.equal((withBot(name).data as { botId?: string }).botId, "x", name);
+  }
+  const answered = {
+    id: 40,
+    at: "2026-11-28T03:01:00.000Z",
+    type: "question.answered",
+    data: { id: "q-5c1e90d2", botId: "x", runId: "m8d2qw", answers: { "简报按什么顺序排？": "按主题" } },
+  };
+  assert.equal(EventSchema.safeParse(answered).success, true, "question.answered of a bot");
+  assert.equal(EventSchema.safeParse({ ...answered, data: { ...answered.data, botId: "alfred" } }).success, true, "alfred");
+  assert.equal(EventSchema.safeParse({ ...answered, data: { ...answered.data, botId: "X" } }).success, false, "uppercase");
+  const doc = EventSchema.parse(JSON.parse(readFixture("events", "document-updated-delivered.json")));
+  assert.equal(EventSchema.safeParse({ ...doc, data: { ...doc.data, botId: "x" } }).success, true, "document.updated of a bot");
+  const delta = LiveEventSchema.parse(JSON.parse(readFixture("live", "message-delta-bot.json")));
+  assert.equal(delta.type === "message.delta" && delta.data.botId, "x");
+  assert.equal(MessageSchema.safeParse({ ...MessageSchema.parse(JSON.parse(readFixture("events", "message-created-bot-in.json")).data), botId: "alfred" }).success, true);
+});
+
+test("a bot's limits: name 1 to 40 characters, description 1 to 200, instructions 1 to 8000, 0 to 64 tools", () => {
+  const bot = BotListSchema.parse(JSON.parse(readFixture("responses", "bot-list.json"))).bots[0];
+  assert.ok(bot);
+  const ok = (change: object) => BotSchema.safeParse({ ...bot, ...change }).success;
+  assert.equal(ok({}), true);
+  assert.equal(ok({ name: "名".repeat(40) }), true, "40 characters");
+  assert.equal(ok({ name: "名".repeat(41) }), false, "41 characters");
+  assert.equal(ok({ name: "" }), false, "empty name");
+  assert.equal(ok({ description: "d".repeat(200) }), true);
+  assert.equal(ok({ description: "d".repeat(201) }), false);
+  assert.equal(ok({ description: "" }), false);
+  assert.equal(ok({ instructions: "i".repeat(8000) }), true);
+  assert.equal(ok({ instructions: "i".repeat(8001) }), false);
+  assert.equal(ok({ instructions: "" }), false);
+  assert.equal(ok({ runBudgetUsd: MAX_RUN_BUDGET_USD }), true);
+  assert.equal(ok({ runBudgetUsd: 0.01 }), true);
+  assert.equal(ok({ model: "gpt" }), false);
+  assert.equal(ok({ tools: [] }), true, "no tools");
+  assert.equal(ok({ tools: Array.from({ length: 64 }, (_, i) => `t${i}`) }), true, "64 tools");
+  assert.equal(ok({ tools: Array.from({ length: 65 }, (_, i) => `t${i}`) }), false, "65 tools");
+  assert.equal(ok({ tools: ["t".repeat(128)] }), true);
+  assert.equal(ok({ tools: ["t".repeat(129)] }), false);
+  assert.equal(ok({ tools: [""] }), false);
 });

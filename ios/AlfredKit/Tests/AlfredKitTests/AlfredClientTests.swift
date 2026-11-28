@@ -381,6 +381,16 @@ final class AlfredClientTests: XCTestCase {
         }
     }
 
+    func testBotsFetchesTheListAndDecodesIt() async throws {
+        let (client, log) = try makeClient { _ in StubReply(chunks: [(try? fixture("responses/bot-list.json")) ?? Data()]) }
+        let list = try await client.bots()
+        XCTAssertEqual(list.bots.map(\.id), ["x"])
+        let entry = try XCTUnwrap(log.entries.first)
+        XCTAssertEqual(entry.request.httpMethod, "GET")
+        XCTAssertEqual(try encodedPath(entry.request), "/api/bots")
+        assertCredentials(entry.request)
+    }
+
     func testSettingsFetchesTheDetailAndDecodesIt() async throws {
         let (client, log) = try makeClient { _ in StubReply(chunks: [(try? fixture("responses/settings-detail.json")) ?? Data()]) }
         let detail = try await client.settings()

@@ -22,6 +22,8 @@ public struct Question: Decodable, Hashable, Sendable {
 /// A run waiting for the owner: the `question.asked` event. It stays open until a `question.answered` event with its `id`.
 public struct QuestionAsked: Decodable, Hashable, Sendable {
     public let id: String
+    /// The bot the object belongs to. Missing means Alfred, and so does `"alfred"`: see `Bot.isAlfred`.
+    public let botId: String?
     public let runId: String
     /// One to four questions, answered together.
     public let questions: [Question]
@@ -30,6 +32,8 @@ public struct QuestionAsked: Decodable, Hashable, Sendable {
 /// The `question.answered` event: the owner answered, or the question was cancelled by a stop.
 public struct QuestionAnswered: Decodable, Hashable, Sendable {
     public let id: String
+    /// The bot the object belongs to. Missing means Alfred, and so does `"alfred"`: see `Bot.isAlfred`.
+    public let botId: String?
     public let runId: String
     /// Each answer by its question's text: an option's label, the labels of several joined with `, ` for a
     /// multi-select question, or free text. Empty when `cancelled`.
@@ -37,12 +41,13 @@ public struct QuestionAnswered: Decodable, Hashable, Sendable {
     public let cancelled: Bool
 
     private enum CodingKeys: String, CodingKey {
-        case id, runId, answers, cancelled
+        case id, botId, runId, answers, cancelled
     }
 
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
+        botId = try container.decodeIfPresent(String.self, forKey: .botId)
         runId = try container.decode(String.self, forKey: .runId)
         answers = try container.decode([String: String].self, forKey: .answers)
         cancelled = try container.decodeIfPresent(Bool.self, forKey: .cancelled) ?? false

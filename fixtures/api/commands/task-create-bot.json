@@ -1,0 +1,12 @@
+{
+  "type": "task.create",
+  "botId": "x",
+  "title": "X 每日简报",
+  "brief": "读关注列表过去 24 小时的帖子，按主题归类，附上原帖链接。",
+  "schedule": {
+    "kind": "daily",
+    "time": "08:00"
+  },
+  "model": "haiku",
+  "budgetUsd": 1
+}

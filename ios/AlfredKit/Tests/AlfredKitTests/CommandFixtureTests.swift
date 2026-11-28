@@ -91,7 +91,7 @@ final class CommandFixtureTests: XCTestCase {
 
     func testMessageSendWithFilesCarriesThem() throws {
         let withText = try decodeCommand("commands/message-send-files.json")
-        guard case let .messageSend(clientId, text, files) = withText else {
+        guard case let .messageSend(clientId, text, files, _) = withText else {
             return XCTFail("expected message.send, got \(withText)")
         }
         XCTAssertEqual(clientId, "c-7f3a9f")
@@ -100,7 +100,7 @@ final class CommandFixtureTests: XCTestCase {
         XCTAssertEqual(files.map(\.kind?.rawValue), ["image"])
 
         let filesOnly = try decodeCommand("commands/message-send-files-only.json")
-        guard case let .messageSend(_, emptyText, pdfs) = filesOnly else {
+        guard case let .messageSend(_, emptyText, pdfs, _) = filesOnly else {
             return XCTFail("expected message.send, got \(filesOnly)")
         }
         XCTAssertEqual(emptyText, "")
@@ -109,12 +109,22 @@ final class CommandFixtureTests: XCTestCase {
 
     func testMessageSendWithoutFilesHasNoFilesKeyWhenEncoded() throws {
         let command = try decodeCommand("commands/message-send.json")
-        guard case let .messageSend(_, _, files) = command else {
+        guard case let .messageSend(_, _, files, _) = command else {
             return XCTFail("expected message.send, got \(command)")
         }
         XCTAssertEqual(files.count, 0)
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(command)) as? [String: Any])
         XCTAssertNil(json["files"])
+    }
+
+    func testBotCommandsCarryTheBotIdAndOnlyWhenSet() throws {
+        let send = try decodeCommand("commands/message-send-bot.json")
+        XCTAssertEqual(send, .messageSend(clientId: "c-x-3d81", text: "看一下今天关注列表里的新动态", botId: "x"))
+        let create = try decodeCommand("commands/task-create-bot.json")
+        guard case let .taskCreate(draft) = create else { return XCTFail("expected task.create, got \(create)") }
+        XCTAssertEqual(draft.botId, "x")
+        let plain = try JSONSerialization.jsonObject(with: JSONEncoder().encode(Command.messageSend(clientId: "c", text: "t"))) as? [String: Any]
+        XCTAssertNil(try XCTUnwrap(plain)["botId"])
     }
 
     private func decodeCommand(_ name: String) throws -> Command {

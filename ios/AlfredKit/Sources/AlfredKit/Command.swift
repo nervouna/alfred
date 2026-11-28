@@ -1,7 +1,8 @@
 /// A command the client sends to Alfred. Alfred validates it; this type only shapes the JSON.
 public enum Command: Hashable, Sendable, Codable {
     /// `files` are inbox paths the owner attached. `text` is empty only when `files` is not.
-    case messageSend(clientId: String, text: String, files: [FileRef] = [])
+    /// A `botId` of nil, like `"alfred"`, addresses Alfred; any other bot is answered 503 until the bot store exists.
+    case messageSend(clientId: String, text: String, files: [FileRef] = [], botId: String? = nil)
     case runStop(runId: String)
     /// Answers an open question. `answers` maps a question's text to its answer: an option's label, the labels of
     /// several joined with `, ` for a multi-select question, or free text of 1 to 2000 characters.
@@ -36,7 +37,7 @@ public enum Command: Hashable, Sendable, Codable {
     case memoryDelete(file: String, version: String)
 
     private enum CodingKeys: String, CodingKey {
-        case type, clientId, text, runId, files, questionId, answers
+        case type, botId, clientId, text, runId, files, questionId, answers
         case title, brief, schedule, model, budgetUsd, taskId, status
         case documentId, version, annotations
         case ideaId, reason, note
@@ -54,7 +55,8 @@ public enum Command: Hashable, Sendable, Codable {
             self = .messageSend(
                 clientId: try container.decode(String.self, forKey: .clientId),
                 text: try container.decode(String.self, forKey: .text),
-                files: try container.decodeIfPresent([FileRef].self, forKey: .files) ?? []
+                files: try container.decodeIfPresent([FileRef].self, forKey: .files) ?? [],
+                botId: try container.decodeIfPresent(String.self, forKey: .botId)
             )
         case "run.stop":
             self = .runStop(runId: try container.decode(String.self, forKey: .runId))
@@ -69,7 +71,8 @@ public enum Command: Hashable, Sendable, Codable {
                 brief: try container.decode(String.self, forKey: .brief),
                 schedule: try container.decode(Schedule.self, forKey: .schedule),
                 model: try container.decodeIfPresent(TaskModel.self, forKey: .model),
-                budgetUsd: try container.decodeIfPresent(Double.self, forKey: .budgetUsd)
+                budgetUsd: try container.decodeIfPresent(Double.self, forKey: .budgetUsd),
+                botId: try container.decodeIfPresent(String.self, forKey: .botId)
             ))
         case "task.update":
             self = .taskUpdate(
@@ -164,8 +167,9 @@ public enum Command: Hashable, Sendable, Codable {
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         switch self {
-        case let .messageSend(clientId, text, files):
+        case let .messageSend(clientId, text, files, botId):
             try container.encode("message.send", forKey: .type)
+            try container.encodeIfPresent(botId, forKey: .botId)
             try container.encode(clientId, forKey: .clientId)
             try container.encode(text, forKey: .text)
             if !files.isEmpty {
@@ -180,6 +184,7 @@ public enum Command: Hashable, Sendable, Codable {
             try container.encode(answers, forKey: .answers)
         case let .taskCreate(draft):
             try container.encode("task.create", forKey: .type)
+            try container.encodeIfPresent(draft.botId, forKey: .botId)
             try container.encode(draft.title, forKey: .title)
             try container.encode(draft.brief, forKey: .brief)
             try container.encode(draft.schedule, forKey: .schedule)

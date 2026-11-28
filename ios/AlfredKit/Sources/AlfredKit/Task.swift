@@ -34,6 +34,8 @@ public struct TaskSkip: Decodable, Hashable, Sendable {
 /// A task: a brief the agent runs on a schedule. Alfred's task object, with every field the client shows.
 public struct AlfredTask: Decodable, Identifiable, Hashable, Sendable {
     public let id: String
+    /// The bot the object belongs to. Missing means Alfred, and so does `"alfred"`: see `Bot.isAlfred`.
+    public let botId: String?
     public let title: String
     /// What each run is asked to do.
     public let brief: String
@@ -53,13 +55,14 @@ public struct AlfredTask: Decodable, Identifiable, Hashable, Sendable {
     public let skips: [TaskSkip]
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, brief, origin, schedule, status, model, budgetUsd, createdAt, updatedAt
+        case id, botId, title, brief, origin, schedule, status, model, budgetUsd, createdAt, updatedAt
         case nextRunAt, lastRunId, lastRunAt, skips
     }
 
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
+        botId = try container.decodeIfPresent(String.self, forKey: .botId)
         title = try container.decode(String.self, forKey: .title)
         brief = try container.decode(String.self, forKey: .brief)
         origin = try container.decode(TaskOrigin.self, forKey: .origin)
@@ -83,8 +86,11 @@ public struct TaskDraft: Hashable, Sendable {
     public let schedule: Schedule
     public let model: TaskModel?
     public let budgetUsd: Double?
+    /// The bot the task is for. Nil, like `"alfred"`, means Alfred.
+    public let botId: String?
 
-    public init(title: String, brief: String, schedule: Schedule, model: TaskModel? = nil, budgetUsd: Double? = nil) {
+    public init(title: String, brief: String, schedule: Schedule, model: TaskModel? = nil, budgetUsd: Double? = nil, botId: String? = nil) {
+        self.botId = botId
         self.title = title
         self.brief = brief
         self.schedule = schedule
