@@ -347,7 +347,9 @@ export function externalSpendHooks(servers: readonly ExternalServer[], runId: st
             return {};
           }
           if (found.spend.priceUsd !== undefined) {
-            appendExternalSpend({ at: new Date().toISOString(), runId, server: found.server, tool: found.tool, units: 1, usd: found.spend.priceUsd, estimated: true });
+            // agent_id is set only inside a subagent, and agent_type then names its type; the main thread gets no role.
+            const role = input.agent_id && input.agent_type ? { role: input.agent_type } : {};
+            appendExternalSpend({ at: new Date().toISOString(), runId, server: found.server, tool: found.tool, units: 1, usd: found.spend.priceUsd, estimated: true, ...role });
           }
           return {};
         },

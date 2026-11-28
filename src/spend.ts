@@ -58,6 +58,8 @@ export interface ExternalSpend {
   units: number;
   usd: number;
   estimated: true;
+  /** The agent type of the subagent that made the call; absent for the main thread and in lines from before this field. */
+  role?: string;
 }
 
 /** Appends one entry. A failure is logged and never fails the tool call it records. */
@@ -74,7 +76,8 @@ function isEntry(v: unknown): v is ExternalSpend {
   const e = v as Partial<ExternalSpend> | null;
   return (
     typeof e === "object" && e !== null && typeof e.at === "string" && typeof e.runId === "string" && typeof e.server === "string" &&
-    typeof e.tool === "string" && isAmount(e.units) && isAmount(e.usd) && !Number.isNaN(Date.parse(e.at))
+    typeof e.tool === "string" && isAmount(e.units) && isAmount(e.usd) && (e.role === undefined || typeof e.role === "string") &&
+    !Number.isNaN(Date.parse(e.at))
   );
 }
 
@@ -238,7 +241,7 @@ export function querySpend(query: { from: string; to: string; groupBy: SpendGrou
         add(outside, run ? (run.taskId ?? NONE) : "(unknown run)", e.usd);
         break;
       case "role":
-        add(outside, MAIN, e.usd);
+        add(outside, e.role ?? MAIN, e.usd);
         break;
       case "model":
         add(outside, "(external tools have no model)", e.usd);

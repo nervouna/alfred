@@ -218,10 +218,10 @@ function pre(runId: string, tool_name: string, extra: object = {}) {
 
 const denied = (out: unknown): boolean => (out as { hookSpecificOutput?: { permissionDecision?: string } }).hookSpecificOutput?.permissionDecision === "deny";
 
-function post(hooks: ReturnType<typeof externalSpendHooks>, tool_name: string, ok: boolean, response: unknown = "done") {
+function post(hooks: ReturnType<typeof externalSpendHooks>, tool_name: string, ok: boolean, response: unknown = "done", extra: object = {}) {
   const input = ok
-    ? { hook_event_name: "PostToolUse", tool_name, tool_input: {}, tool_response: response, tool_use_id: "t" }
-    : { hook_event_name: "PostToolUseFailure", tool_name, tool_input: {}, error: "boom", tool_use_id: "t" };
+    ? { hook_event_name: "PostToolUse", tool_name, tool_input: {}, tool_response: response, tool_use_id: "t", ...extra }
+    : { hook_event_name: "PostToolUseFailure", tool_name, tool_input: {}, error: "boom", tool_use_id: "t", ...extra };
   const matcher = ok ? hooks.postToolUse : hooks.postToolUseFailure;
   return matcher.hooks[0]!({ session_id: "s", transcript_path: "", cwd: "", ...input } as never, "t", { signal: new AbortController().signal });
 }
@@ -263,6 +263,16 @@ test("a call that succeeded is appended with the tool's price, and a failed call
   await post(hooks, "mcp__ext__unknown", true);
   await post(hooks, "mcp__alfred__deliver", true);
   assert.deepEqual(readExternalSpend().map((e) => [e.tool, e.usd]), [["post", 0.04], ["post", 0.04], ["search", 0]]);
+});
+
+test("a priced call of a subagent records its agent type as the role, and a main-thread call records none", async () => {
+  const hooks = externalSpendHooks(pricedServers(), "run-role");
+  await post(hooks, "mcp__ext__post", true);
+  await post(hooks, "mcp__ext__post", true, "done", { agent_id: "a1", agent_type: "researcher" });
+  const [main, sub, ...rest] = readExternalSpend().filter((e) => e.runId === "run-role");
+  assert.equal(rest.length, 0);
+  assert.equal(main?.role, undefined, "a main-thread call has no role");
+  assert.equal(sub?.role, "researcher", "a subagent's call is recorded under its agent type");
 });
 
 test("maxPerRun denies the next call of the run with a reason that says not to retry, in a subagent too", async () => {
