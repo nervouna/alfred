@@ -343,4 +343,43 @@ final class TimelineTests: XCTestCase {
         XCTAssertEqual(timeline.messages.map(\.id), ["m1005"])
         XCTAssertEqual(timeline.messages.first?.runId, "k7m2qa")
     }
+
+    // MARK: Bots
+
+    private func botEvent(_ id: Int, type: String, data: String) throws -> StreamEvent {
+        try decodeStream(#"{"id":\#(id),"at":"2026-11-28T03:00:00Z","type":"\#(type)","data":\#(data)}"#)
+    }
+
+    private func botDelta(_ botId: String) throws -> StreamEvent {
+        try decodeStream(#"{"at":"2026-11-28T03:00:12Z","type":"message.delta","data":{"botId":"\#(botId)","runId":"m8d2qw","streamId":"s1","text":"hi"}}"#)
+    }
+
+    func testTheChatIgnoresWhatBelongsToABotOtherThanAlfred() throws {
+        var timeline = Timeline()
+        timeline.apply(try streamEvent("events/message-created-bot-in.json"))
+        timeline.apply(try streamEvent("events/run-updated-bot.json"))
+        timeline.apply(try streamEvent("events/question-asked-bot.json"))
+        timeline.apply(try botEvent(35, type: "question.answered", data: #"{"id":"q-5c1e90d2","botId":"x","runId":"m8d2qw","answers":{"a":"b"}}"#))
+        timeline.apply(try botDelta("x"))
+        timeline.apply(try streamEvent("events/bot-updated.json"))
+        XCTAssertEqual(timeline.messages, [])
+        XCTAssertEqual(timeline.runs, [:])
+        XCTAssertEqual(timeline.questions, [])
+        XCTAssertEqual(timeline.drafts, [:])
+        XCTAssertEqual(timeline.lastEventId, 35, "the resume point still moves")
+    }
+
+    func testBotAlfredIsTreatedAsMissing() throws {
+        var timeline = Timeline()
+        timeline.apply(try botEvent(1, type: "message.created", data: #"{"id":"m1","botId":"alfred","channel":"app","direction":"in","text":"hi","files":[],"at":"2026-11-28T03:00:00Z"}"#))
+        timeline.apply(try botEvent(2, type: "run.updated", data: #"{"id":"m8d2qw","botId":"alfred","kind":"task","title":"t","status":"running","startedAt":"2026-11-28T03:00:00Z","costUsd":0,"files":[]}"#))
+        timeline.apply(try botEvent(3, type: "question.asked", data: #"{"id":"q-1","botId":"alfred","runId":"m8d2qw","questions":[{"question":"?","header":"h","options":[{"label":"a","description":""},{"label":"b","description":""}],"multiSelect":false}]}"#))
+        XCTAssertEqual(timeline.messages.map(\.id), ["m1"])
+        XCTAssertEqual(timeline.runs.keys.sorted(), ["m8d2qw"])
+        XCTAssertEqual(timeline.openQuestions.keys.sorted(), ["q-1"])
+        timeline.apply(try botEvent(4, type: "question.answered", data: #"{"id":"q-1","botId":"alfred","runId":"m8d2qw","answers":{"?":"a"}}"#))
+        XCTAssertEqual(timeline.openQuestions, [:])
+        timeline.apply(try botDelta("alfred"))
+        XCTAssertEqual(timeline.drafts["m8d2qw"]?.text, "hi")
+    }
 }

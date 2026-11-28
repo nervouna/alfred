@@ -24,6 +24,8 @@ public struct Message: Decodable, Hashable, Sendable {
     }
 
     public let id: String
+    /// The bot the object belongs to. Missing means Alfred, and so does `"alfred"`: see `Bot.isAlfred`.
+    public let botId: String?
     public let channel: Channel
     public let direction: Direction
     public let text: String
@@ -36,12 +38,13 @@ public struct Message: Decodable, Hashable, Sendable {
     public let error: String?
 
     private enum CodingKeys: String, CodingKey {
-        case id, channel, direction, text, files, at, runId, taskId, clientId, error
+        case id, botId, channel, direction, text, files, at, runId, taskId, clientId, error
     }
 
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
+        botId = try container.decodeIfPresent(String.self, forKey: .botId)
         channel = try container.decode(Channel.self, forKey: .channel)
         direction = try container.decode(Direction.self, forKey: .direction)
         text = try container.decode(String.self, forKey: .text)

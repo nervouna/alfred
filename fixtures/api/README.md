@@ -103,6 +103,20 @@ The owner's settings are Alfred's tunables: Alfred reads them from its environme
 - The ranges are those a command may set: `dailyBudgetUsd` from 1 to 100, `monthlyBudgetUsd` from 1 to 1000, `runBudgetUsd` from 1 to 20, `sessionIdleHours` from 0 to 168, `compactTokens` 0 or from 20000 to 1000000, `memoryScanMinutes` from 0 to 1440, `memoryScanBudgetUsd` above 0 and at most 1, `ideasAt` an `HH:MM` time or `null`, and `model` one of the three. The ranges bind the command only. A deployment may run with a value beyond them (`ALFRED_DAILY_BUDGET_USD=150`), so a `Settings` in a response checks the types and the `HH:MM` shape alone.
 - `settings.updated` carries the whole `Settings` on every change of an effective value. `settings.update` is answered 200 with a `SettingsResult`: the `settings` as Alfred now holds them. `GET /api/settings` is a `SettingsDetail`: the `settings` and `spentTodayUsd`, the owner's spend today in the owner's time zone, 0 or more.
 
+## Bots
+
+A bot is a role with its own instructions, model, run budget and tools. Alfred itself is not a bot record: it always exists, is configured by Settings, and is what a missing `botId` means.
+
+- A bot id is 1 to 32 characters of lowercase ASCII letters, digits and `-`, starting with a letter and not ending with `-`. It is fixed at creation. `alfred` is a valid id on an object or a command and means the default bot; a `Bot` record never has it.
+- `botId` is optional on a `Message`, `Run`, `Task`, `Document`, `question.asked` and `question.answered` data, and on the data of the live `message.delta`. Missing means Alfred, so every event already logged replays unchanged. Alfred never writes `"alfred"` there, but a decoder treats it as missing. Events stay lenient: a `botId` that is not a valid id still fails the object, as any other field does.
+- `message.send` and `task.create` take an optional `botId`; `alfred` is valid and means the same as leaving it out. No other command takes one, since the others name a run, task, question, document or idea that already belongs to a bot.
+- Until the bot store exists, a `message.send` or `task.create` whose `botId` is present and not `alfred` is answered 503 `{"error": "bots are not available"}` and never reaches the handler. With `alfred` the key is dropped and the command behaves as without it. The app's chat shows Alfred's objects only and ignores the rest.
+- A `Bot` has `id` (never `alfred`), `name` (1 to 40 characters, not blank), `description` (1 to 200), `instructions` (the role prompt, 1 to 8000), `model` (`sonnet`, `opus` or `haiku`), `runBudgetUsd` (above 0, at most the chat run cap of 20), `tools` (0 to 64 distinct tool names of 1 to 128 characters) and `createdAt`, `updatedAt`.
+- `GET /api/bots` is a `BotList`: the bots, oldest created first, Alfred not included. `bot.updated` carries a whole `Bot`. Neither the route nor the event is served yet.
+- A bot's proposal card needs no shape of its own: it is a `question.asked`, as the confirmation of `task_create` is.
+
+The fixtures tell one story around the bot `x` ("X"): `commands/message-send-bot.json` is the owner's message to it, `events/message-created-bot-in.json` its stored message (same `clientId`), `events/run-updated-bot.json` and `live/message-delta-bot.json` its run, `events/question-asked-bot.json` a question that run asks, `commands/task-create-bot.json` and `events/task-updated-bot.json` a task for it, and `events/bot-updated.json` and `responses/bot-list.json` the bot itself. `responses/bot-list-empty.json` is the list before any bot exists.
+
 ## Compatibility rules
 
 - Clients skip events and live events whose `type` they do not know, and ignore fields they do not know.

@@ -30,6 +30,7 @@ final class ResponseFixtureTests: XCTestCase {
                 case "settings-result.json", "settings-result-beyond-ranges.json", "settings-result-monthly-budget.json":
                     _ = try decoder.decode(SettingsResult.self, from: data)
                 case "settings-detail.json", "settings-detail-monthly-budget.json": _ = try decoder.decode(SettingsDetail.self, from: data)
+                case "bot-list.json", "bot-list-empty.json": _ = try decoder.decode(BotList.self, from: data)
                 case "rules.json": _ = try decoder.decode(Rules.self, from: data)
                 case "memory-list.json": _ = try decoder.decode(MemoryList.self, from: data)
                 case "memory-result.json": _ = try decoder.decode(MemoryResult.self, from: data)

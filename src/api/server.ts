@@ -18,7 +18,7 @@ import { type EventLog, isLiveEvent } from "../events.ts";
 import { localDate, localTime, sanitizeFileName, uniquePath } from "../files.ts";
 import { describeError, log } from "../log.ts";
 import { STATE_DIR, WORKSPACE_DIR } from "../store.ts";
-import { MAX_COMMAND_BYTES, MAX_UPLOAD_BYTES, parseCommand } from "./schema.ts";
+import { DEFAULT_BOT_ID, MAX_COMMAND_BYTES, MAX_UPLOAD_BYTES, parseCommand } from "./schema.ts";
 import type {
   DocumentResult,
   DocumentRevise,
@@ -318,7 +318,14 @@ export async function startApi(opts: ApiOptions): Promise<() => Promise<void>> {
     const parsed = parseCommand(json);
     if (!parsed.ok) return sendJson(res, 400, { error: parsed.error });
 
-    const { command } = parsed;
+    // A command for a bot other than Alfred is refused with 503 until the bot store exists. "alfred" means the same as no
+    // botId, and the key is dropped, so nothing downstream sees it.
+    let { command } = parsed;
+    if (command.type === "message.send" || command.type === "task.create") {
+      const { botId, ...rest } = command;
+      if (botId !== undefined && botId !== DEFAULT_BOT_ID) return sendJson(res, 503, { error: "bots are not available" });
+      command = rest as typeof command;
+    }
     if (command.type === "run.stop") {
       if (await handler.stopRun(command.runId)) return sendJson(res, 202, { stopped: true });
       return sendJson(res, 404, { error: `no live or queued run ${command.runId}` });

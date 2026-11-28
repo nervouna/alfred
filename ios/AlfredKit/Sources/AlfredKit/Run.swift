@@ -9,6 +9,8 @@ public struct RunFile: Decodable, Hashable, Sendable {
 /// The client's view of a run: one execution of the agent, or a subagent of one.
 public struct Run: Decodable, Hashable, Sendable {
     public let id: String
+    /// The bot the object belongs to. Missing means Alfred, and so does `"alfred"`: see `Bot.isAlfred`.
+    public let botId: String?
     public let kind: RunKind
     public let taskId: String?
     /// Set on a revision run: the document it revised.
@@ -24,12 +26,13 @@ public struct Run: Decodable, Hashable, Sendable {
     public let error: String?
 
     private enum CodingKeys: String, CodingKey {
-        case id, kind, taskId, documentId, parentRunId, title, status, model, startedAt, endedAt, costUsd, files, error
+        case id, botId, kind, taskId, documentId, parentRunId, title, status, model, startedAt, endedAt, costUsd, files, error
     }
 
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
+        botId = try container.decodeIfPresent(String.self, forKey: .botId)
         kind = try container.decode(RunKind.self, forKey: .kind)
         taskId = try container.decodeIfPresent(String.self, forKey: .taskId)
         documentId = try container.decodeIfPresent(String.self, forKey: .documentId)

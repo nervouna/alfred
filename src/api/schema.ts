@@ -67,6 +67,20 @@ export const MAX_MEMORY_NAME_CHARS = 80;
 export const MAX_MEMORY_DESCRIPTION_CHARS = 200;
 /** The most a memory's body holds, in UTF-8 bytes. */
 export const MAX_MEMORY_BODY_BYTES = 8192;
+/** The most characters a bot's id holds. */
+export const MAX_BOT_ID_CHARS = 32;
+/** The id of the default bot, Alfred itself. A bot record never has it. */
+export const DEFAULT_BOT_ID = "alfred";
+/** The most characters a bot's name holds. */
+export const MAX_BOT_NAME_CHARS = 40;
+/** The most characters a bot's description holds. */
+export const MAX_BOT_DESCRIPTION_CHARS = 200;
+/** The most characters a bot's instructions (its role prompt) hold. */
+export const MAX_BOT_INSTRUCTIONS_CHARS = 8000;
+/** The most tools a bot lists. */
+export const MAX_BOT_TOOLS = 64;
+/** The most characters one of a bot's tool names holds. */
+export const MAX_BOT_TOOL_NAME_CHARS = 128;
 const MAX_ANNOTATION_REPLY_CHARS = 4000;
 const MAX_TEXT_CHARS = 20_000;
 const MAX_ANSWER_CHARS = 2000;
@@ -83,6 +97,16 @@ const DocumentIdSchema = z.string().regex(/^[2-9a-hjkmnp-z]{6}$/, "must be a six
 const AnnotationIdSchema = z.string().regex(/^[2-9a-hjkmnp-z]{6}$/, "must be a six-character annotation id");
 // A version is the full id of a commit in the workspace's history.
 const VersionSchema = z.string().regex(/^[0-9a-f]{40}$/, "must be a 40-character commit id");
+
+/**
+ * A bot's id: 1 to MAX_BOT_ID_CHARS characters of lowercase ASCII letters, digits and "-", starting with a letter and
+ * not ending with "-". "alfred" is a valid id: it names the default bot, which is not a record (see BotSchema).
+ */
+export const BotIdSchema = z
+  .string()
+  .regex(/^[a-z][a-z0-9-]*$/, "must be lowercase letters, digits and -, starting with a letter")
+  .refine((id) => !id.endsWith("-"), "must not end with -")
+  .refine((id) => id.length <= MAX_BOT_ID_CHARS, `must be at most ${MAX_BOT_ID_CHARS} characters`);
 
 // "app" is the only channel Alfred uses now. The other is a retired one: its messages stay in the event log, so clients still read it.
 export const ChannelSchema = z.enum(["app", "wechat"]);
@@ -115,6 +139,7 @@ const InboxPathSchema = WorkspacePathSchema.refine((path) => path.startsWith("in
 export const MessageSchema = z
   .object({
     id: z.string().min(1).max(64),
+    botId: BotIdSchema.optional(),
     channel: ChannelSchema,
     direction: z.enum(["in", "out"]),
     text: z.string(),
@@ -143,6 +168,7 @@ type ModelMatches = Expect<Equals<z.infer<typeof ModelSchema>, ModelKey>>;
 /** The client's view of a run record: the fields of RunRecord it shows, nothing else. */
 export const RunSchema = z.object({
   id: RunIdSchema,
+  botId: BotIdSchema.optional(),
   kind: RunKindSchema,
   taskId: TaskIdSchema.optional(),
   documentId: DocumentIdSchema.optional(),
@@ -185,6 +211,7 @@ export const QuestionSchema = z.object({
 /** The data of question.asked: a run waits on these questions until they are answered or cancelled. */
 export const QuestionAskedSchema = z.object({
   id: QuestionIdSchema,
+  botId: BotIdSchema.optional(),
   runId: RunIdSchema,
   questions: z.array(QuestionSchema).min(1, "must have at least 1 question").max(4, "must have at most 4 questions"),
 });
@@ -196,6 +223,7 @@ export const QuestionAskedSchema = z.object({
 export const QuestionAnsweredSchema = z
   .object({
     id: QuestionIdSchema,
+    botId: BotIdSchema.optional(),
     runId: RunIdSchema,
     answers: z.record(z.string(), z.string().min(1, "must not be empty")),
     cancelled: z.boolean().optional(),
@@ -268,6 +296,7 @@ export const TaskSkipSchema = z.object({
 export const TaskSchema = z
   .object({
     id: TaskIdSchema,
+    botId: BotIdSchema.optional(),
     title: TaskTitleSchema,
     brief: TaskBriefSchema,
     origin: TaskOriginSchema,
@@ -319,6 +348,7 @@ export const DocumentVersionSchema = z
 /** A file Alfred delivered, known by its workspace path. `version` is the document's current version. */
 export const DocumentSchema = z.object({
   id: DocumentIdSchema,
+  botId: BotIdSchema.optional(),
   path: WorkspacePathSchema,
   title: DocumentTitleSchema,
   kind: DocumentKindSchema,
@@ -522,6 +552,36 @@ export const SettingsDetailSchema = z.object({
   spentMonthUsd: z.number().min(0, "must be at least 0").optional(),
 });
 
+const BotNameSchema = z
+  .string()
+  .refine((name) => name.trim() !== "", "must not be blank")
+  .refine((name) => [...name].length <= MAX_BOT_NAME_CHARS, `must be at most ${MAX_BOT_NAME_CHARS} characters`);
+
+const BotToolsSchema = z
+  .array(z.string().min(1, "must not be empty").max(MAX_BOT_TOOL_NAME_CHARS, `must be at most ${MAX_BOT_TOOL_NAME_CHARS} characters`))
+  .max(MAX_BOT_TOOLS, `must have at most ${MAX_BOT_TOOLS} tools`)
+  .refine((tools) => new Set(tools).size === tools.length, "must not repeat a tool");
+
+/**
+ * A bot: a role with its own instructions, model, run budget and tools. Its id is fixed at creation and is never
+ * "alfred": Alfred is not a record, it always exists and is configured by Settings. Like a task in a response, a bot
+ * checks types and shapes only.
+ */
+export const BotSchema = z.object({
+  id: BotIdSchema.refine((id) => id !== DEFAULT_BOT_ID, `must not be ${DEFAULT_BOT_ID}, which is reserved for the default bot`),
+  name: BotNameSchema,
+  description: z.string().min(1, "must not be empty").max(MAX_BOT_DESCRIPTION_CHARS, `must be at most ${MAX_BOT_DESCRIPTION_CHARS} characters`),
+  instructions: z.string().min(1, "must not be empty").max(MAX_BOT_INSTRUCTIONS_CHARS, `must be at most ${MAX_BOT_INSTRUCTIONS_CHARS} characters`),
+  model: ModelSchema,
+  runBudgetUsd: z.number().gt(0, "must be greater than 0").max(MAX_RUN_BUDGET_USD, `must be at most ${MAX_RUN_BUDGET_USD}`),
+  tools: BotToolsSchema,
+  createdAt: IsoTimestampSchema,
+  updatedAt: IsoTimestampSchema,
+});
+
+/** The body of GET /api/bots: the bots, oldest created first. Alfred is not in the list. */
+export const BotListSchema = z.object({ bots: z.array(BotSchema) });
+
 const EventEnvelope = { id: z.int().positive(), at: IsoTimestampSchema };
 
 export const EventSchema = z.discriminatedUnion("type", [
@@ -535,6 +595,7 @@ export const EventSchema = z.discriminatedUnion("type", [
   z.object({ ...EventEnvelope, type: z.literal("annotation.updated"), data: AnnotationSchema }),
   z.object({ ...EventEnvelope, type: z.literal("idea.updated"), data: IdeaSchema }),
   z.object({ ...EventEnvelope, type: z.literal("settings.updated"), data: SettingsSchema }),
+  z.object({ ...EventEnvelope, type: z.literal("bot.updated"), data: BotSchema }),
 ]);
 
 const StreamIdSchema = z.string().regex(/^[A-Za-z0-9_.:-]{1,64}$/, "must be 1-64 letters, digits, _, ., : or -");
@@ -547,6 +608,7 @@ export const LiveEventSchema = z.discriminatedUnion("type", [
     at: IsoTimestampSchema,
     type: z.literal("message.delta"),
     data: z.object({
+      botId: BotIdSchema.optional(),
       runId: RunIdSchema,
       streamId: StreamIdSchema,
       text: z.string().min(1, "must not be empty"),
@@ -787,6 +849,7 @@ const CommandTextSchema = z
 export const MessageSendSchema = z
   .strictObject({
     type: z.literal("message.send"),
+    botId: BotIdSchema.optional(),
     clientId: ClientIdSchema,
     text: CommandTextSchema,
     files: CommandFilesSchema.optional(),
@@ -816,6 +879,7 @@ export const QuestionAnswerSchema = z.strictObject({
 
 export const TaskCreateSchema = z.strictObject({
   type: z.literal("task.create"),
+  botId: BotIdSchema.optional(),
   title: TaskTitleSchema,
   brief: TaskBriefSchema,
   schedule: ScheduleCommandSchema,
@@ -1041,6 +1105,8 @@ export const CommandSchema = z.discriminatedUnion("type", [
 
 export type Channel = z.infer<typeof ChannelSchema>;
 export type FileRef = z.infer<typeof FileRefSchema>;
+export type Bot = z.infer<typeof BotSchema>;
+export type BotList = z.infer<typeof BotListSchema>;
 export type Message = z.infer<typeof MessageSchema>;
 export type Run = z.infer<typeof RunSchema>;
 export type Step = z.infer<typeof StepSchema>;

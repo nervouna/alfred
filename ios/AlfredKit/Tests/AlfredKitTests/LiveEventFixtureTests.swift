@@ -26,7 +26,7 @@ final class LiveEventFixtureTests: XCTestCase {
     func testMessageDeltaFieldsAreDecoded() throws {
         let event = try decode(Fixtures.directory.appending(path: "live/message-delta.json"))
         XCTAssertEqual(event.at.timeIntervalSince1970, 1_792_917_121.12, accuracy: 0.001)
-        guard case let .messageDelta(runId, streamId, text) = event.payload else {
+        guard case let .messageDelta(runId, streamId, text, _) = event.payload else {
             return XCTFail("expected a message.delta event, got \(event.payload)")
         }
         XCTAssertEqual(runId, "k7m2qa")

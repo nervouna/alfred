@@ -1529,3 +1529,32 @@ test("a file of a message that is not a regular file in the inbox gets 400, and 
   const alias = `inbox/${localDate()}/alias.txt`;
   assert.equal((await post(socket, { type: "message.send", clientId: "alias", text: "x", files: [{ path: alias }] })).status, 202);
 });
+
+// --- Bots ---------------------------------------------------------------------
+
+test("a command for a bot other than Alfred gets 503, and never reaches the handler or the task store", async (t) => {
+  const tasks = stubTasks();
+  for (const wired of [undefined, tasks]) {
+    const { socket, handler } = await start(t, wired ? { tasks: wired } : {});
+    for (const name of ["message-send-bot.json", "task-create-bot.json"]) {
+      const reply = await post(socket, fixture("commands", name));
+      assert.equal(reply.status, 503, name);
+      assert.deepEqual(reply.json(), { error: "bots are not available" }, name);
+    }
+    assert.equal(handler.submitted.length, 0, "submit was not called");
+  }
+  assert.deepEqual(tasks.created, [], "the task store was not called");
+});
+
+test("message.send and task.create with botId alfred behave as without it, and the key is dropped", async (t) => {
+  const tasks = stubTasks();
+  const { socket, handler } = await start(t, { tasks });
+  const send = await post(socket, { ...JSON.parse(fixture("commands", "message-send.json")), botId: "alfred" });
+  assert.equal(send.status, 202);
+  assert.deepEqual(handler.submitted, [{ text: "帮我查一下 VPS 价格", clientId: "c-7f3a9e", files: [] }]);
+
+  const created = await post(socket, { ...JSON.parse(fixture("commands", "task-create.json")), botId: "alfred" });
+  assert.equal(created.status, 201);
+  assert.deepEqual(tasks.created, [parsedCommand("task-create.json")], "the store gets the command without the key");
+  assert.equal(Object.hasOwn(tasks.created[0] ?? {}, "botId"), false);
+});
