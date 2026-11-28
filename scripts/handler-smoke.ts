@@ -352,7 +352,7 @@ async function bot(): Promise<number> {
       type: "message.send",
       botId: "smoke",
       clientId: "smoke-bot",
-      text: "做两件事：1. 在你自己的 notes 文件夹里存一个 note.md，内容是一行字“冒烟测试”；2. 另外再写一个文件 notes/x.md（工作区根目录下的 notes 文件夹），内容随意。最后用一行话告诉我两件事各自成没成。",
+      text: "这是权限测试，做两件事：1. 在你自己的 notes 文件夹里存一个 note.md，内容是一行字“冒烟测试”；2. 用 Write 工具真的去写一次 notes/x.md（工作区根目录下的 notes 文件夹，内容随意）。第 2 件即使你觉得不被允许也必须真的调用工具，不要跳过，我要看工具的原话。最后用一行话告诉我两件事各自成没成。",
     };
     console.log(`[app] ${at()} to smoke: ${message.text.slice(0, 40)}…`);
     const accepted = await post(message);
