@@ -1,0 +1,27 @@
+{
+  "id": 34,
+  "at": "2026-11-28T03:00:20.000Z",
+  "type": "question.asked",
+  "data": {
+    "id": "q-5c1e90d2",
+    "botId": "x",
+    "runId": "m8d2qw",
+    "questions": [
+      {
+        "question": "简报按什么顺序排？",
+        "header": "排序",
+        "options": [
+          {
+            "label": "按主题",
+            "description": "同一话题的帖子放在一起"
+          },
+          {
+            "label": "按时间",
+            "description": "最新的在前"
+          }
+        ],
+        "multiSelect": false
+      }
+    ]
+  }
+}

@@ -75,6 +75,11 @@ public struct IdeaGenerationAccepted: Decodable, Hashable, Sendable {
     public let runId: String
 }
 
+/// The body of `GET /api/bots`: the bots, oldest created first. Alfred is not in the list.
+public struct BotList: Decodable, Hashable, Sendable {
+    public let bots: [Bot]
+}
+
 /// The body of a successful `settings.update`: the settings as Alfred now holds them.
 public struct SettingsResult: Decodable, Hashable, Sendable {
     public let settings: AlfredSettings

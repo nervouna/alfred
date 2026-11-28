@@ -91,6 +91,7 @@ public struct Timeline: Hashable, Sendable {
     private mutating func applyStored(_ payload: Event.Payload) {
         switch payload {
         case let .messageCreated(message):
+            guard Bot.isAlfred(message.botId) else { return }
             if message.direction == .inbound, let clientId = message.clientId {
                 pending.removeAll { $0.clientId == clientId }
             }
@@ -101,6 +102,7 @@ public struct Timeline: Hashable, Sendable {
                 messages.append(message)
             }
         case let .runUpdated(run):
+            guard Bot.isAlfred(run.botId) else { return }
             runs[run.id] = run
             if Self.endedStatuses.contains(run.status) {
                 drafts[run.id] = nil
@@ -111,16 +113,18 @@ public struct Timeline: Hashable, Sendable {
                 }
             }
         case let .questionAsked(asked):
+            guard Bot.isAlfred(asked.botId) else { return }
             if !questions.contains(where: { $0.id == asked.id }) {
                 questions.append(QuestionRecord(asked: asked, afterMessages: messages.count, state: .open))
             }
         case let .questionAnswered(answered):
+            guard Bot.isAlfred(answered.botId) else { return }
             // An answer is a fact even when the run's end came first, so it replaces `ended` too.
             if let index = questions.firstIndex(where: { $0.id == answered.id }) {
                 questions[index].state = answered.cancelled ? .cancelled : .answered(answered.answers)
             }
-        case .taskUpdated, .ideaUpdated, .settingsUpdated:
-            // Tasks, ideas and settings are not part of the chat's timeline.
+        case .taskUpdated, .ideaUpdated, .settingsUpdated, .botUpdated:
+            // Tasks, ideas, settings and bots are not part of the chat's timeline.
             break
         case .documentUpdated, .documentRemoved, .annotationUpdated:
             // Documents and their annotations are not part of the chat's timeline.
@@ -132,7 +136,8 @@ public struct Timeline: Hashable, Sendable {
 
     private mutating func applyLive(_ payload: LiveEvent.Payload) {
         switch payload {
-        case let .messageDelta(runId, streamId, text):
+        case let .messageDelta(runId, streamId, text, botId):
+            guard Bot.isAlfred(botId) else { return }
             if let draft = drafts[runId], draft.streamId == streamId {
                 drafts[runId] = Draft(runId: runId, streamId: streamId, text: draft.text + text)
             } else {

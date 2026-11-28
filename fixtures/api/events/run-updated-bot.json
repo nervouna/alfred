@@ -1,0 +1,17 @@
+{
+  "id": 32,
+  "at": "2026-11-28T03:00:41.300Z",
+  "type": "run.updated",
+  "data": {
+    "id": "m8d2qw",
+    "botId": "x",
+    "kind": "task",
+    "title": "看一下今天关注列表里的新动态",
+    "status": "done",
+    "model": "claude-haiku-4-5",
+    "startedAt": "2026-11-28T03:00:01.000Z",
+    "endedAt": "2026-11-28T03:00:41.300Z",
+    "costUsd": 0.0312,
+    "files": []
+  }
+}

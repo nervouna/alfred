@@ -1,0 +1,10 @@
+{
+  "at": "2026-11-28T03:00:12.500Z",
+  "type": "message.delta",
+  "data": {
+    "botId": "x",
+    "runId": "m8d2qw",
+    "streamId": "m8d2qw.1",
+    "text": "我先读一下关注列表。"
+  }
+}

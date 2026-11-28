@@ -1,0 +1,15 @@
+{
+  "id": 31,
+  "at": "2026-11-28T03:00:00.000Z",
+  "type": "message.created",
+  "data": {
+    "id": "m2001",
+    "botId": "x",
+    "channel": "app",
+    "direction": "in",
+    "text": "看一下今天关注列表里的新动态",
+    "files": [],
+    "at": "2026-11-28T03:00:00.000Z",
+    "clientId": "c-x-3d81"
+  }
+}

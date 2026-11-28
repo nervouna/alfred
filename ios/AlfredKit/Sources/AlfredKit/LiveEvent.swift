@@ -6,7 +6,8 @@ public struct LiveEvent: Decodable, Hashable, Sendable {
     public enum Payload: Hashable, Sendable {
         /// A piece of assistant text. The deltas of one `streamId` concatenate into one reply, and the
         /// latest stream of a run is shown as that run's draft until an outbound message replaces it.
-        case messageDelta(runId: String, streamId: String, text: String)
+        /// `botId` is the bot whose run it is; nil, like `"alfred"`, means Alfred.
+        case messageDelta(runId: String, streamId: String, text: String, botId: String? = nil)
         case runStep(runId: String, step: Step)
         /// An event type this client does not know. Its `data` is not decoded.
         case unknown(type: String)
@@ -26,7 +27,7 @@ public struct LiveEvent: Decodable, Hashable, Sendable {
         switch type {
         case "message.delta":
             let delta = try container.decode(MessageDeltaData.self, forKey: .data)
-            payload = .messageDelta(runId: delta.runId, streamId: delta.streamId, text: delta.text)
+            payload = .messageDelta(runId: delta.runId, streamId: delta.streamId, text: delta.text, botId: delta.botId)
         case "run.step":
             let data = try container.decode(RunStepData.self, forKey: .data)
             payload = .runStep(runId: data.runId, step: data.step)
@@ -37,6 +38,7 @@ public struct LiveEvent: Decodable, Hashable, Sendable {
 }
 
 private struct MessageDeltaData: Decodable {
+    let botId: String?
     let runId: String
     let streamId: String
     let text: String
