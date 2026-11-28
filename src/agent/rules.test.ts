@@ -209,6 +209,33 @@ test("a workspace-wide Grep discloses the rules of the files whose lines it retu
   assert.doesNotMatch(context ?? "", /notes/);
 });
 
+test("save_media discloses the rules of the directory the file landed in", async () => {
+  const root = workspace({ "images/ALFRED.md": "images rules", "audio/ALFRED.md": "audio rules", "audio/2026-11-28/ALFRED.md": "dated audio rules" });
+  const tracker = new RulesTracker(root);
+  const response = { content: [{ type: "text", text: "Saved audio/2026-11-28/x.mp3 (12 KB, audio/mpeg). Read it to check it, and deliver it with deliver if the owner should have it." }] };
+  const context = await runHook(tracker, hookInput("PostToolUse", "mcp__alfred__save_media", { url: "https://media.example/x.mp3" }, response));
+  assert.match(context ?? "", /path="audio\/ALFRED\.md"/);
+  assert.match(context ?? "", /path="audio\/2026-11-28\/ALFRED\.md"/);
+  assert.doesNotMatch(context ?? "", /images/);
+});
+
+test("save_media with an output discloses the rules of that path, and a failed call falls back to it", async () => {
+  const root = workspace({ "reports/ALFRED.md": "reports rules", "images/ALFRED.md": "images rules" });
+  const tracker = new RulesTracker(root);
+  const response = "Saved reports/cover.png (3 KB, image/png). Read it to check it, and deliver it with deliver if the owner should have it.";
+  assert.match((await runHook(tracker, hookInput("PostToolUse", "mcp__alfred__save_media", { url: "u", output: "reports/cover.png" }, response))) ?? "", /reports\/ALFRED\.md/);
+  assert.equal(touchedPaths("mcp__alfred__save_media", { url: "u", output: "reports/cover.png" }, { content: [{ type: "text", text: "Saved reports/cover.png (3 KB, image/png). Read it to check it" }] }).join(), "reports/cover.png");
+  assert.match((await runHook(new RulesTracker(root), hookInput("PostToolUseFailure", "mcp__alfred__save_media", { url: "u", output: "reports/cover.png" }))) ?? "", /reports\/ALFRED\.md/);
+});
+
+test("generate_image discloses the rules of the files its response names", () => {
+  assert.deepEqual(touchedPaths("mcp__alfred__generate_image", { prompt: "p" }, "Generated images/2026-11-28/cat.jpg."), ["images/2026-11-28/cat.jpg"]);
+  assert.deepEqual(
+    touchedPaths("mcp__alfred__generate_image", { prompt: "p", n: 3 }, "Generated images/2026-11-28/cat_001.jpg, images/2026-11-28/cat_002.jpg. 1 of 3 images failed."),
+    ["images/2026-11-28/cat_001.jpg", "images/2026-11-28/cat_002.jpg"],
+  );
+});
+
 test("reading or writing a rules file counts as seeing it", async () => {
   const root = workspace({ "reports/ALFRED.md": "old", "notes/ALFRED.md": "notes" });
   const tracker = new RulesTracker(root);
