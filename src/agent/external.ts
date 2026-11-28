@@ -260,6 +260,21 @@ export function subagentExternalTools(servers: readonly ExternalServer[], unatte
   return mediaOffer(servers, unattended).subagents ? [...names, SAVE_MEDIA_TOOL] : names;
 }
 
+/**
+ * The configured server of an MCP tool name and the tool's own name, found by the longest `mcp__<name>__` prefix: a server name may
+ * end in "_", so the name is not split on "__". Undefined when no configured server's prefix matches.
+ */
+function serverOfTool(servers: readonly ExternalServer[], toolName: string): { server: ExternalServer; tool: string } | undefined {
+  let found: { server: ExternalServer; tool: string } | undefined;
+  for (const server of servers) {
+    const prefix = `mcp__${server.name}__`;
+    if (toolName.startsWith(prefix) && (!found || prefix.length > `mcp__${found.server.name}__`.length)) {
+      found = { server, tool: toolName.slice(prefix.length) };
+    }
+  }
+  return found;
+}
+
 /** A denial reason when `toolName` is an MCP tool that is not Alfred's own and this run or thread is not offered, else undefined. */
 export function checkExternalTool(servers: readonly ExternalServer[], toolName: string, inSubagent: boolean, unattended: boolean): string | undefined {
   // save_media is Alfred's own, but a subagent has it only when the file offers it a media tool.
@@ -267,10 +282,9 @@ export function checkExternalTool(servers: readonly ExternalServer[], toolName: 
     return `${toolName} is not offered to subagents: the owner's configuration names no media tool for that.`;
   }
   if (!toolName.startsWith("mcp__") || toolName.startsWith(`mcp__${OWN_SERVER}__`)) return undefined;
-  const [, serverName, ...rest] = toolName.split("__");
-  const tool = rest.join("__");
-  const server = servers.find((s) => s.name === serverName);
-  if (!server) return `${toolName} is not offered: no such server is configured.`;
+  const found = serverOfTool(servers, toolName);
+  if (!found) return `${toolName} is not offered: no such server is configured.`;
+  const { server, tool } = found;
   const offered = inSubagent ? subagentTools(server, unattended) : mainTools(server, unattended);
   if (offered.includes(tool)) return undefined;
   const where = inSubagent ? "to subagents" : unattended ? "to unattended runs" : "to this run";
@@ -280,10 +294,9 @@ export function checkExternalTool(servers: readonly ExternalServer[], toolName: 
 /** The server, the tool and what the file says the tool costs, for a call of `toolName` on a configured server. */
 function spendOf(servers: readonly ExternalServer[], toolName: string): { server: string; tool: string; spend: ToolSpend } | undefined {
   if (!toolName.startsWith("mcp__") || toolName.startsWith(`mcp__${OWN_SERVER}__`)) return undefined;
-  const [, serverName, ...rest] = toolName.split("__");
-  const tool = rest.join("__");
-  const spend = servers.find((s) => s.name === serverName)?.spend[tool];
-  return spend && serverName ? { server: serverName, tool, spend } : undefined;
+  const found = serverOfTool(servers, toolName);
+  const spend = found?.server.spend[found.tool];
+  return found && spend ? { server: found.server.name, tool: found.tool, spend } : undefined;
 }
 
 /**

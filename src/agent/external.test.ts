@@ -312,3 +312,32 @@ test("agentOptions wires the guard's limit and the spend hooks to the run's reco
   assert.deepEqual(readExternalSpend().map((e) => e.runId), [recorder.id, recorder.id]);
   recorder.finish("done");
 });
+
+// A server name ending in "_" makes the tool name carry three underscores; the server is matched by its prefix, not by splitting.
+
+test("a server named ext_ is offered its tools, and its calls are allowed in the guard", () => {
+  const underscored = parseExternalServers({ ext_: entry });
+  assert.equal(checkExternalTool(underscored, "mcp__ext___search", false, false), undefined);
+  assert.equal(checkExternalTool(underscored, "mcp__ext___post", true, false), "mcp__ext___post is not offered to subagents: the owner's configuration does not name it for that.");
+  assert.match(checkExternalTool(underscored, "mcp__ext___delete", false, false) ?? "", /not offered to this run/);
+  assert.match(checkExternalTool(underscored, "mcp__ext__search", false, false) ?? "", /no such server/);
+});
+
+test("the spend of a call of ext_ is recorded under ext_, and a longer name wins over a shorter one", async () => {
+  const both = parseExternalServers({
+    ext: { ...entry, spend: { search: { priceUsd: 0.1 } } },
+    ext_: { ...entry, spend: { search: { priceUsd: 0.5 } } },
+  });
+  const hooks = externalSpendHooks(both, "run-underscore");
+  await post(hooks, "mcp__ext___search", true);
+  await post(hooks, "mcp__ext__search", true);
+  assert.deepEqual(readExternalSpend().map((e) => [e.server, e.tool, e.usd]), [["ext_", "search", 0.5], ["ext", "search", 0.1]]);
+});
+
+test("maxPerRun counts the calls of ext_, and the limit denies its next call", async () => {
+  const limited = parseExternalServers({ ext_: { ...entry, spend: { search: { priceUsd: 0.2, maxPerRun: 1 } } } });
+  const guard = externalToolGuard(limited, { unattended: false, runId: "run-ext_" }).hooks[0]!;
+  const call = (tool_name: string) => guard(preInput(tool_name) as never, "t", { signal: new AbortController().signal });
+  assert.ok(!denied(await call("mcp__ext___search")));
+  assert.ok(denied(await call("mcp__ext___search")), "the second call of the run is over its limit");
+});
