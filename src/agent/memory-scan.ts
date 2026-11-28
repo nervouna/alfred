@@ -23,19 +23,25 @@ import {
   MEMORY_TYPES,
   MemoryLock,
   formatMemory,
-  loadMemories,
+  loadMemoryFiles,
   looksLikeSecret,
   memoryDir,
+  sha256Hex,
   syncMemoryIndex,
   writeFileAtomic,
 } from "./memory.ts";
 import type { Memory } from "./memory.ts";
 
 export const MEMORY_SCAN_STATE_FILE = path.join(STATE_DIR, "memory-scan.json");
+/** Held by a scan's write step and by the owner's edits; never for extraction. */
 export const MEMORY_LOCK_FILE = path.join(STATE_DIR, "memory.lock");
+/** Held for a whole scan, so that two scans never extract the same batch. */
+export const MEMORY_SCAN_LOCK_FILE = path.join(STATE_DIR, "memory-scan.lock");
 
-/** A scan is aborted after this long; tasks wait at most a little longer for it. */
+/** A scan is aborted after this long. */
 export const SCAN_TIMEOUT_MS = 3 * 60_000;
+/** How long a scan waits for the memory lock to write; the batch is retried when it is not free by then. */
+export const SCAN_WRITE_WAIT_MS = 10_000;
 export const EXTRACT_MODEL = MODELS.haiku;
 /** Input caps per scan; anything beyond is left for the next scan. */
 const MAX_CONVERSATION_CHARS = 60_000;
@@ -417,12 +423,26 @@ export interface AppliedMemory {
   name: string;
 }
 
-/** Write candidates into memory/. Invalid names and anything that looks like a secret are skipped. */
-export function applyCandidates(workspace: string, candidates: Candidate[], today: string): AppliedMemory[] {
+/**
+ * Write candidates into memory/. Invalid names and anything that looks like a secret are skipped. With a `snapshot`
+ * (file name to version, what extraction saw) a candidate that would overwrite or shadow a change made since is dropped
+ * and counted in `conflicts`: an update whose file now differs or is gone, an update or a create whose file was not in
+ * the snapshot but exists now. Synchronous, so the check and the writes see the same files.
+ */
+export function mergeCandidates(
+  workspace: string,
+  candidates: Candidate[],
+  today: string,
+  snapshot?: ReadonlyMap<string, string>,
+): { applied: AppliedMemory[]; conflicts: number } {
   const dir = memoryDir(workspace);
   if (!dir) throw new Error(`${MEMORY_DIR}/ is not a directory inside ${workspace}`);
-  const existing = new Set(loadMemories(workspace).map((m) => m.file));
+  const versions = new Map(loadMemoryFiles(workspace).map((f) => [f.memory.file, sha256Hex(f.bytes)]));
+  const existing = new Set(versions.keys());
+  // Files this call wrote: later candidates for them are not compared with what extraction saw.
+  const written = new Set<string>();
   const applied: AppliedMemory[] = [];
+  let conflicts = 0;
   for (const c of candidates) {
     if (!MEMORY_FILE_RE.test(c.file)) {
       log.warn(`memory-scan: skipped candidate with invalid file name ${JSON.stringify(c.file)}`);
@@ -431,6 +451,24 @@ export function applyCandidates(workspace: string, candidates: Candidate[], toda
     if (looksLikeSecret(`${c.name}\n${c.description}\n${c.body}`)) {
       log.warn(`memory-scan: skipped candidate ${c.file} that looks like it holds a secret`);
       continue;
+    }
+    if (snapshot && !written.has(c.file)) {
+      const seen = snapshot.get(c.file);
+      const now = versions.get(c.file);
+      // An update of a file extraction saw must find it as it was; one of a file it never saw is written as a new memory
+      // when there is still none, as before, and is a conflict when one has appeared. A create is a conflict when a file
+      // of that name appeared after the snapshot.
+      const conflict =
+        c.action === "update"
+          ? seen === undefined
+            ? now !== undefined
+            : seen !== now
+          : seen === undefined && now !== undefined;
+      if (conflict) {
+        log.warn(`memory-scan: dropped ${c.action} of ${c.file}, changed since the scan read it`);
+        conflicts++;
+        continue;
+      }
     }
     const update = c.action === "update" && existing.has(c.file);
     const target = update ? path.join(dir, c.file) : uniquePath(dir, c.file);
@@ -441,15 +479,23 @@ export function applyCandidates(workspace: string, candidates: Candidate[], toda
     writeFileAtomic(target, formatMemory({ name: c.name, description: c.description, type: c.type, updated: today, body: c.body }));
     const file = path.basename(target);
     existing.add(file);
+    written.add(file);
     applied.push({ action: update ? "update" : "create", file, name: c.name });
   }
-  return applied;
+  return { applied, conflicts };
+}
+
+/** Write candidates into memory/ without a version check (see mergeCandidates). */
+export function applyCandidates(workspace: string, candidates: Candidate[], today: string): AppliedMemory[] {
+  return mergeCandidates(workspace, candidates, today).applied;
 }
 
 export interface ScanReport {
   files: number;
   messages: number;
   applied: AppliedMemory[];
+  /** Candidates dropped because their file was changed after extraction read it; 0 when none. */
+  conflicts: number;
   costUsd: number;
   /** Set when no model call was made. */
   skipped?: string;
@@ -459,6 +505,10 @@ export interface ScanOptions {
   workspace: string;
   configDir?: string;
   stateFile?: string;
+  /** The lock on memory.lock that the write step takes; the handler's own instance, so its holders see each other. */
+  memoryLock: MemoryLock;
+  /** How long the write step waits for it; SCAN_WRITE_WAIT_MS by default. */
+  writeWaitMs?: number;
   budgetUsd?: number;
   signal?: AbortSignal;
   /** Replaces the model call, and is told the budget the call would have had; for tests. */
@@ -467,8 +517,11 @@ export interface ScanOptions {
 
 /**
  * Scan transcripts for new messages and merge extracted memories. Offsets
- * advance only after a successful extraction, so a failed batch is retried
- * (up to MAX_FAILURES times). The caller must hold the memory lock.
+ * advance only after a successful extraction and write, so a failed batch is
+ * retried (up to MAX_FAILURES times). The caller holds memory-scan.lock. Reading
+ * and extraction take no memory lock: the memory files they saw are versioned,
+ * and the write step takes memory.lock, checks the versions and writes with no
+ * await in between, dropping what the owner or the agent changed meanwhile.
  */
 export async function scanTranscripts(opts: ScanOptions): Promise<ScanReport> {
   const stateFile = opts.stateFile ?? MEMORY_SCAN_STATE_FILE;
@@ -513,13 +566,15 @@ export async function scanTranscripts(opts: ScanOptions): Promise<ScanReport> {
 
   if (!messages.some((m) => m.role === "user")) {
     if (scannedFiles) save(0);
-    return { files: scannedFiles, messages: messages.length, applied: [], costUsd: 0, skipped: "nothing new" };
+    return { files: scannedFiles, messages: messages.length, applied: [], conflicts: 0, costUsd: 0, skipped: "nothing new" };
   }
   fs.mkdirSync(path.join(opts.workspace, MEMORY_DIR), { recursive: true });
   if (!memoryDir(opts.workspace)) throw new Error(`${MEMORY_DIR}/ is not a directory inside ${opts.workspace}`);
 
   const today = localDate();
-  const prompt = extractionPrompt(loadMemories(opts.workspace), messages, today);
+  const seenFiles = loadMemoryFiles(opts.workspace);
+  const snapshot = new Map(seenFiles.map((f) => [f.memory.file, sha256Hex(f.bytes)]));
+  const prompt = extractionPrompt(seenFiles.map((f) => f.memory), messages, today);
   const signal = opts.signal ?? AbortSignal.timeout(SCAN_TIMEOUT_MS);
   // Read now, so a change of the owner's applies to the next scan.
   const budgetUsd = opts.budgetUsd ?? setting("memoryScanBudgetUsd");
@@ -538,42 +593,53 @@ export async function scanTranscripts(opts: ScanOptions): Promise<ScanReport> {
     throw err;
   }
   const { candidates, costUsd } = extracted;
-  let applied: AppliedMemory[];
+  let merged: ReturnType<typeof mergeCandidates>;
   try {
-    applied = applyCandidates(opts.workspace, candidates, today);
-    syncMemoryIndex(opts.workspace);
+    const waitMs = opts.writeWaitMs ?? SCAN_WRITE_WAIT_MS;
+    if (!(await opts.memoryLock.acquire("scan", waitMs, signal, Math.min(500, waitMs)))) {
+      const holder = opts.memoryLock.current();
+      throw new Error(`memory stayed locked (${holder ? `${holder.holder} in pid ${holder.pid}` : "lock file unreadable"}); nothing was written`);
+    }
+    // From here to the release there is no await.
+    try {
+      merged = mergeCandidates(opts.workspace, candidates, today, snapshot);
+      syncMemoryIndex(opts.workspace);
+    } finally {
+      opts.memoryLock.release();
+    }
   } catch (err) {
     // The batch is retried, as before; what the extraction spent still counts.
     throw new ScanFailure(describeError(err), costUsd);
   }
   save(costUsd);
-  return { files: scannedFiles, messages: messages.length, applied, costUsd };
+  return { files: scannedFiles, messages: messages.length, applied: merged.applied, conflicts: merged.conflicts, costUsd };
 }
 
 export function describeScan(r: ScanReport): string {
   const written = r.applied.map((a) => `${a.action} ${a.file}`).join(", ");
   return (
     `memory scan: files=${r.files} messages=${r.messages} ` +
-    (r.skipped ? `skipped (${r.skipped})` : `cost=$${r.costUsd.toFixed(4)} written=[${written}]`)
+    (r.skipped ? `skipped (${r.skipped})` : `cost=$${r.costUsd.toFixed(4)} written=[${written}]`) +
+    (r.conflicts > 0 ? ` conflicts=${r.conflicts}` : "")
   );
 }
 
 /**
  * Runs scans in the bot process: on a timer and on request (e.g. when a
- * session is retired). A scan never starts while a task is running or queued;
- * the request stays pending and runs once the user is idle.
+ * session is retired). One scan at a time, here and across processes (`lock`
+ * is memory-scan.lock); a request that finds one running or the lock held stays
+ * pending. A scan does not wait for the owner to be idle: it holds no memory lock
+ * while it extracts.
  */
 export class MemoryScanScheduler {
   private readonly lock: MemoryLock;
-  private readonly isBusy: () => boolean;
   private readonly scan: () => Promise<ScanReport>;
   private pending?: string;
   private running = false;
   private timer?: NodeJS.Timeout;
 
-  constructor(params: { lock: MemoryLock; isBusy: () => boolean; scan: () => Promise<ScanReport> }) {
+  constructor(params: { lock: MemoryLock; scan: () => Promise<ScanReport> }) {
     this.lock = params.lock;
-    this.isBusy = params.isBusy;
     this.scan = params.scan;
   }
 
@@ -609,13 +675,13 @@ export class MemoryScanScheduler {
     this.flush();
   }
 
-  /** Start the pending scan if nothing else holds the memory lock. Never throws. */
+  /** Start the pending scan if none is running and memory-scan.lock is free. Never throws. */
   flush(): void {
-    if (!this.pending || this.running || this.isBusy()) return;
+    if (!this.pending || this.running) return;
     try {
       if (!this.lock.tryAcquire("scan")) return;
     } catch (err) {
-      log.error(`memory lock unavailable, scan stays pending: ${describeError(err)}`);
+      log.error(`memory scan lock unavailable, scan stays pending: ${describeError(err)}`);
       return;
     }
     const reason = this.pending;

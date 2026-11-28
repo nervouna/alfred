@@ -10,7 +10,7 @@ import { loadExternalServers } from "./agent/external.ts";
 import { resolveInside } from "./agent/guard.ts";
 import { createAgentHandler } from "./agent/handler.ts";
 import { memoryCommands } from "./agent/memory-edit.ts";
-import { MEMORY_LOCK_FILE, describeScan, scanTranscripts } from "./agent/memory-scan.ts";
+import { MEMORY_LOCK_FILE, MEMORY_SCAN_LOCK_FILE, describeScan, scanTranscripts } from "./agent/memory-scan.ts";
 import { MemoryLock } from "./agent/memory.ts";
 import { rulesCommands } from "./agent/rules.ts";
 import { describeEvent, request, streamEvents } from "./api/client.ts";
@@ -186,13 +186,14 @@ async function cmdPdf(args: string[]): Promise<void> {
 
 async function cmdMemoryScan(): Promise<void> {
   checkMemoryScanSettings();
-  const lock = new MemoryLock(MEMORY_LOCK_FILE);
+  // One scan at a time; it holds memory.lock only to write (see scanTranscripts).
+  const lock = new MemoryLock(MEMORY_SCAN_LOCK_FILE);
   if (!lock.tryAcquire("scan")) {
     const holder = lock.current();
     throw new Error(`memory is busy (${holder ? `${holder.holder} in pid ${holder.pid} since ${holder.since}` : "lock file unreadable"}); try again later`);
   }
   try {
-    const report = await scanTranscripts({ workspace: WORKSPACE_DIR });
+    const report = await scanTranscripts({ workspace: WORKSPACE_DIR, memoryLock: new MemoryLock(MEMORY_LOCK_FILE) });
     console.log(describeScan(report));
     for (const a of report.applied) console.log(`  ${a.action} memory/${a.file}: ${a.name}`);
   } finally {

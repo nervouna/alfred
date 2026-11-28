@@ -2,6 +2,7 @@
 // generated index (MEMORY.md) that is injected into every task's system prompt.
 // The agent reads individual memory files on demand.
 
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -89,6 +90,11 @@ export function memoryDir(workspace: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** The version of a memory file: the sha256 of its bytes. */
+export function sha256Hex(bytes: Buffer): string {
+  return crypto.createHash("sha256").update(bytes).digest("hex");
 }
 
 /** A memory with the bytes of its file, so that a hash of them is the hash of what the memory was parsed from. */
@@ -218,11 +224,10 @@ function isHeld(file: string, info: LockInfo): boolean {
 }
 
 /**
- * Mutual exclusion between agent tasks and memory scans, so the agent and the
- * extraction job never edit memory files at the same time. It is a lock file
- * because a manual scan (`cli.ts memory-scan`) runs in a separate process from
- * the bot. Tasks share the lock with each other; a scan holds it alone. A lock
- * whose holder is gone is taken over.
+ * A lock file with two kinds of holder. Tasks share it with each other and a scan holds it alone. It is a file because a
+ * manual scan (`cli.ts memory-scan`) runs in a separate process from the bot. A lock whose holder is gone is taken over.
+ * Two locks use it: `memory.lock` is taken by the owner's edits as a task and by a scan's write step as a scan, so an
+ * edit and that step never overlap; `memory-scan.lock` is taken as a scan for a whole scan, so two scans never overlap.
  */
 export class MemoryLock {
   private readonly file: string;

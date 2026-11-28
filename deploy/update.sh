@@ -96,17 +96,32 @@ update_workbench() {
   say "The workbench runs image $(running_image workbench | cut -c1-12)."
 }
 
-# Tasks and memory scans hold $state_dir/memory.lock. A lock taken before the
-# container started is left over from a killed one; its pid proves nothing,
-# because the new container reuses the same low pids.
+# Whether Alfred is busy: free, busy or stale. Runs hold no lock, so a run shows only in the workbench's run files
+# (live_runs). A memory scan holds $state_dir/memory-scan.lock for its whole length and $state_dir/memory.lock for its
+# short write step. A lock taken before the container started is left over from a killed one; its pid proves nothing,
+# because the new container reuses the same low pids. With no container running, any lock is stale.
 lock_state() {
-  local lock=$state_dir/memory.lock since started
-  [ -f "$lock" ] || { echo free; return; }
-  [ "$(podman inspect "$unit" --format '{{.State.Running}}' 2>/dev/null)" = true ] || { echo stale; return; }
-  since=$(sed -n 's/.*"since":"\([^"]*\)".*/\1/p' "$lock")
-  [ -n "$since" ] || { echo busy; return; } # still being written
-  started=$(podman inspect "$unit" --format '{{.State.StartedAt.Unix}}')
-  if [ "$(date -d "$since" +%s)" -ge "$started" ]; then echo busy; else echo stale; fi
+  local lock since started running state=free
+  running=$(podman inspect "$unit" --format '{{.State.Running}}' 2>/dev/null)
+  for lock in "$state_dir/memory-scan.lock" "$state_dir/memory.lock"; do
+    [ -f "$lock" ] || continue
+    [ "$running" = true ] || { state=stale; continue; }
+    since=$(sed -n 's/.*"since":"\([^"]*\)".*/\1/p' "$lock")
+    [ -n "$since" ] || { echo busy; return; } # still being written
+    started=$(podman inspect "$unit" --format '{{.State.StartedAt.Unix}}')
+    if [ "$(date -d "$since" +%s)" -ge "$started" ]; then echo busy; return; else state=stale; fi
+  done
+  if [ "$running" = true ] && [ -n "$(live_runs)" ]; then echo busy; return; fi
+  echo "$state"
+}
+
+# The locks that exist, with their holders, for messages.
+held_locks() {
+  local lock
+  for lock in "$state_dir/memory-scan.lock" "$state_dir/memory.lock"; do
+    [ -f "$lock" ] && printf '  %s: %s\n' "$(basename "$lock")" "$(cat "$lock")"
+  done
+  return 0
 }
 
 # Runs Alfred is working on, one "id title" per line, from the workbench's run files.
@@ -129,15 +144,15 @@ wait_until_idle() {
     case $(lock_state) in
       free) return ;;
       stale)
-        say "Removing a lock left by an earlier container: $(cat "$state_dir/memory.lock")"
-        rm -f "$state_dir/memory.lock"
+        say "Removing locks left by an earlier container:"$'\n'"$(held_locks)"
+        rm -f "$state_dir/memory-scan.lock" "$state_dir/memory.lock"
         return ;;
     esac
     if [ "$SECONDS" -ge "$deadline" ]; then
-      say "Still busy after ${wait_s}s ($(cat "$state_dir/memory.lock")). Live runs:"$'\n'"$(live_runs)" >&2
+      say "Still busy after ${wait_s}s. Live runs:"$'\n'"$(live_runs)"$'\n'"Locks held:"$'\n'"$(held_locks)" >&2
       die "nothing was restarted; run again later, or with --force to restart anyway"
     fi
-    [ -n "$told" ] || say "Waiting for the running task or memory scan to finish: $(cat "$state_dir/memory.lock")"
+    [ -n "$told" ] || say "Waiting for the running task or memory scan to finish. Live runs:"$'\n'"$(live_runs)"$'\n'"Locks held:"$'\n'"$(held_locks)"
     told=1
     sleep 10
   done

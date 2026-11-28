@@ -38,7 +38,7 @@ esac
 # still a failure, since that snapshot is incomplete.
 rc=0
 restic backup --json --host "$host" \
-  --exclude memory.lock --exclude '*.tmp' \
+  --exclude memory.lock --exclude memory-scan.lock --exclude '*.tmp' \
   --exclude /data/state/api --exclude /data/state/workspace-plugin \
   /data/state /data/workspace /data/workbench-app >"$out" || rc=$?
 summary=$(jq -c 'select(.message_type == "summary")' "$out" 2>/dev/null || true)

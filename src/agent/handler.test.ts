@@ -731,14 +731,14 @@ test("a command waits for a scan that ends within its wait, and goes through", a
   assert.deepEqual(memoryFilesNow(), ["after-the-scan.md"], "its memory is there");
 });
 
-test("a running task's lock does not refuse the owner's memory commands: they run beside it and leave its lock alone", async () => {
+test("a running task holds no memory lock: the owner's memory commands run beside it, and a scan can take the lock", async () => {
   const hold = held();
   const t = setup({ turn: hold.turn });
   const commands = memoryOn(t, 0);
   await t.send("查一下");
   await until("the run to start", () => hold.waiting === 1);
   const probe = new MemoryLock(MEMORY_LOCK_FILE);
-  assert.equal(probe.current()?.holder, "task", "the run holds the memory lock as a task");
+  assert.equal(probe.current(), undefined, "the run holds no memory lock");
 
   const made = await commands.create(newMemory("Beside the run"));
   assert.equal(made.ok, true, "a create beside the run's lock");
@@ -747,12 +747,13 @@ test("a running task's lock does not refuse the owner's memory commands: they ru
   assert.equal(updated.ok, true, "an update beside it");
   const next = updated.ok ? (updated.body as { memory: { version: string } }).memory.version : "";
   assert.deepEqual(await commands.delete({ type: "memory.delete", file: memory.file, version: next }), { ok: true, body: { deleted: true } }, "a delete beside it");
-  assert.equal(probe.current()?.holder, "task", "the run still holds its lock after the commands");
-  assert.equal(probe.tryAcquire("scan"), false, "so a scan still cannot start");
+  assert.equal(probe.current(), undefined, "the commands left the lock free");
+  assert.equal(probe.tryAcquire("scan"), true, "so a scan's write step can take it beside the run");
+  probe.release();
 
   hold.release("好了");
   await until("the run to finish", () => t.finished());
-  assert.equal(probe.current(), undefined, "and the lock is free when the run ends");
+  assert.equal(probe.current(), undefined, "and the lock is still free when the run ends");
 });
 
 test("the note about a run a restart cut short comes with the next message, is recorded after it, and is said only once", async () => {

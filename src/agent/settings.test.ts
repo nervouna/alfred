@@ -175,7 +175,7 @@ interface SetupOptions {
   /** Run without a settings store. */
   noStore?: boolean;
   /** Stands in for the memory scan. */
-  scan?: () => Promise<{ files: number; messages: number; applied: []; costUsd: number; skipped?: string }>;
+  scan?: () => Promise<{ files: number; messages: number; applied: []; conflicts: number; costUsd: number; skipped?: string }>;
 }
 
 /** A handler on a fake channel and agent, over a settings store of its own and the command that changes it. */
@@ -407,6 +407,26 @@ test("a retired session requests a scan only while the interval is above 0", asy
   await until("the scan of the retired session", () => scanned(log.texts(), "session retired (new)") === 1);
 });
 
+test("a scan starts while a run is busy: it is not held back until the owner is idle", async () => {
+  const hold = held();
+  let scans = 0;
+  const s = setup({
+    turn: hold.turn,
+    env: { ALFRED_MEMORY_SCAN_MINUTES: "0" },
+    scan: async () => {
+      scans++;
+      return { files: 0, messages: 0, applied: [], conflicts: 0, costUsd: 0, skipped: "test" };
+    },
+  });
+  await s.send("查一下");
+  await until("the run to start", () => hold.waiting === 1);
+  await s.update({ memoryScanMinutes: 90 });
+  await until("the scan, with the run still going", () => scans === 1);
+  assert.equal(hold.waiting, 1, "the run has not ended");
+  hold.release("好了");
+  await until("the run to finish", () => s.finished());
+});
+
 // --- the model ---------------------------------------------------------------------------------------------------
 
 test("/model and settings.update take the same path: the stored key, setModel on the live query, the run's model, and the event", async () => {
@@ -549,7 +569,7 @@ test("a run's cost, a scan's cost and /status count the same: the state file, th
     // The handler asks for a scan as it starts.
     scan: async () => {
       scans++;
-      return { files: 1, messages: 1, applied: [], costUsd: 0.25 };
+      return { files: 1, messages: 1, applied: [], conflicts: 0, costUsd: 0.25 };
     },
   });
   await s.runOnce("with a subagent");
@@ -587,7 +607,7 @@ test("a memory scan is held back by the monthly cap, and not by the daily one", 
   let scans = 0;
   const scan = async () => {
     scans++;
-    return { files: 1, messages: 1, applied: [] as [], costUsd: 1 };
+    return { files: 1, messages: 1, applied: [] as [], conflicts: 0, costUsd: 1 };
   };
   setup({ env: { ALFRED_DAILY_BUDGET_USD: "5", ALFRED_MONTHLY_BUDGET_USD: "50" }, owner: { ...ownerSpent(10), spendDay: localDate(), spendDayUsd: 6 }, scan });
   await until("a scan over the daily cap", () => scans === 1);
