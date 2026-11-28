@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { after, before, mock, test } from "node:test";
 
-import type { IdeaList, Settings, TaskList } from "../api/schema.ts";
+import type { BotList, IdeaList, Settings, TaskList } from "../api/schema.ts";
 
 // store.ts reads these at import time, so set them before loading the modules under test.
 const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "alfred-workbench-")));
@@ -22,10 +22,11 @@ const { EventLog } = await import("../events.ts");
 const { DOCUMENTS_FILE, DocumentStore } = await import("../documents/store.ts");
 const { VERSIONS_GIT_DIR, Versions } = await import("../documents/versions.ts");
 const { IDEAS_FILE } = await import("../ideas/store.ts");
+const { BOTS_FILE } = await import("../bots/store.ts");
 const { SETTINGS_MIRROR_FILE } = await import("../settings/store.ts");
 const { SPEND_MIRROR_FILE } = await import("../spend.ts");
 const { localDate } = await import("../files.ts");
-const { DocumentDetailSchema, DocumentListSchema, ErrorResponseSchema, IdeaListSchema, MemoryListSchema, RulesSchema, RunDetailSchema, RunListSchema, SettingsDetailSchema, TaskDetailSchema, TaskListSchema } = await import("../api/schema.ts");
+const { BotListSchema, DocumentDetailSchema, DocumentListSchema, ErrorResponseSchema, IdeaListSchema, MemoryListSchema, RulesSchema, RunDetailSchema, RunListSchema, SettingsDetailSchema, TaskDetailSchema, TaskListSchema } = await import("../api/schema.ts");
 const { AccessVerifier } = await import("./access.ts");
 const { DeviceStore } = await import("./devices.ts");
 const { REPORT_CSP, createHandler, inlineImages, startWorkbench } = await import("./server.ts");
@@ -853,6 +854,40 @@ test("an ideas file that does not fit answers 500 on the route, and the log name
   }
   const logged = lines.mock.calls.map((call) => String(call.arguments[0]));
   assert.ok(logged.some((line) => line.includes(IDEAS_FILE)), "the log names the file");
+});
+
+// --- /api/bots --------------------------------------------------------------
+
+const botList = JSON.parse(fs.readFileSync(new URL("../../fixtures/api/responses/bot-list.json", import.meta.url), "utf8")) as BotList;
+const botListEmpty = JSON.parse(fs.readFileSync(new URL("../../fixtures/api/responses/bot-list-empty.json", import.meta.url), "utf8")) as BotList;
+
+test("GET /api/bots answers the empty list when there is no bots file", async () => {
+  fs.rmSync(BOTS_FILE, { force: true });
+  const res = await fetch(`${open}/api/bots`, { headers: bearer(paired.token) });
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("content-type"), "application/json; charset=utf-8");
+  assert.equal(res.headers.get("cache-control"), "no-store");
+  assert.deepEqual(await res.json(), botListEmpty);
+});
+
+test("GET /api/bots gives the bots of the file, as the store wrote them", async () => {
+  fs.mkdirSync(path.dirname(BOTS_FILE), { recursive: true });
+  try {
+    fs.writeFileSync(BOTS_FILE, JSON.stringify(botList));
+    const res = await fetch(`${open}/api/bots`, { headers: bearer(paired.token) });
+    assert.equal(res.status, 200);
+    assert.deepEqual(BotListSchema.parse(await res.json()), botList);
+  } finally {
+    fs.rmSync(BOTS_FILE, { force: true });
+  }
+});
+
+test("GET /api/bots needs a device token, and refuses other methods with 405", async () => {
+  await assertApiError(await fetch(`${open}/api/bots`), 401, "without a token");
+  await assertApiError(await fetch(`${guarded}/api/bots`), 403, "on the tunnel without Access");
+  const wrong = await fetch(`${open}/api/bots`, { method: "POST", headers: bearer(paired.token), body: "{}" });
+  assert.equal(wrong.status, 405);
+  assert.equal(wrong.headers.get("allow"), "GET");
 });
 
 // --- /api/settings -----------------------------------------------------------

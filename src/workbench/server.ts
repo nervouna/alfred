@@ -32,6 +32,7 @@ import {
   alfredStatus,
   listSessions,
   localDay,
+  readBotList,
   readIdeaList,
   readSettings,
   readTaskList,
@@ -388,6 +389,11 @@ function taskDetailReply(id: string): Response {
   return jsonReply(200, body);
 }
 
+/** GET /api/bots: the bots the store wrote, as BotList. A file that does not fit fails the request, and is logged. */
+function botListReply(): Response {
+  return jsonReply(200, readBotList());
+}
+
 /** GET /api/ideas: the ideas the store wrote, as IdeaList. A file that does not fit fails the request, and is logged. */
 function ideaListReply(): Response {
   return jsonReply(200, readIdeaList());
@@ -603,6 +609,7 @@ async function apiRoute(req: http.IncomingMessage, url: URL, ctx: ApiContext): P
   if (p === "/api/documents") return only("GET", () => documentListReply());
   if (p.startsWith(DOCUMENT_PREFIX)) return only("GET", () => documentDetailReply(p.slice(DOCUMENT_PREFIX.length)));
   if (p === "/api/ideas") return only("GET", () => ideaListReply());
+  if (p === "/api/bots") return only("GET", () => botListReply());
   if (p === "/api/rules") return only("GET", () => rulesReply(ctx.workspace));
   if (p === "/api/memories") return only("GET", () => memoryListReply(ctx.workspace));
   if (p === "/api/settings") return only("GET", () => settingsReply());
