@@ -1,9 +1,11 @@
 // The owner's view and edits of long-term memory in the app: the list (GET /api/memories) and the commands memory.create,
 // memory.update and memory.delete (see MemoryCommands in src/api/server.ts). The files, their format and the generated
 // index are memory.ts's; this adds what the app needs of them: a version for each memory, the sha256 of its file's bytes,
-// and edits that never race a memory scan or the agent into a lost update. The commands hold the handler's MemoryLock as a
-// task does, so they run beside running tasks and never beside a scan. Each checks the version and writes in one
-// synchronous step, with no await between them, and writes atomically. Deleting moves the file into .trash/memory/, as
+// and edits that never race a memory scan or the agent into a lost update. The commands hold the handler's memory lock as
+// a task does; the only other holder is a scan's write step, which takes it for one synchronous step, so a command waits
+// at most for that. A scan extracts without the lock and checks the versions it read before it writes (memory-scan.ts),
+// so an edit made meanwhile wins. Each command checks the version and writes in one synchronous step, with no await
+// between them, and writes atomically. Deleting moves the file into .trash/memory/, as
 // the move_file tool does: nothing the owner or the agent does removes a file for good.
 
 import crypto from "node:crypto";
@@ -27,6 +29,7 @@ import {
   loadMemoryFiles,
   memoryDir,
   parseMemory,
+  sha256Hex,
   syncMemoryIndex,
   writeFileAtomic,
 } from "./memory.ts";
@@ -38,10 +41,6 @@ const TRASH_MEMORY_DIR = ".trash/memory";
 /** The most characters of a memory's file name before `.md` (MEMORY_FILE_RE allows 80). */
 const MAX_STEM_CHARS = 80;
 const BUSY = "Alfred is tidying memory right now; try again shortly.";
-
-function sha256Hex(bytes: Buffer): string {
-  return crypto.createHash("sha256").update(bytes).digest("hex");
-}
 
 /** The contract's view of a memory parsed from a file with these bytes. */
 function toMemory(stored: StoredMemory, bytes: Buffer): Memory {
@@ -199,7 +198,7 @@ export interface MemoryLocker {
 
 /**
  * The memory commands of the command API. Each runs under `locker`'s memory lock, waiting up to `lockWaitMs` (3 s) for a
- * scan to end and answering 409 when it does not. With `versions`, a change is then committed to the workspace's history
+ * scan's write step to end and answering 409 when it does not. With `versions`, a change is then committed to the workspace's history
  * (`Add`, `Edit` or `Delete` `memory/<file>`, with the index); a failed commit is logged and the answer stays as it was.
  */
 export function memoryCommands(

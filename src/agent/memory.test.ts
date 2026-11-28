@@ -9,6 +9,7 @@ import {
   MemoryScanScheduler,
   ScanFailure,
   applyCandidates,
+  describeScan,
   extractionPrompt,
   parseTranscript,
   readTranscript,
@@ -35,6 +36,9 @@ function writeMemory(ws: string, file: string, fields: { name: string; descripti
 }
 
 const NOW = new Date("2026-10-10T08:00:00Z");
+
+/** The handler's lock on memory.lock, as a scan's write step takes it. */
+const memoryLock = new MemoryLock(path.join(tmp, "scan-write.lock"));
 
 test("system prompt: empty index", () => {
   const prompt = systemPrompt(NOW, { memory: capIndex([]) });
@@ -211,7 +215,7 @@ test("scan extracts once per new entry, merges into memory and skips when nothin
     return { candidates, costUsd: 0.0012 };
   };
 
-  const report = await scanTranscripts({ workspace: ws, configDir, stateFile, extractFn });
+  const report = await scanTranscripts({ workspace: ws, memoryLock, configDir, stateFile, extractFn });
   assert.equal(prompts.length, 1);
   assert.match(prompts[0] ?? "", /<memory file="occupation\.md"/);
   assert.match(prompts[0] ?? "", /user: 我是做量化交易的/);
@@ -224,12 +228,12 @@ test("scan extracts once per new entry, merges into memory and skips when nothin
   assert.equal(state.offsets[transcript], fs.statSync(transcript).size);
   assert.equal(state.totalCostUsd, 0.0012);
 
-  const again = await scanTranscripts({ workspace: ws, configDir, stateFile, extractFn });
+  const again = await scanTranscripts({ workspace: ws, memoryLock, configDir, stateFile, extractFn });
   assert.equal(again.skipped, "nothing new");
   assert.equal(prompts.length, 1);
 
   fs.appendFileSync(transcript, `${taskLines("再查一下", "好。", "m2").join("\n")}\n`);
-  await scanTranscripts({ workspace: ws, configDir, stateFile, extractFn: async (p) => (prompts.push(p), { candidates: [], costUsd: 0.0005 }) });
+  await scanTranscripts({ workspace: ws, memoryLock, configDir, stateFile, extractFn: async (p) => (prompts.push(p), { candidates: [], costUsd: 0.0005 }) });
   assert.equal(prompts.length, 2);
   assert.doesNotMatch(prompts[1] ?? "", /量化交易的，以后/);
   assert.match(prompts[1] ?? "", /user: 再查一下/);
@@ -237,7 +241,7 @@ test("scan extracts once per new entry, merges into memory and skips when nothin
   // A failed extraction leaves the offset alone, so the entries are retried.
   fs.appendFileSync(transcript, `${taskLines("第三个", "好。", "m3").join("\n")}\n`);
   const before = JSON.parse(fs.readFileSync(stateFile, "utf-8")).offsets[transcript];
-  const failing = { workspace: ws, configDir, stateFile, extractFn: async () => Promise.reject(new Error("boom")) };
+  const failing = { workspace: ws, memoryLock, configDir, stateFile, extractFn: async () => Promise.reject(new Error("boom")) };
   const offset = () => JSON.parse(fs.readFileSync(stateFile, "utf-8")).offsets[transcript];
   await assert.rejects(scanTranscripts(failing), /^Error: boom$/);
   await assert.rejects(scanTranscripts(failing), /^Error: boom$/);
@@ -255,7 +259,7 @@ test("scan extracts once per new entry, merges into memory and skips when nothin
   fs.appendFileSync(transcript, `${taskLines("第五个", "好。", "m5").join("\n")}\n`);
   const total = () => JSON.parse(fs.readFileSync(stateFile, "utf-8")).totalCostUsd as number;
   const spentBefore = total();
-  const paid = { workspace: ws, configDir, stateFile, extractFn: async () => Promise.reject(new ScanFailure("malformed", 0.02)) };
+  const paid = { workspace: ws, memoryLock, configDir, stateFile, extractFn: async () => Promise.reject(new ScanFailure("malformed", 0.02)) };
   await assert.rejects(scanTranscripts(paid), (err: unknown) => err instanceof ScanFailure && err.costUsd === 0.02);
   assert.equal(total(), spentBefore + 0.02);
 });
@@ -270,7 +274,7 @@ test("a scan's spend cap is read when the scan starts: the environment's, the ow
   const budgets: number[] = [];
   const scan = async (budgetUsd?: number) => {
     fs.appendFileSync(transcript, `${taskLines(`任务 ${budgets.length}`, "好。", `m${budgets.length}`).join("\n")}\n`);
-    await scanTranscripts({ workspace: ws, configDir, stateFile, budgetUsd, extractFn: async (_prompt, budget) => (budgets.push(budget), { candidates: [], costUsd: 0 }) });
+    await scanTranscripts({ workspace: ws, memoryLock, configDir, stateFile, budgetUsd, extractFn: async (_prompt, budget) => (budgets.push(budget), { candidates: [], costUsd: 0 }) });
   };
   try {
     delete process.env.ALFRED_MEMORY_SCAN_BUDGET_USD;
@@ -359,26 +363,21 @@ test("extraction prompt marks memories and conversation as data", () => {
   assert.equal(escaped.match(/<\/conversation>/g)?.length, 1);
 });
 
-test("scheduler defers scans while a task is busy and runs them once idle", async () => {
+test("scheduler starts a pending scan at once, one at a time, under memory-scan.lock, whatever else is running", async () => {
   const lock = new MemoryLock(path.join(tmp, "scheduler.lock"));
-  let busy = true;
   let scans = 0;
   let finish: () => void = () => {};
   const scheduler = new MemoryScanScheduler({
     lock,
-    isBusy: () => busy,
     scan: () =>
       new Promise((resolve) => {
         scans++;
-        finish = () => resolve({ files: 0, messages: 0, applied: [], costUsd: 0, skipped: "test" });
+        finish = () => resolve({ files: 0, messages: 0, applied: [], conflicts: 0, costUsd: 0, skipped: "test" });
       }),
   });
   scheduler.request("session retired");
-  assert.equal(scans, 0);
-  busy = false;
-  scheduler.flush();
-  assert.equal(scans, 1);
-  assert.ok(!lock.tryAcquire("task"), "a task waits while the scan holds the lock");
+  assert.equal(scans, 1, "no idle gate: it starts at once");
+  assert.ok(!new MemoryLock(path.join(tmp, "scheduler.lock")).tryAcquire("scan"), "a manual scan finds the scan lock held");
   scheduler.request("timer");
   assert.equal(scans, 1, "only one scan at a time");
   finish();
@@ -386,8 +385,24 @@ test("scheduler defers scans while a task is busy and runs them once idle", asyn
   assert.equal(scans, 2, "the request made during the scan runs next");
   finish();
   await new Promise((resolve) => setImmediate(resolve));
-  assert.ok(lock.tryAcquire("task"));
+  assert.ok(lock.tryAcquire("scan"), "the scan lock is free after the last scan");
   lock.release();
+});
+
+test("the scheduler leaves a request pending while another process holds memory-scan.lock, and runs it on the next flush", () => {
+  const file = path.join(tmp, "scheduler-other.lock");
+  const other = new MemoryLock(file);
+  assert.ok(other.tryAcquire("scan"));
+  let scans = 0;
+  const scheduler = new MemoryScanScheduler({
+    lock: new MemoryLock(file),
+    scan: async () => (scans++, { files: 0, messages: 0, applied: [], conflicts: 0, costUsd: 0, skipped: "test" }),
+  });
+  scheduler.request("timer");
+  assert.equal(scans, 0);
+  other.release();
+  scheduler.flush();
+  assert.equal(scans, 1);
 });
 
 test("memory lock: scans are exclusive, tasks share, stale locks are taken over", () => {
@@ -444,8 +459,7 @@ function countingScheduler(name: string) {
   const reasons: string[] = [];
   const scheduler = new MemoryScanScheduler({
     lock: new MemoryLock(path.join(tmp, `${name}.lock`)),
-    isBusy: () => false,
-    scan: async () => ({ files: 0, messages: 0, applied: [], costUsd: 0, skipped: "test" }),
+    scan: async () => ({ files: 0, messages: 0, applied: [], conflicts: 0, costUsd: 0, skipped: "test" }),
   });
   const request = scheduler.request.bind(scheduler);
   scheduler.request = (reason: string) => {
@@ -528,4 +542,151 @@ test("writeFileAtomic replaces the file whole, and a failed write leaves no temp
   fs.mkdirSync(path.join(blocked, "inside"), { recursive: true });
   assert.throws(() => writeFileAtomic(blocked, "x"));
   assert.deepEqual(fs.readdirSync(dir).sort(), ["a.md", "blocked"]);
+});
+
+// --- extraction without the memory lock ---------------------------------------------------------------------------
+
+/** A workspace with one transcript holding one exchange, and the options of a scan over it. */
+function scanFixture(extractFn: NonNullable<Parameters<typeof scanTranscripts>[0]["extractFn"]>) {
+  const ws = workspace();
+  const configDir = path.join(tmp, `config-${seq}`);
+  const projectDir = path.join(configDir, "projects", ws.replace(/[^a-zA-Z0-9]/g, "-"));
+  fs.mkdirSync(projectDir, { recursive: true });
+  const transcript = path.join(projectDir, "s1.jsonl");
+  fs.writeFileSync(transcript, `${taskLines("我是做量化交易的", "明白。", "m1").join("\n")}\n`);
+  const stateFile = path.join(tmp, `scan-state-${seq}.json`);
+  const memoryPath = (file: string) => path.join(ws, "memory", file);
+  const offset = (): number | undefined => (fs.existsSync(stateFile) ? JSON.parse(fs.readFileSync(stateFile, "utf-8")).offsets[transcript] : undefined);
+  return { ws, transcript, stateFile, memoryPath, offset, opts: { workspace: ws, memoryLock, configDir, stateFile, extractFn } };
+}
+
+const update = (file: string, body = "scanned"): Candidate => ({ action: "update", file, name: "n", description: "d", type: "user", body });
+const create = (file: string, body = "scanned"): Candidate => ({ action: "create", file, name: "n", description: "d", type: "user", body });
+const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+test("a scan extracts while the memory lock is held and writes once it is free", async () => {
+  let extracting = false;
+  const f = scanFixture(async () => {
+    extracting = true;
+    return { candidates: [create("fresh.md")], costUsd: 0.001 };
+  });
+  assert.ok(memoryLock.tryAcquire("task"), "a run or an owner's edit holds memory.lock");
+  const scan = scanTranscripts(f.opts);
+  await pause(100);
+  assert.ok(extracting, "extraction ran under the held lock");
+  assert.ok(!fs.existsSync(f.memoryPath("fresh.md")), "the write waits");
+  memoryLock.release();
+  const report = await scan;
+  assert.deepEqual(report.applied.map((a) => a.file), ["fresh.md"]);
+  assert.equal(report.conflicts, 0);
+  assert.equal(f.offset(), fs.statSync(f.transcript).size);
+  assert.ok(memoryLock.tryAcquire("scan"), "the write step let go of the lock");
+  memoryLock.release();
+});
+
+test("a scan that cannot take the memory lock within its wait writes nothing, fails with its cost and keeps the offsets", async () => {
+  const f = scanFixture(async () => ({ candidates: [create("never.md")], costUsd: 0.003 }));
+  assert.ok(memoryLock.tryAcquire("task"));
+  try {
+    await assert.rejects(scanTranscripts({ ...f.opts, writeWaitMs: 50 }), (err: unknown) => err instanceof ScanFailure && err.costUsd === 0.003 && /stayed locked/.test(err.message));
+  } finally {
+    memoryLock.release();
+  }
+  assert.ok(!fs.existsSync(f.memoryPath("never.md")));
+  assert.equal(f.offset(), undefined, "the offsets were not advanced");
+  const retried = await scanTranscripts(f.opts);
+  assert.deepEqual(retried.applied.map((a) => a.file), ["never.md"], "the batch is retried");
+});
+
+test("a scan's write wait ends when its signal aborts", async () => {
+  const f = scanFixture(async () => ({ candidates: [create("never.md")], costUsd: 0 }));
+  const abort = new AbortController();
+  assert.ok(memoryLock.tryAcquire("task"));
+  try {
+    setTimeout(() => abort.abort(), 30);
+    const started = Date.now();
+    await assert.rejects(scanTranscripts({ ...f.opts, signal: abort.signal }), ScanFailure);
+    assert.ok(Date.now() - started < 2_000);
+  } finally {
+    memoryLock.release();
+  }
+});
+
+test("an update whose file changed after the scan read it is dropped and counted, and the file keeps its new content", async () => {
+  const f = scanFixture(async () => {
+    writeMemory(f.ws, "job.md", { name: "职业", description: "owner's edit", type: "user", updated: "2026-10-09" });
+    return { candidates: [update("job.md"), create("other.md")], costUsd: 0.002 };
+  });
+  writeMemory(f.ws, "job.md", { name: "职业", description: "程序员", type: "user", updated: "2026-10-01" });
+  const report = await scanTranscripts(f.opts);
+  assert.equal(report.conflicts, 1);
+  assert.deepEqual(report.applied.map((a) => a.file), ["other.md"], "the other candidate is still written");
+  assert.equal(loadMemories(f.ws).find((m) => m.file === "job.md")?.description, "owner's edit");
+  assert.equal(f.offset(), fs.statSync(f.transcript).size, "the newer edit wins and the offsets advance");
+  assert.match(describeScan(report), /conflicts=1$/);
+  assert.doesNotMatch(describeScan({ ...report, conflicts: 0 }), /conflicts/);
+});
+
+test("an update whose file was removed after the scan read it is dropped", async () => {
+  const f = scanFixture(async () => {
+    fs.rmSync(f.memoryPath("gone.md"));
+    return { candidates: [update("gone.md")], costUsd: 0 };
+  });
+  writeMemory(f.ws, "gone.md", { name: "x", description: "d", updated: "2026-10-01" });
+  const report = await scanTranscripts(f.opts);
+  assert.equal(report.conflicts, 1);
+  assert.deepEqual(report.applied, []);
+  assert.ok(!fs.existsSync(f.memoryPath("gone.md")), "it is not brought back");
+});
+
+test("a create whose file appeared after the scan read the folder is dropped, and one whose name was already there is stored beside it", async () => {
+  const f = scanFixture(async () => {
+    writeMemory(f.ws, "appeared.md", { name: "new", description: "by the owner", updated: "2026-10-10" });
+    return { candidates: [create("appeared.md"), create("taken.md")], costUsd: 0 };
+  });
+  writeMemory(f.ws, "taken.md", { name: "old", description: "kept", updated: "2026-10-01" });
+  const report = await scanTranscripts(f.opts);
+  assert.equal(report.conflicts, 1);
+  assert.deepEqual(report.applied.map((a) => a.file), ["taken-1.md"]);
+  assert.equal(loadMemories(f.ws).find((m) => m.file === "appeared.md")?.description, "by the owner");
+});
+
+test("an unchanged file is still updated, and two candidates for one file in a scan do not conflict with each other", async () => {
+  const f = scanFixture(async () => ({ candidates: [update("job.md", "one"), update("job.md", "two")], costUsd: 0 }));
+  writeMemory(f.ws, "job.md", { name: "x", description: "d", updated: "2026-10-01" });
+  const report = await scanTranscripts(f.opts);
+  assert.equal(report.conflicts, 0);
+  assert.equal(loadMemories(f.ws).find((m) => m.file === "job.md")?.body, "two");
+});
+
+test("two scans cannot run at once: a second lock on memory-scan.lock fails while one holds it", () => {
+  const file = path.join(tmp, "memory-scan.lock");
+  const a = new MemoryLock(file);
+  const b = new MemoryLock(file);
+  assert.ok(a.tryAcquire("scan"));
+  assert.ok(!b.tryAcquire("scan"));
+  assert.equal(b.current()?.holder, "scan");
+  a.release();
+  assert.ok(b.tryAcquire("scan"));
+  b.release();
+});
+
+test("a transcript line still being written is not consumed: the scan takes the complete lines, and the next scan the finished line", async () => {
+  const prompts: string[] = [];
+  const f = scanFixture(async (prompt) => (prompts.push(prompt), { candidates: [], costUsd: 0 }));
+  const done = taskLines("第二个问题", "第二个回答", "m2");
+  const [queued, typed, ...rest] = taskLines("第三个问题", "第三个回答", "m3");
+  const typedLine = typed ?? "";
+  const complete = fs.statSync(f.transcript).size;
+  fs.appendFileSync(f.transcript, `${done.join("\n")}\n${queued}\n${typedLine.slice(0, 40)}`);
+  await scanTranscripts(f.opts);
+  assert.equal(f.offset(), complete + Buffer.byteLength(`${done.join("\n")}\n${queued}\n`), "the offset stops before the partial line");
+  assert.match(prompts[0] ?? "", /user: 第二个问题/);
+  assert.doesNotMatch(prompts[0] ?? "", /第三个问题/);
+
+  fs.appendFileSync(f.transcript, `${typedLine.slice(40)}\n${rest.join("\n")}\n`);
+  await scanTranscripts(f.opts);
+  assert.doesNotMatch(prompts[1] ?? "", /第二个问题/, "the complete lines are not read twice");
+  assert.match(prompts[1] ?? "", /user: 第三个问题/, "the finished line is read");
+  assert.equal(f.offset(), fs.statSync(f.transcript).size);
 });

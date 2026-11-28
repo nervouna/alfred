@@ -51,8 +51,10 @@
 // before the run ends, for the app to read with the list. A shutdown aborts it, and it ends lost, recording nothing.
 //
 // The owner's edits of long-term memory in the app (memory-edit.ts) go through withMemoryLock: the handler owns the
-// MemoryLock that its runs and its scans use, and a second instance in this process would not share it. An edit holds
-// the lock as a task does, so it runs beside runs and never beside a scan.
+// MemoryLock on memory.lock, and a second instance in this process would not share it. Runs take no memory lock. A scan
+// extracts without it, excluding other scans through memory-scan.lock, and holds memory.lock only for its write step,
+// one synchronous step that checks the versions of the files it read; an edit holds it as a task does, so it waits at
+// most for that step.
 //
 // While a run works it also publishes live events (see events.ts): the main
 // agent's reply text as it is written, and every step the run records.
@@ -113,7 +115,7 @@ import { ResponseLedger, subagentTranscript, unitPrices } from "./cost.ts";
 import { externalOffer, externalServersForRun, externalSpendHooks, externalToolGuard, mediaOffer, subagentExternalTools } from "./external.ts";
 import { resolveInside, workspaceGuard } from "./guard.ts";
 import { TaskInput, answeredBy } from "./input.ts";
-import { EXTRACT_MODEL, MEMORY_LOCK_FILE, MemoryScanScheduler, SCAN_TIMEOUT_MS, failedScanCost, scanTranscripts, transcriptDirs } from "./memory-scan.ts";
+import { EXTRACT_MODEL, MEMORY_LOCK_FILE, MEMORY_SCAN_LOCK_FILE, MemoryScanScheduler, failedScanCost, scanTranscripts, transcriptDirs } from "./memory-scan.ts";
 import type { ScanReport } from "./memory-scan.ts";
 import { type Locked, MemoryLock, capIndex, loadMemories, syncMemoryIndex } from "./memory.ts";
 import { QUESTION_TOOL, answersFromReply, denyPermissionPrompts, questionHook } from "./questions.ts";
@@ -909,15 +911,14 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
     return rt;
   };
 
-  // Tasks and memory scans exclude each other through this lock, so the agent
-  // and the extraction job never edit memory files at the same time.
+  // memory.lock is taken by a scan's write step and by the owner's edits; runs take none. Scans exclude each other
+  // through memory-scan.lock.
   const memoryLock = new MemoryLock(MEMORY_LOCK_FILE);
   const scheduler = new MemoryScanScheduler({
-    lock: memoryLock,
-    isBusy: () => [...runtimes.values()].some((rt) => rt.busy),
+    lock: new MemoryLock(MEMORY_SCAN_LOCK_FILE),
     scan: async () => {
       // A scan was never held back by the daily cap, so only the month's stops it; what it cost counts toward both.
-      if (capReached(owner, true)) return { files: 0, messages: 0, applied: [], costUsd: 0, skipped: "the monthly spend cap is reached" };
+      if (capReached(owner, true)) return { files: 0, messages: 0, applied: [], conflicts: 0, costUsd: 0, skipped: "the monthly spend cap is reached" };
       const charge = (costUsd: number) => {
         try {
           chargeSpend(owner, costUsd);
@@ -927,7 +928,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
       };
       let report: ScanReport;
       try {
-        report = await recordScan(() => (opts.scanTranscripts ?? scanTranscripts)({ workspace: WORKSPACE_DIR }));
+        report = await recordScan(() => (opts.scanTranscripts ?? scanTranscripts)({ workspace: WORKSPACE_DIR, memoryLock }));
       } catch (err) {
         // A scan that failed after calling the model spent money all the same.
         charge(failedScanCost(err));
@@ -956,8 +957,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
 
   /**
    * Every session retirement goes through here. It is logged and triggers a
-   * memory scan, so the retired transcript is processed while it is fresh; the
-   * scan waits until no task is running.
+   * memory scan, so the retired transcript is processed while it is fresh.
    */
   function retired(userId: string, sessionId: string, reason: RetireReason, note: string): void {
     log.info(`session ${sessionId} retired (${reason}): ${note}`);
@@ -1235,7 +1235,6 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
     const rulesWatch = watchRules(WORKSPACE_DIR);
     startTurn(run);
 
-    let locked = false;
     let replies = 0;
     let cost = 0;
     const modelCosts = new Map<string, number>();
@@ -1270,13 +1269,6 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
     };
 
     try {
-      locked = await memoryLock.acquire("task", SCAN_TIMEOUT_MS + 30_000, run.abort.signal);
-      if (run.stopped) {
-        log.info(`agent run ${recorder.id} stopped by user while waiting for a memory scan`);
-        status = "stopped";
-        return;
-      }
-      if (!locked) log.warn(`memory lock still held by ${JSON.stringify(memoryLock.current())}; running the task anyway`);
       let before = store.get(userId);
       const idleSession = before.sessionId;
       const idleHours = setting("sessionIdleHours");
@@ -1332,16 +1324,11 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
       } catch (err) {
         log.error(`saving lastRunAt failed: ${describeError(err)}`);
       }
-      // Keep memory/MEMORY.md on disk in step with what the agent wrote, then let scans run again.
+      // Keep memory/MEMORY.md on disk in step with what the agent wrote.
       try {
         syncMemoryIndex(WORKSPACE_DIR);
       } catch (err) {
         log.warn(`memory index sync failed: ${describeError(err)}`);
-      }
-      try {
-        if (locked) memoryLock.release();
-      } catch (err) {
-        log.error(`releasing the memory lock failed: ${describeError(err)}`);
       }
       if (run.stopped) status = "stopped";
       if (run.shutdown) {
@@ -1860,7 +1847,6 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
       }
     } finally {
       rt.busy = false;
-      scheduler.flush();
     }
   }
 
