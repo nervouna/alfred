@@ -36,6 +36,7 @@ const { InvalidAnswer, appOutbound } = await import("../channels.ts");
 const { DocumentStore, readDocumentFile } = await import("../documents/store.ts");
 const { TRASH_STATE_FILE } = await import("../documents/purge.ts");
 const { Versions } = await import("../documents/versions.ts");
+const { BotStore } = await import("../bots/store.ts");
 
 const cleanups: (() => Promise<void>)[] = [];
 after(async () => {
@@ -326,17 +327,19 @@ let states = 0;
 let logs = 0;
 
 /** A handler on a fake channel, a log of its own and a state file of its own (or the given one). */
-function setup(options: { turn?: TurnFn; interruptMs?: number; stateFile?: string; documents?: Documents } = {}) {
+function setup(options: { turn?: TurnFn; interruptMs?: number; stateFile?: string; documents?: Documents; bots?: InstanceType<typeof BotStore> } = {}) {
   const app = fakeApp();
+  const stateFile = options.stateFile ?? path.join(tmp, `state-${states++}`, "agent-state.json");
   const events = new EventLog(path.join(tmp, `events-${logs++}`, "events.jsonl"));
   const agent = fakeAgent(options.turn);
   const handler = createAgentHandler({
     out: app.out,
     events,
-    stateFile: options.stateFile ?? path.join(tmp, `state-${states++}`, "agent-state.json"),
+    stateFile,
     runQuery: agent.runQuery,
     interruptMs: options.interruptMs,
     documents: options.documents,
+    bots: options.bots,
   });
   cleanups.push(() => handler.shutdown());
   const live: LiveEvent[] = [];
@@ -353,7 +356,8 @@ function setup(options: { turn?: TurnFn; interruptMs?: number; stateFile?: strin
   const taskId = (): string => runs().findLast((r) => r.kind === "task")?.id ?? "";
   const subagentIds = (): string[] => [...new Set(runs().filter((r) => r.kind === "subagent").map((r) => r.id))];
   const statusOf = (id: string): string | undefined => runs().findLast((r) => r.id === id)?.status;
-  return { handler, app, events, agent, live, messages, runs, questions, answered, finished, send, taskId, subagentIds, statusOf };
+  const state = (): Record<string, Record<string, unknown>> => JSON.parse(fs.readFileSync(stateFile, "utf8"));
+  return { handler, app, events, agent, live, messages, runs, questions, answered, finished, send, taskId, subagentIds, statusOf, state };
 }
 
 const STEERED = "收到，会在当前步骤结束后转给 Alfred。";
@@ -1926,4 +1930,253 @@ test("a background subagent is not admitted once the monthly cap is reached, tho
   await until("both turns", () => turns === 2 && t.finished());
   assert.match(denied, /spend cap/);
   assert.match(denied, /deny/);
+});
+
+// Bots: a message sent to a bot starts a run of that bot, in a chat of its own.
+
+const TAX = {
+  id: "tax",
+  name: "报税助手",
+  description: "Helps the owner with tax filing",
+  instructions: "Answer only about tax. Keep working notes in your notes folder.",
+  model: "haiku",
+  runBudgetUsd: 0.5,
+  tools: ["WebSearch", "bogus", "mcp__nothing"],
+} as const;
+
+let botFiles = 0;
+
+/** A handler that serves the bot `tax` beside Alfred. */
+function botSetup(options: { turn?: TurnFn; bot?: Partial<Omit<typeof TAX, "tools">> & { tools?: string[] } } = {}) {
+  const n = botFiles++;
+  const bots = new BotStore({ file: path.join(tmp, `bots-${n}`, "bots.json"), events: new EventLog(path.join(tmp, `bots-${n}`, "events.jsonl")) });
+  const bot = bots.create({ ...TAX, tools: [...TAX.tools], ...options.bot });
+  const t = setup({ turn: options.turn, bots });
+  return { ...t, bots, bot, sendBot: (text: string, more: Partial<Inbound> = {}) => t.send(text, { botId: bot.id, ...more }) };
+}
+
+/** Runs every PreToolUse hook of the options on one call, as the SDK does, and gives the reason of the deny, if any. */
+async function denial(turn: Turn, toolName: string, input: Record<string, unknown>): Promise<string | undefined> {
+  const event = { hook_event_name: "PreToolUse", session_id: SESSION, transcript_path: "/dev/null", cwd: "/", tool_name: toolName, tool_input: input, tool_use_id: "toolu_w" };
+  const hooks = (turn.options.hooks?.PreToolUse ?? []).flatMap((matcher) => matcher.hooks);
+  const outputs = await Promise.all(hooks.map((hook) => hook(event as never, "toolu_w", { signal: new AbortController().signal })));
+  for (const out of outputs) {
+    const specific = "hookSpecificOutput" in out ? (out.hookSpecificOutput as Decision | undefined) : undefined;
+    if (specific?.permissionDecision === "deny") return specific.permissionDecisionReason;
+  }
+  return undefined;
+}
+
+test("a bot's chat and Alfred's keep separate sessions under bot:<id> and owner, and every run's spend counts on the owner", async () => {
+  const t = botSetup({ turn: async () => priced("好", 0.01) });
+  await t.sendBot("报税的事");
+  await until("the bot's run", () => t.finished(1));
+  let state = t.state();
+  assert.deepEqual(Object.keys(state).sort(), ["bot:tax", "owner"]);
+  assert.equal(state["bot:tax"]?.sessionId, SESSION);
+  assert.ok(Math.abs(Number(state["bot:tax"]?.sessionCostUsd) - 0.01) < 1e-9, "the session cost is the bot's");
+  assert.equal(state.owner?.sessionId, undefined, "the bot's run is not Alfred's session");
+  assert.equal(state.owner?.sessionCostUsd, 0);
+  assert.ok(Math.abs(Number(state.owner?.spendDayUsd) - 0.01) < 1e-9, "the day's spend is the owner's");
+  assert.ok(Math.abs(Number(state.owner?.spendMonthUsd) - 0.01) < 1e-9);
+
+  await t.send("Alfred，你好");
+  await until("Alfred's run", () => t.finished(2));
+  state = t.state();
+  assert.equal(state.owner?.sessionId, SESSION);
+  assert.ok(Math.abs(Number(state.owner?.sessionCostUsd) - 0.01) < 1e-9, "Alfred's session cost does not hold the bot's");
+  assert.ok(Math.abs(Number(state["bot:tax"]?.sessionCostUsd) - 0.01) < 1e-9, "nor the other way round");
+  assert.ok(Math.abs(Number(state.owner?.spendDayUsd) - 0.02) < 1e-9, "both runs count toward the day");
+  assert.ok(Math.abs(Number(state.owner?.totalCostUsd) - 0.02) < 1e-9);
+
+  // /new acts on the chat it is sent in.
+  await t.sendBot("/new");
+  state = t.state();
+  assert.equal(state["bot:tax"]?.sessionId, undefined);
+  assert.equal((state["bot:tax"]?.previousSession as { sessionId?: string } | undefined)?.sessionId, SESSION);
+  assert.equal(state.owner?.sessionId, SESSION, "Alfred's session stays");
+  assert.equal(state.owner?.previousSession, undefined);
+});
+
+test("a bot's run reads the daily cap from the owner's record", async (ctx) => {
+  process.env.ALFRED_DAILY_BUDGET_USD = "0.005";
+  ctx.after(() => void delete process.env.ALFRED_DAILY_BUDGET_USD);
+  const t = botSetup({ turn: async () => priced("好", 0.01) });
+  await t.sendBot("第一条");
+  await until("the first run", () => t.finished(1));
+  await t.sendBot("第二条");
+  await until("the refusal", () => /每日上限/.test(t.app.texts.at(-1) ?? ""));
+  assert.equal(new Set(t.runs().filter((r) => r.kind === "task").map((r) => r.id)).size, 1, "no second run starts");
+  const refusal = t.messages().findLast((m) => m.direction === "out");
+  assert.equal(refusal?.botId, "tax");
+});
+
+test("/model in a bot's chat changes nothing and says in one line that the bot's record sets it", async () => {
+  const t = botSetup();
+  await t.send("hi");
+  await until("Alfred's run", () => t.finished(1));
+  const before = JSON.stringify(t.state());
+  for (const text of ["/model opus", "/model"]) {
+    const texts = t.app.texts.length;
+    await t.sendBot(text);
+    assert.equal(t.app.texts.length, texts + 1);
+    const line = t.app.texts.at(-1) ?? "";
+    assert.ok(!line.includes("\n"), "one line");
+    assert.match(line, /报税助手 的模型由它自己的设置决定（现在是 haiku）/);
+  }
+  assert.equal(JSON.stringify(t.state()), before, "no state changed");
+  assert.equal(t.bots.get("tax")?.model, "haiku");
+  await t.send("/model opus");
+  assert.equal(t.state().owner?.model, "opus", "Alfred's /model still switches Alfred's model");
+});
+
+test("/status in a bot's chat shows the bot's model and session and the owner's caps", async () => {
+  const t = botSetup({ turn: async () => priced("好", 0.01) });
+  await t.sendBot("你好");
+  await until("the run", () => t.finished(1));
+  await t.sendBot("/status");
+  const status = t.app.texts.at(-1) ?? "";
+  assert.match(status, /模型：haiku/);
+  assert.match(status, /会话：sess-1.*本会话花费 \$0\.010/);
+  assert.match(status, /今天 \$0\.010 \/ 上限/);
+});
+
+test("run.stop reaches a bot's live run, and what it says carries the bot's id", async () => {
+  const gate = held();
+  const t = botSetup({ turn: gate.turn });
+  await t.sendBot("慢慢做");
+  await until("the bot's run", () => gate.waiting === 1);
+  const runId = t.taskId();
+  assert.equal(t.runs().find((r) => r.id === runId)?.botId, "tax");
+  assert.equal(await t.handler.stopRun("zzzzzz"), false);
+  assert.equal(await t.handler.stopRun(runId), true);
+  await until("the run to stop", () => t.statusOf(runId) === "stopped");
+  const said = t.messages().findLast((m) => m.direction === "out");
+  assert.equal(said?.text, "已停止当前运行。");
+  assert.equal(said?.botId, "tax");
+});
+
+test("/stop in a bot's chat stops that chat's run and leaves Alfred's alone", async () => {
+  const gate = held();
+  const t = botSetup({ turn: gate.turn });
+  await t.send("Alfred 的活");
+  await t.sendBot("bot 的活");
+  await until("both runs", () => gate.waiting === 2);
+  const runIds = t.runs().filter((r) => r.kind === "task").map((r) => [r.id, r.botId] as const);
+  const botRun = runIds.find(([, botId]) => botId === "tax")?.[0] ?? "";
+  const alfredRun = runIds.find(([, botId]) => botId === undefined)?.[0] ?? "";
+  await t.sendBot(`/stop ${alfredRun}`);
+  assert.equal(t.statusOf(alfredRun), "running", "a bot's chat names only its own runs");
+  assert.match(t.app.texts.at(-1) ?? "", /没有进行中或排队的运行/);
+  await t.sendBot("/stop");
+  await until("the bot's run to stop", () => t.statusOf(botRun) === "stopped");
+  assert.equal(t.statusOf(alfredRun), "running", "Alfred's run goes on");
+});
+
+test("a bot's run is built from its record: model, budget, tools, prompt and home; Alfred's keeps its own", async () => {
+  const seen: Options[] = [];
+  const t = botSetup({ turn: async (_prompt, _signal, turn) => (seen.push(turn.options), "好") });
+  await t.sendBot("你好");
+  await until("the bot's run", () => t.finished(1));
+  await t.send("你好");
+  await until("Alfred's run", () => t.finished(2));
+  const [bot, alfred] = seen;
+  assert.ok(bot && alfred);
+  const { MODELS } = await import("./config.ts");
+  assert.equal(bot.model, MODELS.haiku);
+  assert.equal(bot.maxBudgetUsd, 0.5);
+  assert.notEqual(alfred.maxBudgetUsd, 0.5);
+  assert.deepEqual(bot.tools, ["Read", "Write", "Edit", "Glob", "Grep", "WebSearch", "Skill", "AskUserQuestion"]);
+  assert.ok(!bot.allowedTools?.includes("mcp__alfred__spend_query"));
+  assert.ok(!bot.allowedTools?.some((name) => name.startsWith("mcp__alfred__task_")));
+  assert.ok(alfred.allowedTools?.includes("mcp__alfred__spend_query"));
+  const prompt = String(bot.systemPrompt);
+  assert.match(prompt, /^You are 报税助手, one of the owner's assistants in the Alfred app\./);
+  assert.match(prompt, /Answer only about tax\./);
+  assert.match(prompt, /bots\/tax\//);
+  assert.match(String(alfred.systemPrompt), /^You are Alfred, a personal research assistant/);
+  for (const dir of ["inbox", "reports", "notes"]) assert.ok(fs.statSync(path.join(tmp, "workspace", "bots", "tax", dir)).isDirectory(), `bots/tax/${dir}`);
+});
+
+test("the guard of a bot's chat denies a write outside its home, memory/ and .trash/, and Alfred's denies one under bots/", async () => {
+  const verdicts: Record<string, string | undefined> = {};
+  const t = botSetup({
+    turn: async (_prompt, _signal, turn) => {
+      const bot = turn.options.maxBudgetUsd === 0.5;
+      const who = bot ? "bot" : "alfred";
+      verdicts[`${who} notes`] = await denial(turn, "Write", { file_path: "notes/x.md" });
+      verdicts[`${who} home`] = await denial(turn, "Write", { file_path: "bots/tax/notes/x.md" });
+      verdicts[`${who} memory`] = await denial(turn, "Write", { file_path: "memory/x.md" });
+      return "好";
+    },
+  });
+  await t.sendBot("写点东西");
+  await until("the bot's run", () => t.finished(1));
+  await t.send("写点东西");
+  await until("Alfred's run", () => t.finished(2));
+  assert.match(verdicts["bot notes"] ?? "", /only bots\/tax\/, memory\/, \.trash\//);
+  assert.equal(verdicts["bot home"], undefined);
+  assert.equal(verdicts["bot memory"], undefined);
+  assert.equal(verdicts["alfred notes"], undefined);
+  assert.match(verdicts["alfred home"] ?? "", /bots\/ may be read but not changed/);
+  assert.equal(verdicts["alfred memory"], undefined);
+});
+
+/** A turn that streams a text block, asks one question and ends when it is answered. */
+const streamingAsker: TurnFn = async (_prompt, _signal, turn) => {
+  turn.emit(messageStart("msg_a"));
+  turn.emit(blockStart(0, "text"));
+  turn.emit(textDelta(0, "稍等"));
+  await askTool(turn, FORMAT_ASK);
+  return "好了";
+};
+
+test("every event of a bot's chat carries its botId: messages in and out, run.updated, message.delta, question.asked and question.answered; the run record too", async () => {
+  const t = botSetup({ turn: streamingAsker });
+  await t.sendBot("出一份报告", { clientId: "c-bot" });
+  await until("the question", () => t.questions().length === 1);
+  assert.equal(t.questions()[0]?.botId, "tax");
+  // answerQuestion finds the question in any chat.
+  assert.equal(await t.handler.answerQuestion(idOfOpenQuestion(t), { [FORMAT_Q]: "长文章" }), true);
+  await until("the run", () => t.finished(1));
+  assert.equal(t.answered()[0]?.botId, "tax");
+  assert.deepEqual(t.messages().map((m) => [m.direction, m.botId]), [["in", "tax"], ["out", "tax"]]);
+  const runs = t.runs();
+  assert.ok(runs.length >= 2 && runs.every((r) => r.botId === "tax"), "every run.updated");
+  const deltas = t.live.filter((e) => e.type === "message.delta");
+  assert.ok(deltas.length > 0 && deltas.every((e) => e.type === "message.delta" && e.data.botId === "tax"));
+  assert.equal(readRunFile(t.taskId())?.botId, "tax", "the run record");
+});
+
+test("Alfred's chat carries no botId on any event or record, with bots wired in", async () => {
+  const t = botSetup({ turn: streamingAsker });
+  await t.send("出一份报告", { clientId: "c-alfred" });
+  await until("the question", () => t.questions().length === 1);
+  assert.equal(await t.handler.answerQuestion(idOfOpenQuestion(t), { [FORMAT_Q]: "长文章" }), true);
+  await until("the run", () => t.finished(1));
+  const all = t.events.readSince(0).map((e) => e.data as object);
+  assert.ok(all.length >= 5);
+  assert.ok(all.every((data) => !Object.hasOwn(data, "botId")), "no event data has the key");
+  assert.ok(t.live.every((e) => !Object.hasOwn(e.data, "botId")));
+  assert.equal(Object.hasOwn(readRunFile(t.taskId()) ?? {}, "botId"), false);
+});
+
+test("the task deliveries and the lost-run note wait for Alfred's next message: a bot's chat does not take them", async () => {
+  // A restart that cut a run short leaves a note for the owner's next message to Alfred.
+  const delivery = { taskId: "t1", title: "晨报", runId: "k7m2qa", at: "2026-11-28T08:00:00.000Z", summary: "出了", files: [] };
+  const stateFile = path.join(tmp, "state-seeded", "agent-state.json");
+  fs.mkdirSync(path.dirname(stateFile), { recursive: true });
+  fs.writeFileSync(stateFile, JSON.stringify({ owner: { model: "sonnet", sessionCostUsd: 0, totalCostUsd: 0, taskDeliveries: [delivery], lostRuns: [{ id: "m8d2qw", title: "旧运行" }] } }));
+  const bots = new BotStore({ file: path.join(tmp, "bots-seeded", "bots.json"), events: new EventLog(path.join(tmp, "bots-seeded", "events.jsonl")) });
+  bots.create({ ...TAX, tools: [] });
+  const seeded = setup({ turn: async (prompt) => `echo: ${prompt}`, stateFile, bots });
+  await seeded.send("看看", { botId: "tax" });
+  await until("the bot's run", () => seeded.finished(1));
+  assert.ok(!seeded.agent.prompts[0]?.includes("晨报"), "the bot's prompt has no delivery");
+  assert.ok(!seeded.app.texts.some((text) => text.includes("旧运行")), "no lost-run note in the bot's chat");
+  assert.equal((seeded.state().owner?.taskDeliveries as unknown[] | undefined)?.length, 1, "kept for Alfred");
+  await seeded.send("早");
+  await until("Alfred's run", () => seeded.finished(2));
+  assert.ok(seeded.agent.prompts[1]?.includes("晨报"));
+  assert.ok(seeded.app.texts.some((text) => text.includes("旧运行")));
 });

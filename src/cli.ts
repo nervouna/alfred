@@ -9,6 +9,7 @@ import { checkMemoryScanSettings } from "./agent/config.ts";
 import { loadExternalServers } from "./agent/external.ts";
 import { resolveInside } from "./agent/guard.ts";
 import { createAgentHandler } from "./agent/handler.ts";
+import { BotStore } from "./bots/store.ts";
 import { memoryCommands } from "./agent/memory-edit.ts";
 import { MEMORY_LOCK_FILE, MEMORY_SCAN_LOCK_FILE, describeScan, scanTranscripts } from "./agent/memory-scan.ts";
 import { MemoryLock } from "./agent/memory.ts";
@@ -97,7 +98,9 @@ async function cmdRun(args: string[]): Promise<void> {
   const tasks = new TaskStore();
   // The only idea store: it is the only writer of ideas.json, and the idea commands and the archiving use it.
   const ideas = new IdeaStore();
-  const agent = createAgentHandler({ out: appOutbound(), tasks, documents, ideas, settings });
+  // The only bot store: it is the only writer of bots.json, and the handler and the API both read it.
+  const bots = new BotStore();
+  const agent = createAgentHandler({ out: appOutbound(), tasks, documents, ideas, settings, bots });
   let closeApi: () => Promise<void>;
   try {
     // Without documents the API answers every document command 503, and a saved ALFRED.md or an edited memory is not committed to the history.
@@ -105,6 +108,7 @@ async function cmdRun(args: string[]): Promise<void> {
       socket,
       handler: agent,
       events: sharedEventLog(),
+      bots,
       settings: settingsCommands(settings, agent),
       tasks: taskCommands(tasks, agent),
       ideas: ideaCommands(ideas, tasks, { generate: (trigger) => agent.generateIdeas(trigger) }),

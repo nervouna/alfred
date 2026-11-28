@@ -14,6 +14,11 @@
 //                HTTP only: a question and its reply, a task stopped with run.stop, a duplicate
 //                client id and a reconnect with Last-Event-ID; ends with one pass or fail line
 //                per check
+//   bot          a bot made through BotStore (haiku, budget 0.5, no extra tools) behind the command API on a
+//                temp socket, sent a message that asks it to keep a note in its notes folder and to write
+//                notes/x.md at the root; ends with one pass or fail line per check (the events and the run
+//                carry the bot's id, the note is in bots/smoke/notes/, the root write was denied, agent-state.json
+//                has a bot:smoke record) and the spend
 //   stream       the real handler behind the command API on a temp socket, driven over HTTP: a
 //                question streams its reply as message.delta events, a longer task is stopped with
 //                run.stop after its first run.step (an interrupt: the stop reply, no error reply,
@@ -69,6 +74,7 @@ import type { SDKAssistantMessage, SDKMessage } from "@anthropic-ai/claude-agent
 import { LiveEventSchema, RevisionAcceptedSchema } from "../src/api/schema.ts";
 import type { Event, LiveEvent, Message } from "../src/api/schema.ts";
 import { AGENT_CONFIG_DIR } from "../src/agent/config.ts";
+import { BotStore } from "../src/bots/store.ts";
 import { createAgentHandler } from "../src/agent/handler.ts";
 import { request, streamEvents } from "../src/api/client.ts";
 import { startApi } from "../src/api/server.ts";
@@ -78,7 +84,7 @@ import { startDocuments } from "../src/documents/startup.ts";
 import { VERSIONS_GIT_DIR } from "../src/documents/versions.ts";
 import { sharedEventLog } from "../src/events.ts";
 import { listRunFiles } from "../src/runs.ts";
-import { WORKSPACE_DIR } from "../src/store.ts";
+import { STATE_DIR, WORKSPACE_DIR } from "../src/store.ts";
 import { TaskStore } from "../src/tasks/store.ts";
 import { createLocalHandler } from "./local-stack.ts";
 
@@ -281,6 +287,107 @@ async function api(): Promise<number> {
         : [`got ${resumed.length} events (ids ${ids(resumed)}), the log has ${expected.length} after ${middle}`],
     );
     summary();
+  } finally {
+    stopFollowing.abort();
+    await follower;
+    await closeApi();
+    await handler.shutdown();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  return failed;
+}
+
+/**
+ * The bot scenario: a bot made in the scratch state through BotStore (haiku, budget 0.5, no extra tools) is sent a message that
+ * asks it to keep a note in its notes folder and to write notes/x.md at the workspace root, which its write scope refuses.
+ * Driven over HTTP only. Returns the number of checks that failed.
+ */
+async function bot(): Promise<number> {
+  // What the handler logs, to see the guard's denial.
+  const logged: string[] = [];
+  for (const name of ["log", "warn", "error"] as const) {
+    const original = console[name].bind(console);
+    console[name] = (...args: unknown[]) => {
+      logged.push(args.map(String).join(" "));
+      original(...args);
+    };
+  }
+  const bots = new BotStore();
+  bots.create({
+    id: "smoke",
+    name: "冒烟助手",
+    description: "A test assistant that keeps one-line notes",
+    instructions: "Save a one-line note in your notes folder when asked, and reply in one line.",
+    model: "haiku",
+    runBudgetUsd: 0.5,
+    tools: [],
+  });
+  const handler = createLocalHandler({ bots });
+  // A short path: Unix socket paths are limited to about 100 bytes.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "alf-"));
+  const socket = path.join(dir, "api.sock");
+  const closeApi = await startApi({ socket, handler, events: sharedEventLog(), bots });
+  let failed = 0;
+  const check = (name: string, problems: string[]) => {
+    if (problems.length) failed++;
+    console.log(`[${problems.length ? "fail" : "pass"}] ${name}${problems.length ? `: ${problems.join("; ")}` : ""}`);
+  };
+
+  const followed: Event[] = [];
+  const stopFollowing = new AbortController();
+  const follower = (async () => {
+    try {
+      for await (const frame of streamEvents(socket, { signal: stopFollowing.signal })) {
+        if (!Number.isNaN(frame.id)) followed.push(JSON.parse(frame.data) as Event); // a live event has no id and is not in the log
+      }
+    } catch (err) {
+      if (!stopFollowing.signal.aborted) console.log(`[follower] ended: ${err}`);
+    }
+  })();
+  const post = (command: unknown) => request(socket, "POST", "/commands", command);
+  const messageOf = (pick: (m: Message) => boolean) => followed.find((e) => e.type === "message.created" && pick(e.data));
+
+  try {
+    const message = {
+      type: "message.send",
+      botId: "smoke",
+      clientId: "smoke-bot",
+      text: "做两件事：1. 在你自己的 notes 文件夹里存一个 note.md，内容是一行字“冒烟测试”；2. 另外再写一个文件 notes/x.md（工作区根目录下的 notes 文件夹），内容随意。最后用一行话告诉我两件事各自成没成。",
+    };
+    console.log(`[app] ${at()} to smoke: ${message.text.slice(0, 40)}…`);
+    const accepted = await post(message);
+    check("message.send with the bot's id is answered 202 accepted", accepted.status === 202 ? [] : [`got ${accepted.status} ${accepted.body}`]);
+    const inbound = await waitFor(() => messageOf((m) => m.direction === "in" && m.clientId === "smoke-bot"), 30_000);
+    const runId = inbound?.type === "message.created" ? inbound.data.runId : undefined;
+    check(
+      "the message event carries the bot's id and the run it started",
+      inbound?.type === "message.created" && inbound.data.botId === "smoke" && runId ? [] : [`got ${JSON.stringify(inbound?.data)}`],
+    );
+    const reply = await waitFor(() => messageOf((m) => m.direction === "out" && m.runId === runId && m.text !== ""), 180_000);
+    check("the reply event carries the bot's id", reply?.type === "message.created" && reply.data.botId === "smoke" ? [] : [`got ${JSON.stringify(reply?.data)}`]);
+    await idle();
+
+    const runEvents = followed.filter((e) => e.type === "run.updated" && e.data.id === runId);
+    const record = listRunFiles().find((f) => f.id === runId);
+    check(
+      "the run's events and its record carry the bot's id",
+      runEvents.length > 0 && runEvents.every((e) => e.type === "run.updated" && e.data.botId === "smoke") && record?.botId === "smoke"
+        ? []
+        : [`${runEvents.length} run.updated events, record botId ${record?.botId}`],
+    );
+
+    const notes = path.join(WORKSPACE_DIR, "bots", "smoke", "notes");
+    const kept = fs.existsSync(notes) ? fs.readdirSync(notes) : [];
+    check("bots/smoke/notes/ has the note", kept.length > 0 ? [] : ["the folder is empty or missing"]);
+    const root = path.join(WORKSPACE_DIR, "notes", "x.md");
+    const denial = logged.find((line) => /denied (Write|Edit|MultiEdit)/.test(line) && /notes\/x\.md/.test(line) && /outside where this run may write/.test(line));
+    check("the write of notes/x.md at the root was denied: no file, and the guard logged it", !fs.existsSync(root) && denial ? [] : [`file exists ${fs.existsSync(root)}, denial logged ${Boolean(denial)}`]);
+
+    const state = JSON.parse(fs.readFileSync(path.join(STATE_DIR, "agent-state.json"), "utf8")) as Record<string, { sessionId?: string }>;
+    check("agent-state.json has a bot:smoke record with a session", state["bot:smoke"]?.sessionId ? [] : [`keys ${Object.keys(state).join(", ")}`]);
+    summary();
+    const runs = listRunFiles().filter((f) => f.kind === "task");
+    console.log(`[spend] $${runs.reduce((sum, f) => sum + f.costUsd, 0).toFixed(4)} across ${runs.length} run(s)`);
   } finally {
     stopFollowing.abort();
     await follower;
@@ -1211,6 +1318,8 @@ if (scenario === "background") {
   await stack.stop();
 } else if (scenario === "api") {
   failedRules = await api();
+} else if (scenario === "bot") {
+  failedRules = await bot();
 } else if (scenario === "stream") {
   failedRules = await stream();
 } else if (scenario === "attach") {
@@ -1228,7 +1337,7 @@ if (scenario === "background") {
 } else if (scenario === "revision") {
   failedRules = await revision();
 } else {
-  console.error("usage: node scripts/handler-smoke.ts background|restart|stop|nested|api|stream|attach|ask|scheduled|tasks|compact|documents|revision|prompt <text>");
+  console.error("usage: node scripts/handler-smoke.ts background|restart|stop|nested|api|bot|stream|attach|ask|scheduled|tasks|compact|documents|revision|prompt <text>");
   process.exit(2);
 }
 process.exit(failedRules ? 1 : 0);

@@ -58,6 +58,7 @@ const NOTIFICATION_STATUS: Record<string, Ended["status"]> = { completed: "done"
 
 export class BackgroundRuns implements AgentAdmission {
   private readonly parentRunId: string;
+  private readonly botId?: string;
   private readonly max: number;
   private readonly overBudget: () => boolean;
   private readonly release: (brief: QueuedBrief) => void;
@@ -80,6 +81,8 @@ export class BackgroundRuns implements AgentAdmission {
 
   constructor(opts: {
     parentRunId: string;
+    /** The bot whose chat the subagents belong to; left out for Alfred's. */
+    botId?: string;
     max: number;
     overBudget: () => boolean;
     release: (brief: QueuedBrief) => void;
@@ -91,6 +94,7 @@ export class BackgroundRuns implements AgentAdmission {
     events?: EventLog;
   }) {
     this.parentRunId = opts.parentRunId;
+    this.botId = opts.botId;
     this.max = opts.max;
     this.overBudget = opts.overBudget;
     this.release = opts.release;
@@ -119,6 +123,7 @@ export class BackgroundRuns implements AgentAdmission {
       model: expectedModel(call),
       role: call.role,
       parentRunId: this.parentRunId,
+      ...(this.botId ? { botId: this.botId } : {}),
       queued,
       events: this.events,
     });

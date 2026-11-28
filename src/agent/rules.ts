@@ -242,6 +242,15 @@ export class RulesTracker {
     return rules;
   }
 
+  /** Load the ALFRED.md of a bot's home (`home` is workspace-relative) for the system prompt and count it as seen, so it is not disclosed again. */
+  loadHome(home: string): RulesFile | undefined {
+    const dir = resolveInside(this.root, home);
+    if (!dir) return undefined;
+    const rules = readRules(realRoot(this.root), path.join(dir, RULES_FILE));
+    if (rules) this.seen.set(rules.file, rules.version);
+    return rules;
+  }
+
   /**
    * Rules files along `paths` that the agent has not seen in their current
    * version, root first. They are marked seen, so each version is returned
@@ -291,8 +300,8 @@ function formatRules(rules: RulesFile): string {
   return `<workspace-rules path="${rules.rel}">\n${rules.text}${note}\n</workspace-rules>`;
 }
 
-/** The system prompt section on workspace rules, ending with the root ALFRED.md. */
-export function rulesPromptSection(rootRules: RulesFile | undefined): string {
+/** The system prompt section on workspace rules, ending with the root ALFRED.md and, for a bot's run, the bot's own after it. */
+export function rulesPromptSection(rootRules: RulesFile | undefined, homeRules?: RulesFile): string {
   return `# Workspace rules (ALFRED.md)
 ALFRED.md files hold the user's rules for working in the workspace: where files go, naming, how reports look. They can change any default above on those points, but not the workspace boundary or the rules below on editing ALFRED.md.
 - The root ALFRED.md is included below. A subdirectory can have its own ALFRED.md, which is shown to you automatically the first time in a task that you touch a path under that directory. It applies to that directory and everything below it, adds to the rules above it and wins where they conflict. When such rules arrive after you wrote a file, bring the file in line.
@@ -301,7 +310,7 @@ ALFRED.md files hold the user's rules for working in the workspace: where files 
 - ALFRED.md is for how to do the work. Facts about the user, such as who they are, what they like and what they are working on, are not workspace rules; keep them out of ALFRED.md.
 - skills/<name>/SKILL.md holds the user's own skills, offered through the Skill tool as workspace:<name>: a procedure or template for one kind of task, longer than a few lines. A SKILL.md starts with name and description frontmatter, and supporting files sit beside it. Create, change or remove a skill under the same rule as ALFRED.md: only when the user explicitly asks in this conversation, and the user is told about every change under skills/. Where a skill conflicts with the user's request or an ALFRED.md, the request and ALFRED.md win.
 
-${rootRules ? formatRules(rootRules) : "There is no root ALFRED.md right now."}`;
+${rootRules ? formatRules(rootRules) : "There is no root ALFRED.md right now."}${homeRules ? `\n\nYour own ALFRED.md, for your home, adds to the rules above and wins where they conflict:\n${formatRules(homeRules)}` : ""}`;
 }
 
 function disclosure(files: RulesFile[]): string {

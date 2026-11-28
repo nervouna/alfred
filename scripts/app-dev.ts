@@ -48,6 +48,7 @@ import type { LiveEvent } from "../src/api/schema.ts";
 import { startApi } from "../src/api/server.ts";
 import { documentCommands } from "../src/documents/commands.ts";
 import { startDocuments } from "../src/documents/startup.ts";
+import { BotStore } from "../src/bots/store.ts";
 import { DocumentStore, documentKind, documentTitle } from "../src/documents/store.ts";
 import { VERSIONS_GIT_DIR, Versions } from "../src/documents/versions.ts";
 import { type EventLog, isLiveEvent, sharedEventLog } from "../src/events.ts";
@@ -549,7 +550,8 @@ async function main(options: Options): Promise<void> {
     // The one settings store. Its environment layer has the daily generation of ideas off unless --ideas-at says when: the
     // stack does not spend on ideas on its own, whatever ALFRED_IDEAS_AT the shell has. The app can still turn it on.
     const settings = new SettingsStore({ env: () => ({ ...envSettings(), ideasAt: options.ideasAt ?? null }) });
-    const handler = createLocalHandler({ tasks, documents, ideas, settings });
+    const bots = new BotStore();
+    const handler = createLocalHandler({ tasks, documents, ideas, settings, bots });
     cleanups.push(() => handler.shutdown());
     // Pushed before the API's cleanup, so it runs after the API closes, as archiving stops after the API in `run`.
     cleanups.push(startArchiving(ideas));
@@ -561,6 +563,7 @@ async function main(options: Options): Promise<void> {
         socket,
         handler,
         events: sharedEventLog(),
+        bots,
         settings: settingsCommands(settings, handler),
         tasks: taskCommands(tasks, handler),
         ideas: ideaCommands(ideas, tasks, { generate: (trigger) => handler.generateIdeas(trigger) }),

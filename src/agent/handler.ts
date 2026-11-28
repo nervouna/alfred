@@ -67,7 +67,9 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { HookCallbackMatcher, Options, Query, SDKPartialAssistantMessage, SDKResultMessage } from "@anthropic-ai/claude-agent-sdk";
 
 import type { DocumentReply, IdeaReply } from "../api/server.ts";
-import type { Annotation, DocumentRevise, IdeaGenerationAccepted, IdeaTrigger, Question, RevisionAccepted, Task } from "../api/schema.ts";
+import type { Annotation, Bot, DocumentRevise, IdeaGenerationAccepted, IdeaTrigger, Question, RevisionAccepted, Task } from "../api/schema.ts";
+import { botHome, ensureBotHome } from "../bots/home.ts";
+import type { BotStore } from "../bots/store.ts";
 import { InvalidAnswer, SerialQueue, outboundKind, recordInbound, recorded, workspaceRelative } from "../channels.ts";
 import type { Inbound, Intake, Outbound } from "../channels.ts";
 import { TRASH_RETENTION_DAYS, pruneTrash } from "../documents/purge.ts";
@@ -110,6 +112,7 @@ import {
 } from "./config.ts";
 import type { ModelKey } from "./config.ts";
 import { BackgroundRuns } from "./background.ts";
+import { botToolOffer } from "./bot-tools.ts";
 import type { QueuedBrief } from "./background.ts";
 import { ResponseLedger, subagentTranscript, unitPrices } from "./cost.ts";
 import { externalOffer, externalServersForRun, externalSpendHooks, externalToolGuard, mediaOffer, subagentExternalTools } from "./external.ts";
@@ -128,7 +131,7 @@ import type { RetireReason } from "./session.ts";
 import { SKILLS_DIR, prepareWorkspacePlugin, skillPlugins } from "./skills.ts";
 import { AgentStateStore, OWNER } from "./state.ts";
 import type { AgentUserState, RevisionDelivery, RunRef, TaskDelivery } from "./state.ts";
-import { PROTECTED_PATHS, SubagentTracker, agentFailureHook, subagentGuard, subagentRulesHook, unattendedAdmission } from "./subagents.ts";
+import { SubagentTracker, agentFailureHook, subagentGuard, subagentRulesHook, unattendedAdmission, writeScope } from "./subagents.ts";
 import type { AgentAdmission, LiveSubagent } from "./subagents.ts";
 import { TASK_TOOL_NAMES, taskToolDefinitions } from "./task-tools.ts";
 import { ALFRED_TOOL_NAMES, MEDIA_TOOL_NAMES, REVISION_TOOL_NAMES, SPEND_TOOL_NAMES, createAlfredTools } from "./tools.ts";
@@ -214,6 +217,10 @@ interface Run {
   stopped: boolean;
   /** Stopped because Alfred is shutting down: the run and its subagents are lost, not stopped. */
   shutdown: boolean;
+  /** The bot whose chat this run is; Alfred's runs have none. */
+  bot?: Bot;
+  /** The names in the bot's `tools` that no tool matches were logged for this run. */
+  ignoredToolsLogged?: boolean;
   /** Set on a run of a task: it is unattended, starts a session of its own, and has none of the chat's questions or background subagents. */
   task?: { id: string; model: ModelKey; budgetUsd: number };
   /** Set on a revision run, which is unattended in the same way: the document it revises. */
@@ -297,6 +304,8 @@ interface Start {
 export interface AgentHandlerOptions {
   /** Where Alfred's output to the owner goes: the app channel. */
   out: Outbound;
+  /** The owner's bots: with them a message sent to a bot starts a run of that bot. Without them the handler serves Alfred alone. */
+  bots?: BotStore;
   /** The log message and run events go to; the shared event log by default. */
   events?: EventLog;
   /** The file the owner's state is kept in; `agent-state.json` in the state dir by default. Tests give each handler one of its own. */
@@ -608,6 +617,13 @@ export function agentOptions(params: {
   revision?: { budgetUsd: number };
   /** The history of the workspace and the document store: with them the deliver and move_file tools work on documents. */
   documents?: Documents;
+  /**
+   * Set for a bot's chat run: its model, run budget, tools, instructions and write scope in place of Alfred's, and none of the
+   * task tools or spend_query. The bot's home and ALFRED.md must exist or not before this is called, as they do.
+   */
+  bot?: Bot;
+  /** Gets the names in the bot's `tools` that match no tool; by default they are logged. */
+  onIgnoredTools?: (names: string[]) => void;
 }): Options {
   const memory = capIndex(syncMemoryIndex(WORKSPACE_DIR));
   if (memory.lines.length < memory.total) {
@@ -615,8 +631,15 @@ export function agentOptions(params: {
   }
   const rules = new RulesTracker(WORKSPACE_DIR);
   const disclosure = rulesDisclosure(rules);
-  const subagents = params.subagents !== false;
-  const builtin = subagents ? BUILTIN_TOOLS : BUILTIN_TOOLS.filter((t) => t !== "Agent");
+  const bot = params.bot;
+  // The owner's external MCP servers, read now: an edit of the file applies to the next run. A bot gets only those it names.
+  const configured = externalServersForRun();
+  const offered = bot ? botToolOffer(bot, configured) : undefined;
+  if (bot && offered?.ignored.length) (params.onIgnoredTools ?? ((names) => log.warn(`bot ${bot.id}: ignoring tools that match nothing: ${names.join(", ")}`)))(offered.ignored);
+  const external = offered?.servers ?? configured;
+  const subagents = params.subagents !== false && (offered ? offered.agent : true);
+  const builtinOffer = offered ? offered.builtin : BUILTIN_TOOLS;
+  const builtin = subagents ? builtinOffer : builtinOffer.filter((t) => t !== "Agent");
   // AskUserQuestion is offered but not allowed: dontAsk denies it, except where the hook answers it.
   const tools = params.ask ? [...builtin, QUESTION_TOOL] : builtin;
   const postToolUse = params.run ? [disclosure, runFilesHook(params.run, params.subagentRun)] : [disclosure];
@@ -625,43 +648,50 @@ export function agentOptions(params: {
   const replying = Boolean(params.revision && params.documents && params.run);
   const admission = unattended ? unattendedAdmission : params.admission;
   // The task tools confirm with the owner through `ask`, and only the chat has an owner to ask: an unattended run never gets them.
-  const taskTools = params.tasks && params.ask && !unattended ? taskToolDefinitions(params.tasks, params.ask, params.abortController?.signal) : undefined;
-  // The owner's external MCP servers, read now: an edit of the file applies to the next run.
-  const external = externalServersForRun();
+  const taskTools = params.tasks && params.ask && !unattended && !bot ? taskToolDefinitions(params.tasks, params.ask, params.abortController?.signal) : undefined;
   const offer = externalOffer(external, Boolean(unattended));
   // Media: save_media only for a run that is offered a media tool, and Alfred's own image tool only when no configured server offers one.
   const media = mediaOffer(external, Boolean(unattended));
-  const alfredTools = ALFRED_TOOL_NAMES.filter((name) => !media.externalImage || name !== "mcp__alfred__generate_image");
+  const alfredTools = (offered ? offered.alfred : ALFRED_TOOL_NAMES).filter((name) => !media.externalImage || name !== "mcp__alfred__generate_image");
+  const generateImage = !media.externalImage && (offered ? offered.generateImage : true);
   // Calls of priced external tools count in the run they belong to; a run with no record of its own (a bare query) gets a fresh id.
   const runId = params.run?.id ?? crypto.randomUUID();
   const spend = externalSpendHooks(external, runId);
   postToolUse.push(spend.postToolUse);
   const postToolUseFailure = [disclosure, ...(admission ? [agentFailureHook(admission)] : []), spend.postToolUseFailure];
   // spend_query is the chat's: it needs the owner to ask (like the task tools), and no unattended run has one.
-  const spendQuery = Boolean(params.ask) && !unattended;
+  const spendQuery = Boolean(params.ask) && !unattended && !bot;
   return {
-    model: MODELS[params.model],
+    model: MODELS[bot?.model ?? params.model],
     cwd: WORKSPACE_DIR,
     env: agentEnv(),
     settingSources: [],
     settings: AGENT_SETTINGS,
-    systemPrompt: systemPrompt(new Date(), { rootRules: rules.loadRoot(), memory, subagents, questions: Boolean(params.ask), tasks: Boolean(taskTools), media: media.main }),
+    systemPrompt: systemPrompt(new Date(), {
+      rootRules: rules.loadRoot(),
+      memory,
+      subagents,
+      questions: Boolean(params.ask),
+      tasks: Boolean(taskTools),
+      media: media.main,
+      ...(bot ? { bot: { id: bot.id, name: bot.name, description: bot.description, instructions: bot.instructions }, botRules: rules.loadHome(botHome(bot.id)) } : {}),
+    }),
     tools,
     allowedTools: [...builtin, ...alfredTools, ...(media.main ? MEDIA_TOOL_NAMES : []), ...(replying ? REVISION_TOOL_NAMES : []), ...(taskTools ? TASK_TOOL_NAMES : []), ...(spendQuery ? SPEND_TOOL_NAMES : []), ...offer.allowedTools],
     plugins: skillPlugins(),
     skills: "all",
-    agents: subagents ? subagentDefinitions({ external: subagentExternalTools(external, Boolean(unattended)), generateImage: !media.externalImage }) : undefined,
+    agents: subagents ? subagentDefinitions({ external: subagentExternalTools(external, Boolean(unattended)), generateImage }) : undefined,
     permissionMode: "dontAsk",
     // Second line behind CLAUDE_CODE_FORK_SUBAGENT=0 in agentEnv: the fork type is denied even if the switch is ignored.
     disallowedTools: ["Agent(fork)"],
     // Not a way to grant anything: the CLI enables AskUserQuestion only when a canUseTool is set (see questions.ts).
     canUseTool: params.ask ? denyPermissionPrompts : undefined,
-    mcpServers: { alfred: createAlfredTools(params.out, params.abortController?.signal, params.run, taskTools, params.documents, replying, spendQuery, { mediaOrigins: media.main ? media.origins : [], generateImage: !media.externalImage }), ...offer.mcpServers },
+    mcpServers: { alfred: createAlfredTools(params.out, params.abortController?.signal, params.run, taskTools, params.documents, replying, spendQuery, { mediaOrigins: media.main ? media.origins : [], generateImage }), ...offer.mcpServers },
     // A server's headers travel in the initialize request, never on the command line.
     mcpServersDelivery: "initialize",
     hooks: {
       PreToolUse: [
-        workspaceGuard(WORKSPACE_DIR, unattended ? { readOnly: PROTECTED_PATHS } : {}),
+        workspaceGuard(WORKSPACE_DIR, writeScope({ botId: bot?.id, unattended: Boolean(unattended) })),
         externalToolGuard(external, { unattended: Boolean(unattended), runId }),
         subagentGuard(WORKSPACE_DIR, admission),
         ...(params.ask ? [questionHook(params.ask)] : []),
@@ -675,7 +705,7 @@ export function agentOptions(params: {
     // The reply text arrives as stream events, which the handler publishes as live events.
     includePartialMessages: true,
     maxTurns: MAX_TURNS,
-    maxBudgetUsd: unattended?.budgetUsd ?? setting("runBudgetUsd"),
+    maxBudgetUsd: unattended?.budgetUsd ?? bot?.runBudgetUsd ?? setting("runBudgetUsd"),
     ...(unattended ? { persistSession: false } : {}),
     resume: params.resume,
     abortController: params.abortController,
@@ -810,6 +840,9 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
   const tasks = opts.tasks;
   const documents = opts.documents;
   const ideas = opts.ideas;
+  const bots = opts.bots;
+  /** The key of a chat's runtime and state record: the owner's for Alfred, `bot:<id>` for a bot. */
+  const chatKey = (botId?: string): string => (botId ? `bot:${botId}` : owner);
   /** Runs beside the chat (a task's, a revision's) waiting for their turn, in the order they came. */
   const sideQueue: QueuedSideRun[] = [];
   /** The run beside the chat in progress. One runs at a time, whatever the chat is doing. */
@@ -824,7 +857,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
   let stopListening: (() => void) | undefined;
 
   /** What is said to the owner is recorded as events, with the run it belongs to if any, and the task if it is about one. */
-  const outbound = (runId?: string, taskId?: string): Outbound => recorded(opts.out, events, { workspace: WORKSPACE_DIR, runId, taskId });
+  const outbound = (runId?: string, taskId?: string, botId?: string): Outbound => recorded(opts.out, events, { workspace: WORKSPACE_DIR, runId, taskId, botId });
 
   /**
    * Commits what an ended run wrote and the paths it moved files away from, as `Run <id>: <title>`, and gives the
@@ -894,6 +927,12 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
    */
   function chargeSpend(userId: string, costUsd: number, patch: Partial<AgentUserState> = {}): void {
     if (costUsd <= 0 && Object.keys(patch).length === 0) return;
+    if (userId !== owner) {
+      // The caps and the day's and month's totals are the owner's, whichever bot ran; the bot's record keeps its session's.
+      store.update(userId, patch);
+      chargeSpend(owner, costUsd);
+      return;
+    }
     const user = store.get(userId);
     const next = store.update(userId, {
       ...patch,
@@ -999,7 +1038,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
     let results = 0;
     const options = agentOptions({
       out: run.out,
-      model: unattended?.model ?? user.model,
+      model: unattended?.model ?? run.bot?.model ?? user.model,
       resume,
       abortController: run.abort,
       run: run.recorder,
@@ -1011,6 +1050,12 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
       task: run.task && { budgetUsd: run.task.budgetUsd },
       revision: run.revision && { budgetUsd: run.revision.budgetUsd },
       documents,
+      bot: run.bot,
+      onIgnoredTools: (names) => {
+        if (run.ignoredToolsLogged) return;
+        run.ignoredToolsLogged = true;
+        log.warn(`bot ${run.bot?.id}: ignoring tools that match nothing: ${names.join(", ")}`);
+      },
     });
     run.budgetUsd = options.maxBudgetUsd;
     const q = runQuery({ prompt: run.input, options });
@@ -1118,7 +1163,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
       run.streamMessageId = event.message.id;
     } else if (event.type === "content_block_delta" && event.delta.type === "text_delta" && event.delta.text) {
       const streamId = `${run.streamMessageId ?? run.recorder.id}.${event.index}`;
-      events.publish("message.delta", { runId: run.recorder.id, streamId, text: event.delta.text });
+      events.publish("message.delta", { runId: run.recorder.id, streamId, text: event.delta.text, ...(run.bot ? { botId: run.bot.id } : {}) });
     }
   }
 
@@ -1153,7 +1198,8 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
           settled = true;
           signal.removeEventListener("abort", onAbort);
           rt.questions.delete(id);
-          events.append("question.answered", "answers" in outcome ? { id, runId, answers: outcome.answers } : { id, runId, answers: {}, cancelled: true });
+          const bot = run.bot ? { botId: run.bot.id } : {};
+          events.append("question.answered", "answers" in outcome ? { id, ...bot, runId, answers: outcome.answers } : { id, ...bot, runId, answers: {}, cancelled: true });
           log.info(`question ${id} of run ${runId} ${"answers" in outcome ? "answered" : "cancelled"}`);
           resolve(outcome);
         },
@@ -1162,7 +1208,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
       signal.addEventListener("abort", onAbort, { once: true });
       // Open before anything is sent, so a quick reply finds it.
       rt.questions.set(id, open);
-      events.append("question.asked", { id, runId, questions });
+      events.append("question.asked", { id, ...(run.bot ? { botId: run.bot.id } : {}), runId, questions });
       log.info(`run ${runId} asks question ${id}: ${questions.map((q) => q.question).join(" / ")}`);
     });
   }
@@ -1174,7 +1220,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
 
   /** question.answer: answers an open question with the given answers; see Intake.answerQuestion. */
   async function answerQuestion(id: string, answers: Record<string, string>): Promise<boolean> {
-    const open = runtime(owner).questions.get(id);
+    const open = [...runtimes.values()].map((rt) => rt.questions.get(id)).find((q) => q !== undefined);
     if (!open) return false;
     const texts = new Set(open.questions.map((q) => q.question));
     const stray = Object.keys(answers).find((key) => !texts.has(key));
@@ -1183,25 +1229,27 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
     return true;
   }
 
-  async function runAgent(userId: string, start: Start): Promise<void> {
+  async function runAgent(userId: string, start: Start, bot?: Bot): Promise<void> {
     const { prompt } = start;
     const rt = runtime(userId);
-    const cap = capReached(userId);
+    // The caps are the owner's, whichever bot runs.
+    const cap = capReached(owner);
     if (cap) {
-      log.warn(`${cap === "month" ? "monthly" : "daily"} spend cap reached (${capText(userId, cap)}); not starting a task`);
+      log.warn(`${cap === "month" ? "monthly" : "daily"} spend cap reached (${capText(owner, cap)}); not starting a task`);
       start.recordInbound?.(undefined);
-      await outbound()
-        .text(`${capText(userId, cap)}，新运行${cap === "month" ? "下月" : "明天"}再开始。`)
+      await outbound(undefined, undefined, bot?.id)
+        .text(`${capText(owner, cap)}，新运行${cap === "month" ? "下月" : "明天"}再开始。`)
         .catch(() => {});
       return;
     }
-    const recorder = new RunRecorder({ kind: "task", title: runTitle(prompt), model: MODELS[store.get(userId).model], events });
+    const recorder = new RunRecorder({ kind: "task", title: runTitle(prompt), model: MODELS[bot?.model ?? store.get(userId).model], ...(bot ? { botId: bot.id } : {}), events });
     start.recordInbound?.(recorder.id);
     const background: BackgroundRuns = new BackgroundRuns({
       parentRunId: recorder.id,
       events,
       max: MAX_BACKGROUND_RUNS,
-      overBudget: () => overBudget(userId),
+      overBudget: () => overBudget(owner),
+      ...(bot ? { botId: bot.id } : {}),
       onEnd: commitSubagent,
       release: (brief) => {
         run.releaseUuid = run.input.pushSystem(releaseMessage(brief));
@@ -1214,7 +1262,8 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
       },
     });
     const run: Run = {
-      out: outbound(recorder.id),
+      out: outbound(recorder.id, undefined, bot?.id),
+      bot,
       abort: new AbortController(),
       // The run id rides with the first message, not the system prompt, which then stays cacheable across runs.
       input: new TaskInput(WORKBENCH_ON ? `${runIdNote(recorder.id)}\n\n${prompt}` : prompt, { keepOpen: () => !background.idle }),
@@ -1269,6 +1318,8 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
     };
 
     try {
+      // A bot's home is made when its first run starts.
+      if (bot) ensureBotHome(WORKSPACE_DIR, bot.id);
       let before = store.get(userId);
       const idleSession = before.sessionId;
       const idleHours = setting("sessionIdleHours");
@@ -1278,7 +1329,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
         retired(userId, idleSession, "idle", `idle ${idle} > ${idleHours}h`);
         await run.out.text(`距上次对话已超过 ${idleHours} 小时，已开始新会话（发 /resume 接回上一个会话）。`);
       }
-      log.info(`agent run start run=${recorder.id} model=${before.model} resume=${before.sessionId ?? "none"}`);
+      log.info(`agent run start run=${recorder.id}${bot ? ` bot=${bot.id}` : ""} model=${bot?.model ?? before.model} resume=${before.sessionId ?? "none"}`);
       let outcome: ExecOutcome = await execute(userId, run, before.sessionId, onResult);
       if (outcome.kind === "resume-failed") {
         log.warn(`resume of ${before.sessionId} failed (${outcome.detail}); starting a new session`);
@@ -1347,7 +1398,8 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
       try {
         if (run.shutdown) {
           const named = [recorder, ...orphans].map((r) => ({ id: r.id, title: r.record.title }));
-          store.update(userId, { lostRuns: [...(store.get(userId).lostRuns ?? []), ...named] });
+          // The note of a lost run is Alfred's, whichever chat the run was in.
+          store.update(owner, { lostRuns: [...(store.get(owner).lostRuns ?? []), ...named] });
         }
       } catch (err) {
         log.error(`saving the lost runs failed: ${describeError(err)}`);
@@ -1832,13 +1884,14 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
     }
   }
 
-  async function drain(userId: string, first: Start): Promise<void> {
+  async function drain(userId: string, first: Start, botId?: string): Promise<void> {
     const rt = runtime(userId);
     rt.busy = true;
     try {
       let start: Start | undefined = first;
       while (start) {
-        const task = runAgent(userId, start);
+        // The bot's record as it is now: the owner may have changed it since the last run.
+        const task = runAgent(userId, start, botId ? bots?.get(botId) : undefined);
         inFlight.add(task);
         await task.finally(() => inFlight.delete(task));
         // A message queued behind the run does not start another once a shutdown has begun.
@@ -1876,12 +1929,20 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
    * for a slot; or a run beside the chat, a scheduled task's or a revision's, live or queued (stopSideRun).
    * False when no such run is live, and then nothing is sent.
    */
-  async function stopRun(runId: string): Promise<boolean> {
-    if (await stopSideRun(runId)) return true;
-    const rt = runtime(owner);
+  async function stopRun(runId: string, only?: UserRuntime): Promise<boolean> {
+    // The runs beside the chat are Alfred's; a stop sent in a bot's chat names only that chat's runs.
+    if (!only && (await stopSideRun(runId))) return true;
+    for (const rt of only ? [only] : [...runtimes.values()]) {
+      if (await stopInChat(rt, runId)) return true;
+    }
+    return false;
+  }
+
+  /** The part of stopRun that looks in one chat: its live run, one of its background subagents, or one of its queued ones. */
+  async function stopInChat(rt: UserRuntime, runId: string): Promise<boolean> {
     const run = rt.run;
     if (!run) return false;
-    const out = outbound();
+    const out = outbound(undefined, undefined, run.bot?.id);
     if (runId !== run.recorder.id) {
       // The agent learns it was the user, so it neither restarts the run nor wonders who stopped it.
       const title = [...run.background.running.map((b) => b.recorder), ...run.background.queued.map((b) => b.recorder)].find(
@@ -1965,10 +2026,10 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
     return true;
   }
 
-  async function handleCommand(userId: string, cmd: string, arg: string): Promise<void> {
+  async function handleCommand(userId: string, cmd: string, arg: string, bot?: Bot): Promise<void> {
     const rt = runtime(userId);
     const user = store.get(userId);
-    const out = outbound();
+    const out = outbound(undefined, undefined, bot?.id);
     switch (cmd) {
       case "/help":
         return out.text(help());
@@ -1994,14 +2055,15 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
 
       case "/stop": {
         const target = arg.trim().toLowerCase();
-        const side = target ? await stopSideRun(target) : undefined;
+        const side = target && !bot ? await stopSideRun(target) : undefined;
         if (side) return out.text(side === "revision" ? `已停止修订运行 ${target}。` : `已停止定时任务运行 ${target}。`);
         if (!rt.run) return out.text("当前没有进行中的运行。");
-        if (await stopRun(target || rt.run.recorder.id)) return;
+        if (await stopRun(target || rt.run.recorder.id, rt)) return;
         return out.text(`没有进行中或排队的运行 ${target}。发 /status 查看。`);
       }
 
       case "/model": {
+        if (bot) return out.text(`${bot.name} 的模型由它自己的设置决定（现在是 ${bot.model}），/model 在这里不会改动它。`);
         if (!arg) return out.text(`当前模型：${user.model}（${MODELS[user.model]}）\n可选：sonnet、opus、haiku`);
         const key = arg.toLowerCase();
         if (!isModelKey(key)) return out.text("可选模型：sonnet、opus、haiku");
@@ -2026,11 +2088,14 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
 
       case "/status": {
         const now = Date.now();
-        const lines = [`模型：${user.model}（${MODELS[user.model]}）`, `会话：${sessionStatus(user, now)}`];
+        // The caps and the totals are the owner's, whichever chat asks; the model and the session are the chat's own.
+        const model = bot?.model ?? user.model;
+        const spend = store.get(owner);
+        const lines = [`模型：${model}（${MODELS[model]}）`, `会话：${sessionStatus(user, now)}`];
         if (user.sessionId && !rt.run) lines.push(`空闲：${idleStatus(user, now)}`);
         if (user.previousSession) lines.push(`上一个会话：${user.previousSession.sessionId.slice(0, 8)}，发 /resume 接回`);
         lines.push(
-          `累计花费：${usd(user.totalCostUsd)}，今天 ${usd(spentToday(user))} / 上限 ${usd(dailyBudget())}，本月 ${usd(spentMonth(user))} / 上限 ${usd(monthlyBudget())}`,
+          `累计花费：${usd(spend.totalCostUsd)}，今天 ${usd(spentToday(spend))} / 上限 ${usd(dailyBudget())}，本月 ${usd(spentMonth(spend))} / 上限 ${usd(monthlyBudget())}`,
           `本月外部花费（估算，不计入上限）：${usd(externalMonth())}`,
           rt.run ? `运行：${rt.run.recorder.id}，进行中 ${humanAge(now - rt.run.startedAt)}，${runSummary(rt.run, now)}` : "运行：空闲",
         );
@@ -2041,15 +2106,15 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
         if (rt.run?.input.followUps) lines.push(`追加消息：${rt.run.input.followUps} 条待 Alfred 处理`);
         if (rt.queue.length) lines.push(`排队：${rt.queue.length} 条`);
         if (rt.attachments.length) lines.push(`待处理附件：${rt.attachments.join("、")}`);
-        if (sideRun) {
+        if (sideRun && !bot) {
           const { recorder } = sideRun;
           const what = sideRun.revision ? `修订运行 ${recorder.id}：${recorder.record.title}` : `定时任务运行 ${recorder.id}「${recorder.record.title}」`;
           lines.push(`${what}，进行中 ${humanAge(now - sideRun.startedAt)}，${runSummary(sideRun, now)}`);
         }
         const queuedTasks = sideQueue.filter((item) => item.kind === "task").length;
-        if (queuedTasks) lines.push(`排队的定时任务运行：${queuedTasks} 个`);
-        if (sideQueue.length > queuedTasks) lines.push(`排队的修订运行：${sideQueue.length - queuedTasks} 个`);
-        for (const t of tasks?.list() ?? []) {
+        if (queuedTasks && !bot) lines.push(`排队的定时任务运行：${queuedTasks} 个`);
+        if (sideQueue.length > queuedTasks && !bot) lines.push(`排队的修订运行：${sideQueue.length - queuedTasks} 个`);
+        for (const t of bot ? [] : (tasks?.list() ?? [])) {
           if (t.status === "active" && t.nextRunAt) lines.push(`定时任务 ${t.id}「${t.title}」：下次 ${localStamp(new Date(t.nextRunAt))}`);
         }
         if (WORKBENCH_URL) lines.push(`工作台：${WORKBENCH_URL}`);
@@ -2067,20 +2132,28 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
    * the task, or the one that starts a task (with the new run id).
    */
   async function intake(inbound: Inbound): Promise<void> {
-    const userId = owner;
+    const bot = inbound.botId ? bots?.get(inbound.botId) : undefined;
+    const userId = chatKey(bot?.id);
     const rt = runtime(userId);
-    const out = outbound();
+    const out = outbound(undefined, undefined, bot?.id);
+    const who = bot?.name ?? "Alfred";
+    if (inbound.botId && !bot) {
+      // The API answers 404 before a message for an unknown bot gets here; this keeps such a message out of Alfred's chat all the same.
+      await outbound().text(`没有这个助手：${inbound.botId}。`);
+      return;
+    }
     const trimmed = inbound.text.trim();
     const record = (runId?: string) => recordInbound(events, out.channel, inbound, runId);
 
     // The owner wrote, so say once which runs a restart cut short. The note answers this message: it goes out
     // once the message is recorded, so the log shows the message before it.
-    const { lostRuns } = store.get(userId);
+    // That note, and the task and revision deliveries below, are Alfred's: a bot's chat leaves them for the owner's next message to Alfred.
+    const lostRuns = bot ? undefined : store.get(owner).lostRuns;
     const sendNote = async (): Promise<void> => {
       if (!lostRuns?.length) return;
       try {
         await out.text(lostNote(lostRuns));
-        store.update(userId, { lostRuns: undefined });
+        store.update(owner, { lostRuns: undefined });
       } catch (err) {
         log.warn(`lost-runs note failed: ${describeError(err)}`);
       }
@@ -2090,7 +2163,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
       record();
       await sendNote();
       const [cmd = "", ...rest] = trimmed.split(/\s+/);
-      await handleCommand(userId, cmd.toLowerCase(), rest.join(" "));
+      await handleCommand(userId, cmd.toLowerCase(), rest.join(" "), bot);
       return;
     }
 
@@ -2115,14 +2188,14 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
 
     const runs = runIdCandidates(trimmed).flatMap((id) => findRun(id) ?? []);
     // The task runs delivered and the revision runs ended since the owner last wrote ride with this message, once.
-    const { taskDeliveries: deliveries = [], revisionDeliveries: revisions = [] } = store.get(userId);
-    if (deliveries.length || revisions.length) store.update(userId, { taskDeliveries: undefined, revisionDeliveries: undefined });
+    const { taskDeliveries: deliveries = [], revisionDeliveries: revisions = [] } = bot ? {} : store.get(owner);
+    if (deliveries.length || revisions.length) store.update(owner, { taskDeliveries: undefined, revisionDeliveries: undefined });
     const prompt = buildPrompt(trimmed, { attachments: rt.attachments.splice(0), runs, deliveries, revisions });
     const live = rt.run;
     if (live?.input.push(prompt)) {
       record(live.recorder.id);
       await sendNote();
-      await out.text("收到，会在当前步骤结束后转给 Alfred。");
+      await out.text(`收到，会在当前步骤结束后转给 ${who}。`);
       return;
     }
     if (rt.busy) {
@@ -2133,7 +2206,7 @@ export function createAgentHandler(opts: AgentHandlerOptions): AgentHandler {
       return;
     }
     // The run records the message as soon as it has its id, before drain() first yields.
-    void drain(userId, { prompt, recordInbound: record });
+    void drain(userId, { prompt, recordInbound: record }, bot?.id);
     await sendNote();
   }
 
