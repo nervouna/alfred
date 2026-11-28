@@ -54,6 +54,8 @@ export interface Inbound {
   files: FileRef[];
   /** The id the client gave the message; echoed on its event. */
   clientId?: string;
+  /** The bot the message was sent to; Alfred's messages carry none. */
+  botId?: string;
 }
 
 /** What the channel talks to: the owner's intake queue. */
@@ -122,16 +124,18 @@ function recordMessage(
     runId?: string;
     taskId?: string;
     clientId?: string;
+    botId?: string;
     error?: string;
   },
 ): void {
   // A message with neither text nor files leaves nothing to show.
   if (!message.text.trim() && message.files.length === 0) return;
-  const { runId, taskId, clientId, error, ...rest } = message;
+  const { runId, taskId, clientId, botId, error, ...rest } = message;
   events.append("message.created", {
     id: crypto.randomUUID(),
     ...rest,
     at: new Date().toISOString(),
+    ...(botId ? { botId } : {}),
     ...(runId ? { runId } : {}),
     ...(taskId ? { taskId } : {}),
     ...(clientId ? { clientId } : {}),
@@ -141,7 +145,7 @@ function recordMessage(
 
 /** Records a message from the owner on `channel`, with its files and the run it started or steered, if any. */
 export function recordInbound(events: EventLog, channel: Channel, inbound: Inbound, runId?: string): void {
-  recordMessage(events, { channel, direction: "in", text: inbound.text, files: inbound.files, runId, clientId: inbound.clientId });
+  recordMessage(events, { channel, direction: "in", text: inbound.text, files: inbound.files, runId, clientId: inbound.clientId, botId: inbound.botId });
 }
 
 /**
@@ -149,9 +153,9 @@ export function recordInbound(events: EventLog, channel: Channel, inbound: Inbou
  * with the error when the channel refused it. A caption and its file are two
  * messages. The output of a task's run passes the task's id, which goes on each message.
  */
-export function recorded(out: Outbound, events: EventLog, opts: { workspace: string; runId?: string; taskId?: string }): Outbound {
+export function recorded(out: Outbound, events: EventLog, opts: { workspace: string; runId?: string; taskId?: string; botId?: string }): Outbound {
   const record = (text: string, files: FileRef[], error?: string) =>
-    recordMessage(events, { channel: out.channel, direction: "out", text, files, runId: opts.runId, taskId: opts.taskId, error });
+    recordMessage(events, { channel: out.channel, direction: "out", text, files, runId: opts.runId, taskId: opts.taskId, botId: opts.botId, error });
   const text = async (body: string, files: FileRef[] = []): Promise<void> => {
     try {
       await out.text(body, files);

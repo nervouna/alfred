@@ -32,7 +32,7 @@ Claude owns and maintains this codebase. The owner set the requirements (#239 an
 ## Rules
 
 - No new dependencies unless the issue says so; prefer `node:` built-ins and what `package.json` has. Reuse what the Agent SDK provides before writing Alfred code.
-- Hard boundaries: the workspace (`src/agent/guard.ts`); nothing the agent can write becomes executable; instructions and memory change only on explicit request; only Alfred talks to the owner; spend caps.
+- Hard boundaries: the workspace (`src/agent/guard.ts`); nothing the agent can write becomes executable; instructions and memory change only on explicit request; only a bot's main agent talks to the owner; spend caps.
 - Commit messages and PR titles are plain imperative sentences ("Add …"), no type prefixes.
 - The repo is public: never describe an exploit, a sandbox escape, or host details in commits, PRs or issues.
 - Deployment (the `deploy` skill) is the orchestrator's, not an implementer's. PRs merge with the method the repository allows (`gh api repos/nervouna/alfred --jq .allow_squash_merge,.allow_merge_commit`; squash only since 2026-11-27, so `gh pr merge --squash`, and the PR title becomes the commit) once `check`, `alfredkit` and `app` pass: no check is required, so auto-merge cannot be set while they run; afterwards remove that PR's worktree and local branch, and only those of PRs you dispatched.

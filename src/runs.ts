@@ -53,6 +53,8 @@ export interface Undelivered {
 export interface RunRecord {
   id: string;
   kind: RunKind;
+  /** The bot whose chat this run belongs to; Alfred's runs have none. */
+  botId?: string;
   /** The task this run is a run of; chat runs have none. */
   taskId?: string;
   /** The document a revision run revises. */
@@ -325,6 +327,8 @@ export class RunRecorder {
     kind: RunKind;
     title: string;
     model?: string;
+    /** The bot whose chat this run belongs to; left out for Alfred's. */
+    botId?: string;
     /** The task this run is a run of. */
     taskId?: string;
     /** The document this run revises. */
@@ -346,6 +350,7 @@ export class RunRecorder {
     this.file = {
       id: this.id,
       kind: init.kind,
+      ...(init.botId ? { botId: init.botId } : {}),
       ...(init.taskId ? { taskId: init.taskId } : {}),
       ...(init.documentId ? { documentId: init.documentId } : {}),
       title: init.title,

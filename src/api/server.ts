@@ -12,6 +12,7 @@ import http from "node:http";
 import path from "node:path";
 
 import { resolveInside } from "../agent/guard.ts";
+import type { BotStore } from "../bots/store.ts";
 import { InvalidAnswer } from "../channels.ts";
 import type { Intake } from "../channels.ts";
 import { type EventLog, isLiveEvent } from "../events.ts";
@@ -133,6 +134,8 @@ export interface ApiOptions {
   /** Where commands go: the agent handler's intake. */
   handler: Intake;
   events: ApiEvents;
+  /** The owner's bots: a message.send with a botId goes to that bot's chat. Without it such a message answers 503, and an unknown bot 404 with it. */
+  bots?: Pick<BotStore, "get">;
   /** Where task commands go, once the task store is wired in; without it every task command answers 503. */
   tasks?: TaskCommands;
   /** Where document commands go, once the document store is wired in; without it every document command answers 503. */
@@ -284,7 +287,7 @@ function receiveUpload(req: http.IncomingMessage, file: string): Promise<number 
 
 /** Start the API; resolves to a function that closes it. */
 export async function startApi(opts: ApiOptions): Promise<() => Promise<void>> {
-  const { socket, handler, events, tasks, documents, ideas, rules, memory, settings } = opts;
+  const { socket, handler, events, bots, tasks, documents, ideas, rules, memory, settings } = opts;
   const heartbeatMs = opts.heartbeatMs ?? HEARTBEAT_MS;
   const pageSize = opts.pageSize ?? BACKLOG_PAGE;
 
@@ -318,12 +321,18 @@ export async function startApi(opts: ApiOptions): Promise<() => Promise<void>> {
     const parsed = parseCommand(json);
     if (!parsed.ok) return sendJson(res, 400, { error: parsed.error });
 
-    // A command for a bot other than Alfred is refused with 503 until the bot store exists. "alfred" means the same as no
-    // botId, and the key is dropped, so nothing downstream sees it.
+    // "alfred" means the same as no botId, and the key is dropped, so nothing downstream sees it. A message for another bot goes
+    // to the handler with the bot's id when the store has the bot; 404 when it does not. Tasks of bots come later, and without a
+    // bot store neither command can be served: both answer 503.
     let { command } = parsed;
+    let forBot: string | undefined;
     if (command.type === "message.send" || command.type === "task.create") {
       const { botId, ...rest } = command;
-      if (botId !== undefined && botId !== DEFAULT_BOT_ID) return sendJson(res, 503, { error: "bots are not available" });
+      if (botId !== undefined && botId !== DEFAULT_BOT_ID) {
+        if (!bots || command.type === "task.create") return sendJson(res, 503, { error: "bots are not available" });
+        if (!bots.get(botId)) return sendJson(res, 404, { error: `no bot ${botId}` });
+        forBot = botId;
+      }
       command = rest as typeof command;
     }
     if (command.type === "run.stop") {
@@ -414,7 +423,7 @@ export async function startApi(opts: ApiOptions): Promise<() => Promise<void>> {
     // Remembered before the handler is awaited, so a second post of the same id meanwhile is a duplicate.
     remember(command.clientId);
     try {
-      await handler.submit({ text: command.text, clientId: command.clientId, files });
+      await handler.submit({ text: command.text, clientId: command.clientId, files, ...(forBot ? { botId: forBot } : {}) });
     } catch (err) {
       accepted.delete(command.clientId);
       throw err;

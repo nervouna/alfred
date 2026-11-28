@@ -93,10 +93,26 @@ export interface ReadOnlyPaths {
   names: readonly string[];
 }
 
-export interface GuardOptions {
-  /** Every tool call that writes here is denied, whoever makes it: the run's own thread or a subagent. */
+/**
+ * Where a run may write, enforced on every tool call of the run's own thread and of its subagents. Paths are
+ * workspace-relative prefixes in any case, spelled with `/`. A scope with no field set is the whole workspace.
+ */
+export interface WriteScope {
+  /** When set, writes are allowed only under these prefixes (a prefix names a folder or a file); every other write is denied. */
+  allow?: readonly string[];
+  /** Writes here are denied, whoever makes them, unless the path is under one of `except`. */
   readOnly?: ReadOnlyPaths;
+  /** Prefixes the `readOnly` folders and names do not apply under: a bot's own home, whose ALFRED.md it may change. */
+  except?: readonly string[];
 }
+
+export type GuardOptions = WriteScope;
+
+/** Where generate_image and save_media write when the call names no output: the folders their defaults live in (see image.ts and media.ts). */
+const DEFAULT_OUTPUTS: Record<string, string[]> = {
+  mcp__alfred__generate_image: ["images"],
+  mcp__alfred__save_media: ["images", "video", "audio"],
+};
 
 /** The paths a tool call writes to, as it spells them. */
 function writtenPaths(toolName: string, input: Record<string, unknown>): string[] {
@@ -109,35 +125,46 @@ function writtenPaths(toolName: string, input: Record<string, unknown>): string[
   if (toolName === "mcp__alfred__render_pdf" && !named.length && typeof source === "string" && source) {
     return [`${source.slice(0, source.length - path.extname(source).length)}.pdf`];
   }
-  return named;
+  return named.length ? named : (DEFAULT_OUTPUTS[toolName] ?? []);
 }
 
-/** The path, as the call spelled it, where a tool call would write inside `readOnly`; undefined when it writes nowhere there. */
-export function readOnlyWrite(root: string, toolName: string, input: Record<string, unknown>, readOnly: ReadOnlyPaths): string | undefined {
+function segmentsUnder(rel: string[], prefix: string): boolean {
+  const parts = prefix.split("/").filter(Boolean);
+  return parts.length <= rel.length && parts.every((part, i) => rel[i]?.toLowerCase() === part.toLowerCase());
+}
+
+/** What a write scope refuses in a tool call: the path as the call spelled it and the reason; undefined when the call writes only where the scope lets it. */
+export function scopeViolation(root: string, toolName: string, input: Record<string, unknown>, scope: WriteScope): { path: string; reason: string } | undefined {
   const rootReal = fs.realpathSync(root);
-  const dirs = readOnly.dirs.map((dir) => dir.toLowerCase());
-  const names = readOnly.names.map((name) => name.toLowerCase());
+  const dirs = (scope.readOnly?.dirs ?? []).map((dir) => dir.toLowerCase());
+  const names = (scope.readOnly?.names ?? []).map((name) => name.toLowerCase());
   for (const p of writtenPaths(toolName, input)) {
     const real = resolveInside(root, p);
     if (!real) continue; // The workspace check refuses paths outside the workspace.
-    const rel = path.relative(rootReal, real);
-    const top = rel.split(path.sep)[0]?.toLowerCase();
-    if ((top && dirs.includes(top)) || names.includes(path.basename(rel).toLowerCase())) return p;
+    const relPath = path.relative(rootReal, real);
+    const rel = relPath ? relPath.split(path.sep) : [];
+    if (scope.allow && !scope.allow.some((prefix) => segmentsUnder(rel, prefix))) {
+      const where = scope.allow.map((prefix) => `${prefix}/`).join(", ");
+      return { path: p, reason: `${p} is outside where this run may write: only ${where} may be changed, the rest of the workspace may be read. Say in your final message what should change instead.` };
+    }
+    if (scope.except?.some((prefix) => segmentsUnder(rel, prefix))) continue;
+    const top = rel[0]?.toLowerCase();
+    if ((top && dirs.includes(top)) || names.includes(path.basename(relPath).toLowerCase())) {
+      const places = [...(scope.readOnly?.dirs ?? []).map((dir) => `${dir}/`), ...(scope.readOnly?.names ?? []).map((name) => `${name} files`)];
+      return { path: p, reason: `${p} is read-only in this run: ${places.join(", ")} may be read but not changed. Say in your final message what should change instead.` };
+    }
   }
   return undefined;
 }
 
-/** Returns a denial reason when a tool call would touch anything outside `root`, a `.git` path, or write to a path `options.readOnly` names. */
-export function checkToolInput(root: string, toolName: string, input: Record<string, unknown>, options: GuardOptions = {}): string | undefined {
-  return gitDirReason(toolName, input) ?? checkWorkspace(root, toolName, input) ?? checkReadOnly(root, toolName, input, options.readOnly);
+/** The path, as the call spelled it, where a tool call would write inside `readOnly`; undefined when it writes nowhere there. */
+export function readOnlyWrite(root: string, toolName: string, input: Record<string, unknown>, readOnly: ReadOnlyPaths): string | undefined {
+  return scopeViolation(root, toolName, input, { readOnly })?.path;
 }
 
-function checkReadOnly(root: string, toolName: string, input: Record<string, unknown>, readOnly: ReadOnlyPaths | undefined): string | undefined {
-  if (!readOnly) return undefined;
-  const p = readOnlyWrite(root, toolName, input, readOnly);
-  if (p === undefined) return undefined;
-  const places = [...readOnly.dirs.map((dir) => `${dir}/`), ...readOnly.names.map((name) => `${name} files`)];
-  return `${p} is read-only in this run: ${places.join(", ")} may be read but not changed. Say in your final message what should change instead.`;
+/** Returns a denial reason when a tool call would touch anything outside `root`, a `.git` path, or write where the write scope `options` does not let the run. */
+export function checkToolInput(root: string, toolName: string, input: Record<string, unknown>, options: GuardOptions = {}): string | undefined {
+  return gitDirReason(toolName, input) ?? checkWorkspace(root, toolName, input) ?? scopeViolation(root, toolName, input, options)?.reason;
 }
 
 function checkWorkspace(root: string, toolName: string, input: Record<string, unknown>): string | undefined {

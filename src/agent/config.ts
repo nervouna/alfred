@@ -3,6 +3,7 @@ import path from "node:path";
 import type { AgentDefinition, Settings as ClaudeCodeSettings } from "@anthropic-ai/claude-agent-sdk";
 
 import type { Settings } from "../api/schema.ts";
+import { botHome } from "../bots/home.ts";
 import { STATE_DIR } from "../store.ts";
 import { SPLIT } from "./reply.ts";
 import { rulesPromptSection } from "./rules.ts";
@@ -235,7 +236,7 @@ export function runCardUrl(runId: string): string | undefined {
 /** Isolated Claude Code config dir: session transcripts live here, apart from the user's own Claude Code. */
 export const AGENT_CONFIG_DIR = path.join(STATE_DIR, "claude");
 
-const FILE_TOOLS = ["Read", "Write", "Edit", "Glob", "Grep"];
+export const FILE_TOOLS = ["Read", "Write", "Edit", "Glob", "Grep"];
 const WEB_TOOLS = ["WebSearch", "WebFetch"];
 /**
  * Skill loads a skill's instructions; Agent starts subagents; TaskStop stops a
@@ -469,6 +470,33 @@ export function runIdNote(runId: string): string {
   return `[Alfred] This task is run ${runId} on the workbench.`;
 }
 
+/** What the system prompt takes from a bot's record. */
+export interface PromptBot {
+  id: string;
+  name: string;
+  description: string;
+  /** The owner's instructions for the bot (its role prompt). */
+  instructions: string;
+}
+
+/** The section of a bot's prompt that says what it is for, in the owner's words. */
+function botSection(bot: PromptBot): string {
+  return `# Your role
+${bot.description}
+
+The owner's instructions for ${bot.name}. Only the owner sets them, and they stand for this whole conversation:
+<owner-instructions>
+${bot.instructions}
+</owner-instructions>`;
+}
+
+/** The Workspace section of a bot's prompt: where its files go and where it may write. */
+function botWorkspace(bot: PromptBot): string {
+  const home = botHome(bot.id);
+  return `# Workspace
+Your working directory is the workspace, and nothing outside it is accessible. Your home is ${home}/: files you keep go there, reports in ${home}/reports/ and notes in ${home}/notes/. You may write only your home, memory/ and .trash/ (move a file there to delete it); the rest of the workspace, other bots' homes included, you may read but not change. When a tool takes an output path (an image, a PDF, saved media), name one under ${home}/. Files the user sends are saved under inbox/<date>/ at the workspace root; when a message lists attached files, read them with the Read tool, which handles images and PDFs. Long-term memory lives in memory/ and is the same for every assistant (see Long-term memory below). Where everything else goes is set by the workspace rules below.`;
+}
+
 /** Per-task inputs to the system prompt beyond the date. */
 export interface PromptContext {
   /** Root ALFRED.md; undefined when the workspace has none. */
@@ -483,6 +511,10 @@ export interface PromptContext {
   media?: boolean;
   /** Whether the task tools are offered, so the prompt says how to use them; default false. */
   tasks?: boolean;
+  /** The bot this run is the chat of, which then stands in for Alfred in the prompt. Without it the prompt is Alfred's. */
+  bot?: PromptBot;
+  /** The bot's own `bots/<id>/ALFRED.md`, which follows the root file; undefined when it has none. */
+  botRules?: RulesFile;
   /** Whether the workbench section is included; default WORKBENCH_ON. */
   workbench?: boolean;
   /** The workbench's base URL for links; default WORKBENCH_URL. */
@@ -514,7 +546,15 @@ export function systemPrompt(now: Date, context: PromptContext = {}): string {
   const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const date = now.toLocaleDateString("en-CA", { timeZone: tz });
   const weekday = now.toLocaleDateString("en-US", { weekday: "long", timeZone: tz });
-  const core = `You are Alfred, a personal research assistant for one person. They talk to you through the app on their phone and see only your final reply, never your tool calls.
+  const bot = context.bot;
+  const opening = bot
+    ? `You are ${bot.name}, one of the owner's assistants in the Alfred app. They talk to you through the app on their phone and see only your final reply, never your tool calls.\n\n${botSection(bot)}`
+    : "You are Alfred, a personal research assistant for one person. They talk to you through the app on their phone and see only your final reply, never your tool calls.";
+  const workspace = bot
+    ? botWorkspace(bot)
+    : `# Workspace
+Your working directory is the workspace, and nothing outside it is accessible. Files the user sends are saved under inbox/<date>/; when a message lists attached files, read them with the Read tool, which handles images and PDFs. Long-term memory lives in memory/ (see Long-term memory below). The folder bots/ belongs to the owner's other assistants: you may read it but not change it. Where everything else goes is set by the workspace rules below.`;
+  const core = `${opening}
 
 Today is ${date} (${weekday}), time zone ${tz}.
 
@@ -525,8 +565,7 @@ Today is ${date} (${weekday}), time zone ${tz}.
 - Skills: when a skill in the Skill tool's listing covers the task, invoke it before you start and follow it, e.g. html-report before writing any HTML report.
 - Images: generate_image makes images when the user asks for one, or illustrative visuals for reports such as a cover. Never generate an image to show data; draw charts as inline SVG. Each call is billed to the user's quota, even when it fails, so make one image unless asked for more and never retry a failed call on your own. Read every generated image before sending or embedding it, to check that it shows what was asked.
 
-# Workspace
-Your working directory is the workspace, and nothing outside it is accessible. Files the user sends are saved under inbox/<date>/; when a message lists attached files, read them with the Read tool, which handles images and PDFs. Long-term memory lives in memory/ (see Long-term memory below). Where everything else goes is set by the workspace rules below.
+${workspace}
 
 # Replying in the app
 - Reply in Simplified Chinese unless the user writes in another language.
@@ -550,6 +589,6 @@ Your working directory is the workspace, and nothing outside it is accessible. F
   if (context.subagents !== false) sections.push(delegationSection());
   if (context.tasks) sections.push(tasksSection(tz));
   if (context.media) sections.push(MEDIA_SECTION);
-  sections.push(rulesPromptSection(context.rootRules), memorySection(context.memory ?? { lines: [], total: 0 }));
+  sections.push(rulesPromptSection(context.rootRules, context.botRules), memorySection(context.memory ?? { lines: [], total: 0 }));
   return sections.join("\n\n");
 }

@@ -8,15 +8,16 @@ import type { query } from "@anthropic-ai/claude-agent-sdk";
 
 import { createAgentHandler } from "../src/agent/handler.ts";
 import type { AgentHandler } from "../src/agent/handler.ts";
+import type { BotStore } from "../src/bots/store.ts";
 import { appOutbound } from "../src/channels.ts";
 import type { Documents } from "../src/documents/register.ts";
 import type { IdeaStore } from "../src/ideas/store.ts";
 import type { SettingsStore } from "../src/settings/store.ts";
 import type { TaskStore } from "../src/tasks/store.ts";
 
-/** The agent handler for the owner, with the app as its only channel. With a task store it runs the tasks when they fall due, polling every `taskPollMs` (30 s by default). `runQuery` replaces the SDK's query (the compact scenario watches its messages). `documents` is what startDocuments (src/documents/startup.ts) opens: with it, files delivered become documents and runs commit their files, as in `run`. With `ideas` (the one idea store) the handler generates ideas. With `settings` (the one settings store) it follows the owner's settings. */
+/** The agent handler for the owner, with the app as its only channel. With a task store it runs the tasks when they fall due, polling every `taskPollMs` (30 s by default). `runQuery` replaces the SDK's query (the compact scenario watches its messages). `documents` is what startDocuments (src/documents/startup.ts) opens: with it, files delivered become documents and runs commit their files, as in `run`. With `ideas` (the one idea store) the handler generates ideas. With `settings` (the one settings store) it follows the owner's settings. With `bots` (the one bot store) a message sent to a bot starts a run of that bot. */
 export function createLocalHandler(
-  options: { tasks?: TaskStore; taskPollMs?: number; runQuery?: typeof query; documents?: Documents; ideas?: IdeaStore; settings?: SettingsStore } = {},
+  options: { tasks?: TaskStore; taskPollMs?: number; runQuery?: typeof query; documents?: Documents; ideas?: IdeaStore; settings?: SettingsStore; bots?: BotStore } = {},
 ): AgentHandler {
   return createAgentHandler({ out: appOutbound(), ...options });
 }

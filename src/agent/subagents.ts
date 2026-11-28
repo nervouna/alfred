@@ -7,10 +7,12 @@
 
 import type { HookCallbackMatcher, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 
+import { BOTS_DIR, botHome } from "../bots/home.ts";
+import { TRASH_DIR } from "../documents/trash.ts";
 import { log } from "../log.ts";
 import { SUBAGENT_RULES } from "./config.ts";
 import { readOnlyWrite } from "./guard.ts";
-import type { ReadOnlyPaths } from "./guard.ts";
+import type { ReadOnlyPaths, WriteScope } from "./guard.ts";
 import { RULES_FILE } from "./rules.ts";
 import { SKILLS_DIR } from "./skills.ts";
 import { TASK_TOOL_NAMES } from "./task-tools.ts";
@@ -63,6 +65,20 @@ export const unattendedAdmission: AgentAdmission = {
 
 /** What only Alfred's main thread changes, and only when the owner asks: long-term memory, skills and the workspace rules files. */
 export const PROTECTED_PATHS: ReadOnlyPaths = { dirs: ["memory", SKILLS_DIR], names: [RULES_FILE] };
+
+/**
+ * Where a run may write (#274, "Who writes where"), given whose run it is. Alfred's chat writes everywhere but the other bots'
+ * homes; Alfred's unattended runs add what PROTECTED_PATHS holds; a bot's chat writes only its home, memory/ and .trash/, and
+ * never skills/ or an ALFRED.md outside its home. The guard applies it to the run's own thread and to its subagents.
+ */
+export function writeScope(run: { botId?: string; unattended?: boolean }): WriteScope {
+  if (run.botId !== undefined) {
+    const home = botHome(run.botId);
+    return { allow: [home, "memory", TRASH_DIR], readOnly: { dirs: [SKILLS_DIR], names: [RULES_FILE] }, except: [home] };
+  }
+  const protectedPaths = run.unattended ? PROTECTED_PATHS : { dirs: [], names: [] };
+  return { readOnly: { dirs: [...protectedPaths.dirs, BOTS_DIR], names: protectedPaths.names } };
+}
 
 /** Returns a denial reason when a subagent's tool call would change long-term memory, a skill or a workspace rules file. */
 export function checkSubagentWrite(root: string, toolName: string, input: Record<string, unknown>): string | undefined {

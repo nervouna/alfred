@@ -120,7 +120,7 @@ let fixtures = 0;
 /** An API on a socket of its own, with a stub handler and an event log of its own. */
 async function start(
   t: TestContext,
-  opts: { heartbeatMs?: number; pageSize?: number; tasks?: TaskCommands; documents?: DocumentCommands; ideas?: IdeaCommands; rules?: RulesCommands; memory?: MemoryCommands; settings?: SettingsCommands } = {},
+  opts: { heartbeatMs?: number; pageSize?: number; bots?: Parameters<typeof startApi>[0]["bots"]; tasks?: TaskCommands; documents?: DocumentCommands; ideas?: IdeaCommands; rules?: RulesCommands; memory?: MemoryCommands; settings?: SettingsCommands } = {},
 ) {
   const dir = path.join(tmp, `t${fixtures++}`);
   const socket = path.join(dir, "api", "a.sock");
@@ -1544,6 +1544,37 @@ test("a command for a bot other than Alfred gets 503, and never reaches the hand
     assert.equal(handler.submitted.length, 0, "submit was not called");
   }
   assert.deepEqual(tasks.created, [], "the task store was not called");
+});
+
+test("a message for a bot the store has goes to the handler with the bot's id; an unknown bot is 404; task.create for a bot is still 503", async (t) => {
+  const tasks = stubTasks();
+  const { socket, handler } = await start(t, { tasks, bots: { get: (id: string) => (id === "x" ? { id } : undefined) } as never });
+  const sent = await post(socket, fixture("commands", "message-send-bot.json"));
+  assert.equal(sent.status, 202);
+  assert.deepEqual(handler.submitted, [{ text: "看一下今天关注列表里的新动态", clientId: "c-x-3d81", files: [], botId: "x" }]);
+
+  const unknown = await post(socket, { ...JSON.parse(fixture("commands", "message-send-bot.json")), botId: "nope", clientId: "c-nope" });
+  assert.equal(unknown.status, 404);
+  assert.deepEqual(unknown.json(), { error: "no bot nope" });
+  assert.equal(handler.submitted.length, 1, "an unknown bot's message did not reach the handler");
+
+  const created = await post(socket, fixture("commands", "task-create-bot.json"));
+  assert.equal(created.status, 503);
+  assert.deepEqual(created.json(), { error: "bots are not available" });
+  assert.deepEqual(tasks.created, [], "the task store was not called");
+});
+
+test("a message for a bot without a bot store stays 503, and one for Alfred carries no botId even with a store", async (t) => {
+  const { socket, handler } = await start(t);
+  const refused = await post(socket, fixture("commands", "message-send-bot.json"));
+  assert.equal(refused.status, 503);
+  assert.deepEqual(refused.json(), { error: "bots are not available" });
+  assert.equal(handler.submitted.length, 0);
+
+  const withStore = await start(t, { bots: { get: () => ({}) } as never });
+  const alfred = await post(withStore.socket, { ...JSON.parse(fixture("commands", "message-send.json")), botId: "alfred" });
+  assert.equal(alfred.status, 202);
+  assert.equal(Object.hasOwn(withStore.handler.submitted[0] ?? {}, "botId"), false);
 });
 
 test("message.send and task.create with botId alfred behave as without it, and the key is dropped", async (t) => {
